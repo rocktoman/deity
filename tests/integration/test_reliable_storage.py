@@ -103,3 +103,42 @@ async def test_artifact_reference_reads_only_committed_redacted_tool_body(tmp_pa
     with pytest.raises(KeyError):
         await repo.artifact_content(run_id, "not-committed")
     await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_storage_failure_rolls_back_outcome_and_completion_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = await SQLiteSessionRepository.open(tmp_path / "deity.db")
+    run_id = await repo.create_run(AgentRequest("s", "t", str(tmp_path), "goal", "fake"))
+    assert await repo.claim_tool(run_id, "c1", "write_file", {"path": "a"})
+
+    async def disk_full(run_id: str, payload: dict[str, object]) -> None:
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(repo, "_context_message", disk_full)
+    with pytest.raises(sqlite3.OperationalError):
+        await repo.record_tool(run_id, ToolResult("c1", "ok", "written"))
+    assert not any(event["type"] == "ToolCompleted" for event in await repo.events(run_id))
+    assert (await repo.unresolved_tools(run_id))[0]["status"] == "pending"
+    await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_publish_failure_after_commit_is_reconciled_by_call_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = await SQLiteSessionRepository.open(tmp_path / "deity.db")
+    run_id = await repo.create_run(AgentRequest("s", "t", str(tmp_path), "goal", "fake"))
+    assert await repo.claim_tool(run_id, "c1", "write_file", {"path": "a"})
+
+    async def publish_lost(run_id: str, kind: str) -> None:
+        raise OSError("publish lost")
+
+    monkeypatch.setattr(repo, "_publish", publish_lost)
+    with pytest.raises(OSError):
+        await repo.record_tool(run_id, ToolResult("c1", "ok", "written"))
+    assert any(event["type"] == "ToolCompleted" for event in await repo.events(run_id))
+    assert await repo.unresolved_tools(run_id) == []
+    assert not await repo.claim_tool(run_id, "c1", "write_file", {"path": "a"})
+    await repo.close()

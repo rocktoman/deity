@@ -11,13 +11,18 @@ ROOT = Path(__file__).parents[2]
 CASES = ROOT / "evals/cases"
 
 
-def run_case(case_id: str, selector: str | list[str], reports: Path) -> dict[str, Any]:
+def run_case(
+    case_id: str,
+    selector: str | list[str],
+    reports: Path,
+    pytest_args: list[str] | None = None,
+) -> dict[str, Any]:
     """Execute one isolated pytest selector and persist its outcome."""
     reports.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     selectors = [selector] if isinstance(selector, str) else selector
     completed = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", *selectors],
+        [sys.executable, "-m", "pytest", "-q", *(pytest_args or []), *selectors],
         cwd=ROOT,
         capture_output=True,
         text=True,

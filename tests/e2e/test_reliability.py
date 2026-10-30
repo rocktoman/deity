@@ -4,6 +4,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -111,7 +112,8 @@ async def test_r03_two_processes_cannot_own_same_run(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_r04_shell_cancel_converges_within_five_seconds(tmp_path: Path) -> None:
+@pytest.mark.parametrize("sample", range(5))
+async def test_r04_shell_cancel_converges_within_five_seconds(tmp_path: Path, sample: int) -> None:
     dispatcher = LocalToolDispatcher(approve=lambda name, args: True)
     request = AgentRequest("s", "t", str(tmp_path), "goal", "fake")
     task = asyncio.create_task(
@@ -122,7 +124,9 @@ async def test_r04_shell_cancel_converges_within_five_seconds(tmp_path: Path) ->
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert time.monotonic() - started < 5
+    elapsed_ms = (time.monotonic() - started) * 1000
+    print(f"R04_LATENCY shell {elapsed_ms:.3f}")
+    assert elapsed_ms < 5000
 
 
 @pytest.mark.asyncio
@@ -145,6 +149,112 @@ async def test_r05_auth_failure_never_retries(tmp_path: Path) -> None:
             AgentRequest("s", "t", str(tmp_path), "goal", "fake")
         )
     assert model.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sample", range(5))
+async def test_r04_approval_cancel_returns_without_dispatch(tmp_path: Path, sample: int) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def approve(name: str, args: dict[str, object]) -> bool:
+        entered.set()
+        release.wait(timeout=5)
+        return True
+
+    dispatcher = LocalToolDispatcher(approve=approve)
+    request = AgentRequest("s", "t", str(tmp_path), "goal", "fake")
+    task = asyncio.create_task(
+        dispatcher.dispatch(ToolCall("c1", "write_file", {"path": "a", "content": "x"}), request)
+    )
+    assert await asyncio.to_thread(entered.wait, 2)
+    started = time.monotonic()
+    task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        elapsed_ms = (time.monotonic() - started) * 1000
+        print(f"R04_LATENCY approval {elapsed_ms:.3f}")
+        assert elapsed_ms < 2000
+        assert not (tmp_path / "a").exists()
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sample", range(5))
+async def test_r04_backoff_cancel_converges_within_two_seconds(tmp_path: Path, sample: int) -> None:
+    from deity.core.contracts import ModelRequest
+    from deity.core.runtime import AgentLoop, ModelFailure
+
+    entered = asyncio.Event()
+
+    class Model:
+        async def stream(self, request: ModelRequest):
+            entered.set()
+            raise ModelFailure("model_rate_limited", retryable=True, retry_after=30)
+            yield  # pragma: no cover
+
+    repo = await SQLiteSessionRepository.open(tmp_path / "r04-backoff.db")
+    loop = AgentLoop(Model(), LocalToolDispatcher(), repository=repo)
+    task = asyncio.create_task(loop.run(AgentRequest("s", "t", str(tmp_path), "goal", "fake")))
+    await entered.wait()
+    run_id = await _single_run_id(repo)
+    for _ in range(100):
+        if any(
+            event["type"] == "ModelAttempt" and event["payload"]["status"] == "retry"
+            for event in await repo.events(run_id)
+        ):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("model did not enter retry backoff")
+    started = time.monotonic()
+    assert loop.cancel(run_id)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    elapsed_ms = (time.monotonic() - started) * 1000
+    print(f"R04_LATENCY backoff {elapsed_ms:.3f}")
+    assert elapsed_ms < 2000
+    assert await repo.status(run_id) == RunStatus.CANCELLED
+    await repo.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sample", range(5))
+async def test_r04_model_cancel_converges_within_two_seconds(sample: int) -> None:
+    from deity.core.contracts import ModelRequest
+    from deity.core.runtime import AgentLoop
+    from deity.core.storage import InMemorySessionRepository
+
+    entered = asyncio.Event()
+
+    class Model:
+        async def stream(self, request: ModelRequest):
+            entered.set()
+            await asyncio.Future()
+            yield  # pragma: no cover
+
+    repo = InMemorySessionRepository()
+    loop = AgentLoop(Model(), LocalToolDispatcher(), repository=repo)
+    task = asyncio.create_task(loop.run(AgentRequest("s", "t", ".", "goal", "fake")))
+    await entered.wait()
+    run_id = next(iter(repo.statuses))
+    started = time.monotonic()
+    assert loop.cancel(run_id)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    elapsed_ms = (time.monotonic() - started) * 1000
+    print(f"R04_LATENCY model {elapsed_ms:.3f}")
+    assert elapsed_ms < 2000
+    assert repo.statuses[run_id] == RunStatus.CANCELLED
+
+
+async def _single_run_id(repo: SQLiteSessionRepository) -> str:
+    async with repo.db.execute("SELECT id FROM runs") as cursor:
+        row = await cursor.fetchone()
+    assert row is not None
+    return str(row[0])
 
 
 @pytest.mark.asyncio
