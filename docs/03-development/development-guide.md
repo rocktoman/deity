@@ -63,6 +63,8 @@ src/deity/
 
 逐阶段的编码交付、先写测试、集成场景和退出门禁见 [M0–M5 开发实施文档](m0-m5-implementation-plan.md)。
 
+V0.3 长任务可靠性能力的协议、开发顺序和验收标准见 [V0.3 Reliable Runtime 实施文档](v0.3-reliable-runtime-implementation.md)。
+
 1. **M0**：建立包、CLI `--help`、配置校验、lint/typecheck/test、CI。
 2. **M1**：实现领域 DTO/Protocol + FakeModel/FakeTools + AgentLoop；先用无网络测试跑通工具循环。
 3. **M2**：接入两种真实模型协议；解析完整/分片 tool call；加入模型错误分类与流式取消。
@@ -85,6 +87,8 @@ uv run pytest -q tests/integration
 
 **单测**不调用真实模型 API；集成测试使用临时目录、临时 SQLite、假命令执行器；端到端测试使用可丢弃 fixture Git 仓库。真实模型测试可选且单独配置预算。
 
+V0.3 还须运行 `uv run python -m evals.runners.reliability`。候选版 L3 使用 `uv run python -m evals.runners.l3_candidate`，该命令调用真实 DeepSeek API，单独执行，不进入 PR CI。
+
 ## 6. 配置与密钥
 
 建议 `~/.config/deity/config.toml`（用户配置）和可选 `.deity/config.toml`（项目配置，不能覆盖安全策略）。密钥从环境变量或 OS keychain 读取，不写入仓库或事件日志。
@@ -94,11 +98,15 @@ uv run pytest -q tests/integration
 provider = "openai_compatible"
 name = "your-model-id"
 base_url = "https://your-provider-endpoint.example/v1"
+api_key_env = "DEITY_API_KEY"
+context_window_tokens = 8192
 
 [run]
 max_turns = 30
 max_tool_calls = 100
 deadline_seconds = 900
+compaction_enabled = true
+resume_enabled = true
 
 [permission]
 shell = "ask"
@@ -106,6 +114,8 @@ workspace_write = "ask"
 ```
 
 配置示例中的 URL 为占位符。环境变量可用 `DEITY_API_KEY` 等明确命名；不同 provider 的具体密钥映射在适配器中配置，严禁输出到日志。
+
+`context_window_tokens` 必须按所选模型明确配置。提供该字段后，新 Run 默认启用压缩；可用 `compaction_enabled = false` 回退。`resume_enabled = false` 会拒绝显式续跑，原 Run 及 v2 审计事实仍可查询。`deity runs inspect` 会返回安全恢复判定；有未知工具结果、活动租约、工作区漂移、配置变化或预算耗尽时不得自动续跑。
 
 ## 7. 开发与评审规范
 

@@ -14,7 +14,7 @@ class AnthropicProvider:
 
     def __init__(self, *, api_key: str, model: str) -> None:
         self.model = model
-        self.client = AsyncAnthropic(api_key=api_key)
+        self.client = AsyncAnthropic(api_key=api_key, max_retries=0)
 
     def capabilities(self) -> ModelCapabilities:
         """Declare the supported baseline features."""
@@ -56,7 +56,16 @@ class AnthropicProvider:
                 if status == 429
                 else "model_http"
             )
-            raise ModelFailure(code, retryable=status == 429 or 500 <= status < 600) from None
+            header = exc.response.headers.get("retry-after")
+            try:
+                retry_after = max(0.0, float(header)) if header is not None else None
+            except ValueError:
+                retry_after = None
+            raise ModelFailure(
+                code,
+                retryable=status == 429 or status in {500, 502, 503, 504},
+                retry_after=retry_after,
+            ) from None
         except (APIConnectionError, APITimeoutError):
             raise ModelFailure("model_connection", retryable=True) from None
 

@@ -1,0 +1,1 @@
+{"id":"R02","pytest":"tests/e2e/test_reliability.py::test_r02_six_crash_boundaries_never_replay_unknown_effect"}

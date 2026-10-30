@@ -37,3 +37,32 @@ def test_deepseek_environment_name_and_output_budget(tmp_path: Path) -> None:
     assert config.model is not None
     assert config.model.api_key_env == "DEEPSEEK_API_KEY"
     assert config.run.max_output_tokens == 256
+
+
+def test_reliable_runtime_config_requires_explicit_window(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[model]\nprovider="openai_compatible"\nname="m"\napi_key_env="MODEL_KEY"\n'
+        "context_window_tokens=8192\n[run]\ncompaction_enabled=true\nresume_enabled=true\n"
+    )
+    config = load_config(path)
+    assert config.model is not None and config.model.context_window_tokens == 8192
+    assert config.run.compaction_enabled and config.run.resume_enabled
+
+    path.write_text(
+        '[model]\nprovider="openai_compatible"\nname="m"\napi_key_env="MODEL_KEY"\n'
+        "[run]\ncompaction_enabled=true\n"
+    )
+    with pytest.raises(ValueError):
+        load_config(path)
+
+
+def test_v03_new_run_enables_recovery_and_configured_compaction(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[model]\nprovider="openai_compatible"\nname="m"\napi_key_env="MODEL_KEY"\n'
+        "context_window_tokens=8192\n"
+    )
+    config = load_config(path)
+    assert config.run.resume_enabled is True
+    assert config.run.compaction_enabled is True

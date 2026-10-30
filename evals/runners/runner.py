@@ -11,12 +11,13 @@ ROOT = Path(__file__).parents[2]
 CASES = ROOT / "evals/cases"
 
 
-def run_case(case_id: str, selector: str, reports: Path) -> dict[str, Any]:
+def run_case(case_id: str, selector: str | list[str], reports: Path) -> dict[str, Any]:
     """Execute one isolated pytest selector and persist its outcome."""
     reports.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    selectors = [selector] if isinstance(selector, str) else selector
     completed = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", selector],
+        [sys.executable, "-m", "pytest", "-q", *selectors],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -28,7 +29,9 @@ def run_case(case_id: str, selector: str, reports: Path) -> dict[str, Any]:
         "case_id": case_id,
         "passed": passed,
         "verification": "PASS" if passed else "FAIL",
-        "assertions": [{"name": selector, "status": "pass" if passed else "fail"}],
+        "assertions": [
+            {"name": item, "status": "pass" if passed else "fail"} for item in selectors
+        ],
         "duration_ms": round((time.monotonic() - started) * 1000),
         "exit_code": completed.returncode,
         "model_calls": None,
@@ -38,7 +41,7 @@ def run_case(case_id: str, selector: str, reports: Path) -> dict[str, Any]:
     }
     (reports / f"{case_id}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     (reports / f"{case_id}.md").write_text(
-        f"# {case_id}\n\n验证：{report['verification']}\n\n用例：`{selector}`\n\n退出码：{completed.returncode}\n"
+        f"# {case_id}\n\n验证：{report['verification']}\n\n用例：`{'`, `'.join(selectors)}`\n\n退出码：{completed.returncode}\n"
     )
     return report
 

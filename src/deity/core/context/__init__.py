@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from deity.core.context.reliable import sanitize_text
 from deity.core.contracts import ToolCall, ToolResult
 
 
@@ -49,7 +50,7 @@ class ContextBuilder:
         return {
             "role": "tool",
             "call_id": result.call_id,
-            "content": result.output[: self.max_tool_chars],
+            "content": sanitize_text(result.output[: self.max_tool_chars]),
             "status": result.status,
             "truncated": truncated,
             "exit_code": result.exit_code,

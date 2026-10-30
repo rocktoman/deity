@@ -114,7 +114,7 @@ class LocalToolDispatcher:
         except (BoundaryError, OSError):
             return self._record(call, "denied", "workspace_boundary")
         if call.name in WRITE_TOOLS | {"shell"} and (
-            self.approve is None or not self.approve(call.name, args)
+            self.approve is None or not await asyncio.to_thread(self.approve, call.name, args)
         ):
             return self._record(call, "denied", "approval_required")
         try:
@@ -228,7 +228,7 @@ class LocalToolDispatcher:
             except ProcessLookupError:
                 pass
             try:
-                await asyncio.wait_for(process.wait(), 0.5)
+                await asyncio.wait_for(process.wait(), 2.0)
             except TimeoutError:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)

@@ -2,17 +2,25 @@
 
 import asyncio
 import json
+import os
+import random
 import time
-from collections.abc import AsyncIterator
-from dataclasses import replace
+from collections.abc import AsyncIterator, Callable
+from contextlib import suppress
+from dataclasses import dataclass, replace
+from typing import Any
+from uuid import uuid4
 
 from deity.core.context import ContextBuilder
+from deity.core.context.reliable import ConservativeEstimator, ContextBudget, ContextCompactor
 from deity.core.contracts import (
     AgentRequest,
     AgentResult,
     ModelEvent,
     ModelProvider,
     ModelRequest,
+    RunBudget,
+    RunLease,
     RunStatus,
     SessionRepository,
     ToolCall,
@@ -33,10 +41,54 @@ class BudgetExceeded(RuntimeError):
 class ModelFailure(RuntimeError):
     """A sanitized provider failure with a deterministic retry policy."""
 
-    def __init__(self, code: str, *, retryable: bool) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        retryable: bool,
+        retry_after: float | None = None,
+        semantic_output: bool = False,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+        self.retry_after = retry_after
+        self.semantic_output = semantic_output
+
+
+class CancellationScope:
+    """Idempotent cancellation signal for one run."""
+
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+
+    def cancel(self) -> None:
+        """Signal cancellation."""
+        self._event.set()
+
+    def raise_if_cancelled(self) -> None:
+        """Raise before dispatching another effect."""
+        if self._event.is_set():
+            raise asyncio.CancelledError
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Bounded model retry schedule with provider Retry-After support."""
+
+    max_attempts: int = 3
+    base_delay_seconds: float = 0.5
+    jitter_fraction: float = 0.2
+
+    def delay(self, attempt: int, retry_after: float | None) -> float:
+        """Return a nonnegative delay before the next attempt."""
+        if retry_after is not None:
+            return max(0.0, retry_after)
+        return float(
+            self.base_delay_seconds
+            * (2**attempt)
+            * (1 + float(random.random()) * self.jitter_fraction)
+        )
 
 
 class AgentLoop:
@@ -48,12 +100,26 @@ class AgentLoop:
         tools: ToolDispatcher,
         repository: SessionRepository | None = None,
         context: ContextBuilder | None = None,
+        workspace_fingerprint: Callable[[], str] | None = None,
     ) -> None:
         self._model = model
         self._tools = tools
         self._repository = repository or InMemorySessionRepository()
         self._context = context or ContextBuilder()
+        self._workspace_fingerprint = workspace_fingerprint
         self._owner = asyncio.Lock()
+        self._active_task: asyncio.Task[Any] | None = None
+        self._active_run_id: str | None = None
+        self._cancellation = CancellationScope()
+        self._retry = RetryPolicy()
+
+    def cancel(self, run_id: str) -> bool:
+        """Cancel only this loop's active run."""
+        if run_id != self._active_run_id or self._active_task is None:
+            return False
+        self._cancellation.cancel()
+        self._active_task.cancel()
+        return True
 
     async def run(self, request: AgentRequest) -> AgentResult:
         """Run a task with a single owner and bounded model/tool turns."""
@@ -64,77 +130,268 @@ class AgentLoop:
         async with self._owner:
             return await self._run_owned(request)
 
-    async def _run_owned(self, request: AgentRequest) -> AgentResult:
-        run_id = await self._repository.create_run(request)
-        status = transition(RunStatus.CREATED, RunStatus.RUNNING)
-        await self._repository.set_status(run_id, status)
+    async def run_existing(
+        self,
+        request: AgentRequest,
+        run_id: str,
+        messages: list[dict[str, Any]],
+        budget: dict[str, Any],
+    ) -> AgentResult:
+        """Execute a newly created successor run from a verified checkpoint."""
+        if self._owner.locked():
+            raise RuntimeError("AgentLoop already has an active run")
+        async with self._owner:
+            return await self._run_owned(request, run_id, messages, budget)
+
+    async def _run_owned(
+        self,
+        request: AgentRequest,
+        existing_run_id: str | None = None,
+        initial_messages: list[dict[str, Any]] | None = None,
+        initial_budget: dict[str, Any] | None = None,
+    ) -> AgentResult:
+        run_id = existing_run_id or await self._repository.create_run(request)
+        self._active_run_id = run_id
+        self._active_task = asyncio.current_task()
+        lease = await self._repository.acquire_lease(run_id, f"{os.getpid()}:{uuid4()}")
+        current = asyncio.current_task()
+        heartbeat = asyncio.create_task(self._heartbeat(lease, current))
         try:
-            result = await self._execute(request, run_id)
+            status = transition(RunStatus.CREATED, RunStatus.RUNNING)
+            await self._repository.set_status(run_id, status, epoch=lease.epoch)
+            result = await self._execute(
+                request, run_id, lease.epoch, initial_messages, initial_budget
+            )
         except asyncio.CancelledError:
-            await self._repository.set_status(run_id, RunStatus.CANCELLED)
+            await asyncio.wait_for(
+                self._repository.set_status(run_id, RunStatus.CANCELLED, epoch=lease.epoch),
+                timeout=5,
+            )
             raise
         except Exception:
-            await self._repository.set_status(run_id, RunStatus.FAILED)
+            await self._repository.set_status(run_id, RunStatus.FAILED, epoch=lease.epoch)
             raise
-        await self._repository.set_status(run_id, RunStatus.COMPLETED)
-        return result
+        else:
+            await self._repository.set_status(run_id, RunStatus.COMPLETED, epoch=lease.epoch)
+            return result
+        finally:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+            await self._repository.release_lease(lease)
+            self._active_run_id = None
+            self._active_task = None
 
-    async def _execute(self, request: AgentRequest, run_id: str) -> AgentResult:
+    async def _heartbeat(self, lease: RunLease, owner: asyncio.Task[Any] | None) -> None:
+        while True:
+            await asyncio.sleep(5)
+            try:
+                lease = await self._repository.renew_lease(lease)
+            except ValueError:
+                if owner is not None:
+                    owner.cancel()
+                return
+
+    async def _execute(
+        self,
+        request: AgentRequest,
+        run_id: str,
+        epoch: int,
+        initial_messages: list[dict[str, Any]] | None = None,
+        initial_budget: dict[str, Any] | None = None,
+    ) -> AgentResult:
         request = replace(request, run_id=run_id)
-        deadline = time.monotonic() + request.deadline_seconds
-        messages = self._context.initial(request.user_text)
+        self._config_fingerprint = request.config_fingerprint()
+        limits = RunBudget.from_request(request)
+        started_at = time.monotonic()
+        previous_elapsed = float((initial_budget or {}).get("elapsed_seconds", 0))
+        deadline = started_at + limits.deadline_seconds - previous_elapsed
+        messages = initial_messages or self._context.initial(request.user_text)
+        if initial_messages is None:
+            await self._repository.save_checkpoint(
+                run_id, messages, self._budget_payload(0, 0, elapsed_seconds=0), epoch=epoch
+            )
         seen: set[str] = set()
-        tool_count = 0
-        for _ in range(request.max_turns):
+        tool_count = int((initial_budget or {}).get("tool_calls", 0))
+        input_total = int((initial_budget or {}).get("input_tokens", 0))
+        output_total = int((initial_budget or {}).get("output_tokens", 0))
+        for turn_index in range(int((initial_budget or {}).get("turns", 0)), limits.max_turns):
+            self._cancellation.raise_if_cancelled()
             if time.monotonic() >= deadline:
                 raise BudgetExceeded("deadline_seconds")
             definitions = getattr(self._tools, "definitions", None)
             tools = definitions() if callable(definitions) else ()
+            if request.compaction_enabled:
+                if request.context_window_tokens is None:
+                    raise BudgetExceeded("context_window_unknown")
+                budget = ContextBudget(
+                    request.context_window_tokens,
+                    request.max_output_tokens,
+                    max(1, request.context_window_tokens // 10),
+                )
+                estimator = ConservativeEstimator()
+                schema_tokens = (
+                    estimator.estimate([{"role": "system", "content": json.dumps(tools)}])
+                    if tools
+                    else 0
+                )
+                old_estimate = estimator.estimate(messages, schema_tokens)
+                snapshot = ContextCompactor(estimator).compact(messages, budget, schema_tokens)
+                if snapshot.estimated_tokens < old_estimate:
+                    await self._repository.record_context_compaction(
+                        run_id,
+                        old_estimate,
+                        snapshot.estimated_tokens,
+                        snapshot.sha256,
+                        tuple(ref.id for ref in snapshot.artifacts),
+                        epoch=epoch,
+                    )
+                messages = list(snapshot.messages)
             model_request = ModelRequest(
                 request.model, tuple(messages), tools, request.max_output_tokens
             )
-            for attempt in range(3):
+            for attempt in range(self._retry.max_attempts):
+                attempt_id = str(uuid4())
+                await self._repository.record_model_attempt(
+                    run_id, attempt_id, attempt + 1, "started", epoch=epoch
+                )
                 try:
                     text, calls, usage = await asyncio.wait_for(
-                        self._collect(self._model.stream(model_request)),
+                        self._collect(self._tracked_stream(self._model.stream(model_request))),
                         timeout=max(0.001, deadline - time.monotonic()),
+                    )
+                    await self._repository.record_model_attempt(
+                        run_id, attempt_id, attempt + 1, "completed", epoch=epoch
                     )
                     break
                 except ModelFailure as exc:
-                    if not exc.retryable or attempt == 2:
-                        raise
-                    await asyncio.sleep(
-                        min(0.05 * (2**attempt), max(0, deadline - time.monotonic()))
+                    delay = self._retry.delay(attempt, exc.retry_after)
+                    retry = exc.retryable and attempt < self._retry.max_attempts - 1
+                    await self._repository.record_model_attempt(
+                        run_id,
+                        attempt_id,
+                        attempt + 1,
+                        "retry" if retry else "failed",
+                        code=exc.code,
+                        semantic_output=exc.semantic_output,
+                        backoff_seconds=delay if retry else None,
+                        epoch=epoch,
                     )
-            await self._repository.record_step(run_id, "model", "completed")
+                    if not exc.retryable or attempt == self._retry.max_attempts - 1:
+                        raise
+                    if delay >= deadline - time.monotonic():
+                        raise BudgetExceeded("deadline_seconds") from exc
+                    await asyncio.sleep(delay)
+            await self._repository.record_step(run_id, "model", "completed", epoch=epoch)
             if usage != (None, None):
-                await self._repository.record_usage(run_id, *usage)
+                await self._repository.record_usage(run_id, *usage, epoch=epoch)
+            await self._repository.record_model_turn(run_id, text, calls, epoch=epoch)
+            if usage[0] is None and request.max_input_tokens_total is not None:
+                raise BudgetExceeded("input_token_usage_unknown")
+            if usage[1] is None and request.max_output_tokens_total is not None:
+                raise BudgetExceeded("output_token_usage_unknown")
+            input_total += usage[0] or 0
+            output_total += usage[1] or 0
+            if (
+                limits.max_input_tokens_total is not None
+                and input_total > limits.max_input_tokens_total
+            ):
+                raise BudgetExceeded("max_input_tokens_total")
+            if (
+                limits.max_output_tokens_total is not None
+                and output_total > limits.max_output_tokens_total
+            ):
+                raise BudgetExceeded("max_output_tokens_total")
             if calls:
-                if tool_count + len(calls) > request.max_tool_calls:
+                if tool_count + len(calls) > limits.max_tool_calls:
                     raise BudgetExceeded("max_tool_calls")
                 for call in calls:
                     if call.call_id in seen:
                         raise ProtocolError("重复 call_id")
                     seen.add(call.call_id)
                     if not await self._repository.claim_tool(
-                        run_id, call.call_id, call.name, call.arguments
+                        run_id, call.call_id, call.name, call.arguments, epoch=epoch
                     ):
                         raise ProtocolError("工具调用已被占用")
                 messages.append(self._context.assistant_calls(text, calls))
                 for call in calls:
+                    self._cancellation.raise_if_cancelled()
                     result = await asyncio.wait_for(
                         self._tools.dispatch(call, request),
                         timeout=max(0.001, deadline - time.monotonic()),
                     )
                     tool_count += 1
-                    await self._repository.record_tool(run_id, result)
-                    await self._repository.record_step(run_id, "tool", result.status)
+                    await self._repository.record_tool(run_id, result, epoch=epoch)
+                    await self._repository.record_step(run_id, "tool", result.status, epoch=epoch)
                     messages.append(self._context.tool_result(result))
+                await self._repository.save_checkpoint(
+                    run_id,
+                    messages,
+                    self._budget_payload(
+                        turn_index + 1,
+                        tool_count,
+                        input_total,
+                        output_total,
+                        previous_elapsed + time.monotonic() - started_at,
+                    ),
+                    epoch=epoch,
+                )
                 continue
             if text:
+                messages.append({"role": "assistant", "content": text})
+                await self._repository.save_checkpoint(
+                    run_id,
+                    messages,
+                    self._budget_payload(
+                        turn_index + 1,
+                        tool_count,
+                        input_total,
+                        output_total,
+                        previous_elapsed + time.monotonic() - started_at,
+                    ),
+                    epoch=epoch,
+                )
                 return AgentResult(run_id, RunStatus.COMPLETED, text)
             raise ProtocolError("模型响应为空")
         raise BudgetExceeded("max_turns")
+
+    @staticmethod
+    async def _tracked_stream(stream: AsyncIterator[ModelEvent]) -> AsyncIterator[ModelEvent]:
+        semantic_output = False
+        try:
+            async for event in stream:
+                if event.kind in {
+                    "text_delta",
+                    "tool_call_started",
+                    "tool_call_arguments_delta",
+                    "message_completed",
+                }:
+                    semantic_output = True
+                yield event
+        except ModelFailure as exc:
+            if semantic_output:
+                raise ModelFailure(exc.code, retryable=False, semantic_output=True) from None
+            raise
+
+    def _budget_payload(
+        self,
+        turns: int,
+        tool_calls: int,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        elapsed_seconds: float = 0,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "turns": turns,
+            "tool_calls": tool_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "elapsed_seconds": elapsed_seconds,
+        }
+        if self._workspace_fingerprint is not None:
+            payload["workspace_fingerprint"] = self._workspace_fingerprint()
+        payload["config_fingerprint"] = self._config_fingerprint
+        return payload
 
     @staticmethod
     async def _collect(

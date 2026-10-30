@@ -1,5 +1,7 @@
 """Stable core DTOs and ports."""
 
+import hashlib
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import StrEnum
@@ -28,6 +30,28 @@ class AgentRequest:
     deadline_seconds: float = 900
     max_output_tokens: int = 1024
     run_id: str = ""
+    context_window_tokens: int | None = None
+    compaction_enabled: bool = False
+    max_input_tokens_total: int | None = None
+    max_output_tokens_total: int | None = None
+    provider_name: str = ""
+
+    def config_fingerprint(self) -> str:
+        """Hash recovery-relevant settings without including task text or secrets."""
+        settings = {
+            "model": self.model,
+            "provider": self.provider_name,
+            "max_turns": self.max_turns,
+            "max_tool_calls": self.max_tool_calls,
+            "deadline_seconds": self.deadline_seconds,
+            "max_output_tokens": self.max_output_tokens,
+            "context_window_tokens": self.context_window_tokens,
+            "compaction_enabled": self.compaction_enabled,
+            "max_input_tokens_total": self.max_input_tokens_total,
+            "max_output_tokens_total": self.max_output_tokens_total,
+        }
+        encoded = json.dumps(settings, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -37,6 +61,48 @@ class AgentResult:
     final_text: str | None
     error_code: str | None = None
     evidence_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RunLease:
+    """Fenced execution ownership for a single run."""
+
+    run_id: str
+    owner_id: str
+    epoch: int
+    expires_at: float
+
+
+@dataclass(frozen=True)
+class RunBudget:
+    """Cumulative limits that must survive successor runs."""
+
+    max_turns: int
+    max_tool_calls: int
+    deadline_seconds: float
+    max_input_tokens_total: int | None = None
+    max_output_tokens_total: int | None = None
+
+    @classmethod
+    def from_request(cls, request: AgentRequest) -> "RunBudget":
+        """Read immutable limits from the public request."""
+        return cls(
+            request.max_turns,
+            request.max_tool_calls,
+            request.deadline_seconds,
+            request.max_input_tokens_total,
+            request.max_output_tokens_total,
+        )
+
+
+@dataclass(frozen=True)
+class RecoveryDecision:
+    """Typed preflight result; no external action is implied."""
+
+    run_id: str
+    decision: Literal["resume", "manual_review", "abort"]
+    reason: str
+    checkpoint_id: str | None
 
 
 @dataclass(frozen=True)
@@ -103,15 +169,65 @@ class ToolDispatcher(Protocol):
 
 class SessionRepository(Protocol):
     async def create_run(self, request: AgentRequest) -> str: ...
-    async def set_status(self, run_id: str, status: RunStatus) -> None: ...
-    async def claim_tool(
-        self, run_id: str, call_id: str, name: str, args: dict[str, Any]
-    ) -> bool: ...
-    async def record_tool(self, run_id: str, result: ToolResult) -> None: ...
-    async def record_step(self, run_id: str, kind: str, status: str) -> None: ...
-    async def record_usage(
-        self, run_id: str, input_tokens: int | None, output_tokens: int | None
+    async def set_status(
+        self, run_id: str, status: RunStatus, epoch: int | None = None
     ) -> None: ...
+    async def record_model_turn(
+        self, run_id: str, text: str, calls: list[ToolCall], epoch: int | None = None
+    ) -> None: ...
+    async def context_messages(self, run_id: str) -> list[dict[str, Any]]: ...
+    async def save_checkpoint(
+        self,
+        run_id: str,
+        messages: list[dict[str, Any]],
+        budget: dict[str, Any],
+        epoch: int | None = None,
+    ) -> str: ...
+    async def latest_checkpoint(self, run_id: str) -> dict[str, Any] | None: ...
+    async def claim_tool(
+        self,
+        run_id: str,
+        call_id: str,
+        name: str,
+        args: dict[str, Any],
+        epoch: int | None = None,
+    ) -> bool: ...
+    async def record_tool(
+        self, run_id: str, result: ToolResult, epoch: int | None = None
+    ) -> None: ...
+    async def record_step(
+        self, run_id: str, kind: str, status: str, epoch: int | None = None
+    ) -> None: ...
+    async def record_usage(
+        self,
+        run_id: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        epoch: int | None = None,
+    ) -> None: ...
+    async def record_model_attempt(
+        self,
+        run_id: str,
+        attempt_id: str,
+        attempt_number: int,
+        status: str,
+        code: str | None = None,
+        semantic_output: bool = False,
+        backoff_seconds: float | None = None,
+        epoch: int | None = None,
+    ) -> None: ...
+    async def record_context_compaction(
+        self,
+        run_id: str,
+        old_estimate: int,
+        new_estimate: int,
+        summary_hash: str,
+        artifact_ids: tuple[str, ...] = (),
+        epoch: int | None = None,
+    ) -> None: ...
+    async def acquire_lease(self, run_id: str, owner_id: str) -> RunLease: ...
+    async def renew_lease(self, lease: RunLease) -> RunLease: ...
+    async def release_lease(self, lease: RunLease) -> None: ...
 
 
 class EventPublisher(Protocol):
