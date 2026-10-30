@@ -145,7 +145,7 @@ async def test_sdk_stream_is_closed(protocol: str) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", ["openai", "anthropic"])
-@pytest.mark.parametrize("status,retryable", [(401, False), (429, True), (503, True)])
+@pytest.mark.parametrize("status,retryable", [(401, False), (403, False), (429, True), (503, True)])
 async def test_sdk_status_is_classified(protocol: str, status: int, retryable: bool) -> None:
     error_type = OpenAIStatusError if protocol == "openai" else AnthropicStatusError
     response = httpx2.Response(status, request=httpx2.Request("POST", "https://example.test"))
