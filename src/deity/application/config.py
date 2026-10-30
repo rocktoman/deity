@@ -19,6 +19,10 @@ class RunConfig:
     max_tool_calls: int = 100
     deadline_seconds: int = 900
     max_output_tokens: int = 1024
+    compaction_enabled: bool = False
+    resume_enabled: bool = True
+    max_input_tokens_total: int | None = None
+    max_output_tokens_total: int | None = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,7 @@ class ModelConfig:
     name: str
     api_key_env: str
     base_url: str | None = None
+    context_window_tokens: int | None = None
 
 
 def load_config(path: Path) -> Config:
@@ -49,17 +54,46 @@ def load_config(path: Path) -> Config:
         model = data.get("model", {})
         if not all(isinstance(item, dict) for item in (run, permission, model)):
             raise ValueError
-        if set(run) - {"max_turns", "max_tool_calls", "deadline_seconds", "max_output_tokens"}:
+        if set(run) - {
+            "max_turns",
+            "max_tool_calls",
+            "deadline_seconds",
+            "max_output_tokens",
+            "compaction_enabled",
+            "resume_enabled",
+            "max_input_tokens_total",
+            "max_output_tokens_total",
+        }:
             raise ValueError
         if set(permission) - {"shell", "workspace_write"}:
             raise ValueError
-        if set(model) - {"provider", "name", "base_url", "api_key_env"}:
+        if set(model) - {
+            "provider",
+            "name",
+            "base_url",
+            "api_key_env",
+            "context_window_tokens",
+        }:
             raise ValueError
         values = {
             key: run.get(key, getattr(RunConfig(), key))
             for key in ("max_turns", "max_tool_calls", "deadline_seconds", "max_output_tokens")
         }
         if any(type(value) is not int or value <= 0 for value in values.values()):
+            raise ValueError
+        flags = {
+            key: run.get(key, getattr(RunConfig(), key))
+            for key in ("compaction_enabled", "resume_enabled")
+        }
+        if any(type(value) is not bool for value in flags.values()):
+            raise ValueError
+        token_limits = {
+            key: run.get(key) for key in ("max_input_tokens_total", "max_output_tokens_total")
+        }
+        if any(
+            value is not None and (type(value) is not int or value <= 0)
+            for value in token_limits.values()
+        ):
             raise ValueError
         policy = PermissionConfig(**permission)
         if policy.shell not in ("ask", "deny") or policy.workspace_write not in ("ask", "deny"):
@@ -69,8 +103,25 @@ def load_config(path: Path) -> Config:
             model_config.provider not in ("openai_compatible", "anthropic")
             or not model_config.name
             or re.fullmatch(r"[A-Z][A-Z0-9_]*", model_config.api_key_env) is None
+            or (
+                model_config.context_window_tokens is not None
+                and (
+                    type(model_config.context_window_tokens) is not int
+                    or model_config.context_window_tokens <= 0
+                )
+            )
         ):
             raise ValueError
-        return Config(run=RunConfig(**values), permission=policy, model=model_config)
+        if "compaction_enabled" not in run and model_config is not None:
+            flags["compaction_enabled"] = model_config.context_window_tokens is not None
+        if flags["compaction_enabled"] and (
+            model_config is None or model_config.context_window_tokens is None
+        ):
+            raise ValueError
+        return Config(
+            run=RunConfig(**values, **flags, **token_limits),
+            permission=policy,
+            model=model_config,
+        )
     except (OSError, UnicodeError, tomllib.TOMLDecodeError, TypeError, ValueError):
         raise ValueError("配置无效：请检查 TOML 字段和权限设置") from None

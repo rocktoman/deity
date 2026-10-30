@@ -413,6 +413,7 @@ Python 3.12+、`uv`、Typer/Rich、Pydantic、官方模型 SDK、`aiosqlite` 或
 - M4 初版采用 `aiosqlite` 与单连接写锁；依据与代价见 [ADR-006](adr-006-aiosqlite-v0.1.md)。多进程写入性能与所有权策略留待后续版本重新评估。
 - 工具审批默认值、跨平台进程组处理、token 估算实现：用 ADR 记录具体方案。
 - V0.1 不承诺任意位置恢复；真正 checkpoint、自动 compaction、MCP、Docker 在后续版本设计。
+- V0.3 的安全边界恢复与 Checkpoint 决策见 [ADR-007](adr-007-v0.3-reliable-resume.md)；不改变本版 `interrupted` 终态语义。
 - 任何跨模块依赖反转、事件协议破坏性变更、工具风险策略变化必须记录 ADR 和迁移方案。
 
 ## 13. 评审清单

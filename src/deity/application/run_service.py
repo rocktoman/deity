@@ -2,17 +2,19 @@
 
 import os
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from deity.adapters.model.anthropic import AnthropicProvider
 from deity.adapters.model.openai_compatible import OpenAICompatibleProvider
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.adapters.tools import LocalToolDispatcher
+from deity.adapters.tools.workspace import workspace_digest
 from deity.application.config import Config, PermissionConfig, RunConfig
 from deity.core.context import ContextBuilder
-from deity.core.contracts import AgentRequest, AgentResult, ModelProvider
+from deity.core.contracts import AgentRequest, AgentResult, ModelProvider, RecoveryDecision
 from deity.core.runtime import AgentLoop
 
 
@@ -24,10 +26,12 @@ class RunService:
         *,
         db_path: Path,
         workspace: Path,
-        model: ModelProvider,
+        model: ModelProvider | None = None,
         approve: Callable[[str, dict[str, Any]], bool] | None = None,
         limits: RunConfig | None = None,
         permission: PermissionConfig | None = None,
+        context_window_tokens: int | None = None,
+        provider_id: str = "",
     ) -> None:
         self.db_path = db_path
         self.workspace = workspace.resolve(strict=True)
@@ -35,6 +39,13 @@ class RunService:
         self.approve = approve
         self.limits = limits or RunConfig()
         self.permission = permission or PermissionConfig()
+        self.context_window_tokens = context_window_tokens
+        self.provider_id = provider_id
+        self._active_loop: AgentLoop | None = None
+
+    def cancel(self, run_id: str) -> bool:
+        """Signal cancellation to this service's active run."""
+        return self._active_loop.cancel(run_id) if self._active_loop is not None else False
 
     @classmethod
     def from_config(
@@ -66,12 +77,16 @@ class RunService:
             approve=approve,
             limits=config.run,
             permission=config.permission,
+            context_window_tokens=config.model.context_window_tokens,
+            provider_id=config.model.provider,
         )
 
     async def run(
         self, task: str, *, model_name: str, session_id: str | None = None
     ) -> AgentResult:
         """Execute and persist a task within the selected workspace."""
+        if self.model is None:
+            raise ValueError("model is required to run")
         repo = await SQLiteSessionRepository.open(self.db_path)
         try:
 
@@ -97,6 +112,11 @@ class RunService:
                 max_tool_calls=self.limits.max_tool_calls,
                 deadline_seconds=self.limits.deadline_seconds,
                 max_output_tokens=self.limits.max_output_tokens,
+                context_window_tokens=self.context_window_tokens,
+                compaction_enabled=self.limits.compaction_enabled,
+                max_input_tokens_total=self.limits.max_input_tokens_total,
+                max_output_tokens_total=self.limits.max_output_tokens_total,
+                provider_name=self.provider_id,
             )
             instructions_file = self.workspace / "AGENTS.md"
             instructions = None
@@ -106,16 +126,166 @@ class RunService:
                 and instructions_file.stat().st_size <= 16_000
             ):
                 instructions = instructions_file.read_text(encoding="utf-8")
-            result = await AgentLoop(
+            loop = AgentLoop(
                 self.model,
                 dispatcher,
                 repository=repo,
                 context=ContextBuilder(project_instructions=instructions),
-            ).run(request)
+                workspace_fingerprint=lambda: workspace_digest(self.workspace, (self.db_path,)),
+            )
+            self._active_loop = loop
+            result = await loop.run(request)
             await repo.append_message(active_session, result.run_id, "user", task)
             await repo.append_message(
                 active_session, result.run_id, "assistant", result.final_text or ""
             )
             return result
         finally:
+            self._active_loop = None
             await repo.close()
+
+    async def inspect(self, run_id: str) -> dict[str, Any]:
+        """Classify an interrupted run without replaying any tool."""
+        repo = await SQLiteSessionRepository.open(self.db_path)
+        try:
+            info = await repo.run_info(run_id)
+            checkpoint = await repo.latest_checkpoint(run_id)
+            unresolved = await repo.unresolved_tools(run_id)
+            decision: Literal["resume", "manual_review", "abort"] = "abort"
+            reason = "no_valid_checkpoint"
+            if info["status"] != "interrupted":
+                reason = "run_not_interrupted"
+            elif await repo.has_active_owner(run_id):
+                reason = "owner_may_still_be_active"
+            elif unresolved:
+                decision, reason = "manual_review", "unresolved_tool"
+            elif checkpoint is None:
+                reason = "no_valid_checkpoint"
+            elif await repo.effects_after_checkpoint(run_id, checkpoint["last_event_seq"]):
+                decision, reason = "manual_review", "effect_after_checkpoint"
+            elif info["workspace_root"] != str(self.workspace):
+                reason = "workspace_mismatch"
+            elif self.provider_id and info["model_provider"] != self.provider_id:
+                reason = "model_provider_changed"
+            elif checkpoint["budget"].get("config_fingerprint") is not None and (
+                checkpoint["budget"]["config_fingerprint"]
+                != self._recovery_request(info).config_fingerprint()
+            ):
+                reason = "config_changed"
+            elif checkpoint["budget"].get("workspace_fingerprint") is None:
+                reason = "unsupported_legacy_checkpoint"
+            elif checkpoint["budget"]["workspace_fingerprint"] != workspace_digest(
+                self.workspace, (self.db_path,)
+            ):
+                reason = "workspace_changed"
+            elif checkpoint["budget"].get("turns", 0) >= self.limits.max_turns:
+                reason = "turn_budget_exhausted"
+            elif checkpoint["budget"].get("elapsed_seconds", 0) >= self.limits.deadline_seconds:
+                reason = "deadline_exhausted"
+            elif checkpoint["budget"].get("tool_calls", 0) >= self.limits.max_tool_calls:
+                reason = "tool_budget_exhausted"
+            elif (
+                self.limits.max_input_tokens_total is not None
+                and checkpoint["budget"].get("input_tokens", 0)
+                >= self.limits.max_input_tokens_total
+            ):
+                reason = "input_token_budget_exhausted"
+            elif (
+                self.limits.max_output_tokens_total is not None
+                and checkpoint["budget"].get("output_tokens", 0)
+                >= self.limits.max_output_tokens_total
+            ):
+                reason = "output_token_budget_exhausted"
+            else:
+                decision, reason = "resume", "safe_checkpoint"
+            return {
+                **asdict(
+                    RecoveryDecision(
+                        run_id, decision, reason, checkpoint["id"] if checkpoint else None
+                    )
+                ),
+                "unresolved_tools": unresolved,
+                "budget": checkpoint["budget"] if checkpoint else None,
+            }
+        finally:
+            await repo.close()
+
+    async def resume(self, run_id: str) -> AgentResult:
+        """Continue an interrupted task as a new run from a safe checkpoint."""
+        if not self.limits.resume_enabled:
+            raise ValueError("resume is disabled")
+        if self.model is None:
+            raise ValueError("model is required to resume")
+        inspection = await self.inspect(run_id)
+        if inspection["decision"] != "resume":
+            raise ValueError(f"cannot resume: {inspection['reason']}")
+        repo = await SQLiteSessionRepository.open(self.db_path)
+        try:
+            info = await repo.run_info(run_id)
+            checkpoint = await repo.latest_checkpoint(run_id)
+            if checkpoint is None or checkpoint["id"] != inspection["checkpoint_id"]:
+                raise ValueError("checkpoint changed during recovery")
+            if checkpoint["budget"]["workspace_fingerprint"] != workspace_digest(
+                self.workspace, (self.db_path,)
+            ):
+                raise ValueError("workspace changed during recovery")
+            successor = await repo.create_resumed_run(run_id, checkpoint["id"])
+
+            def authorize(name: str, args: dict[str, Any]) -> bool:
+                if name == "shell" and self.permission.shell == "deny":
+                    return False
+                if (
+                    name in {"write_file", "apply_patch"}
+                    and self.permission.workspace_write == "deny"
+                ):
+                    return False
+                return self.approve(name, args) if self.approve is not None else False
+
+            request = AgentRequest(
+                session_id=info["session_id"],
+                task_id=info["task_id"],
+                workspace=str(self.workspace),
+                user_text=info["prompt"],
+                model=info["model_name"],
+                max_turns=self.limits.max_turns,
+                max_tool_calls=self.limits.max_tool_calls,
+                deadline_seconds=self.limits.deadline_seconds,
+                max_output_tokens=self.limits.max_output_tokens,
+                context_window_tokens=self.context_window_tokens,
+                compaction_enabled=self.limits.compaction_enabled,
+                max_input_tokens_total=self.limits.max_input_tokens_total,
+                max_output_tokens_total=self.limits.max_output_tokens_total,
+                provider_name=info["model_provider"],
+            )
+            loop = AgentLoop(
+                self.model,
+                LocalToolDispatcher(approve=authorize),
+                repository=repo,
+                workspace_fingerprint=lambda: workspace_digest(self.workspace, (self.db_path,)),
+            )
+            self._active_loop = loop
+            return await loop.run_existing(
+                request, successor, checkpoint["messages"], checkpoint["budget"]
+            )
+        finally:
+            self._active_loop = None
+            await repo.close()
+
+    def _recovery_request(self, info: dict[str, Any]) -> AgentRequest:
+        """Construct current settings for a secret-free recovery comparison."""
+        return AgentRequest(
+            session_id=info["session_id"],
+            task_id=info["task_id"],
+            workspace=str(self.workspace),
+            user_text=info["prompt"],
+            model=info["model_name"],
+            max_turns=self.limits.max_turns,
+            max_tool_calls=self.limits.max_tool_calls,
+            deadline_seconds=self.limits.deadline_seconds,
+            max_output_tokens=self.limits.max_output_tokens,
+            context_window_tokens=self.context_window_tokens,
+            compaction_enabled=self.limits.compaction_enabled,
+            max_input_tokens_total=self.limits.max_input_tokens_total,
+            max_output_tokens_total=self.limits.max_output_tokens_total,
+            provider_name=self.provider_id or info["model_provider"],
+        )

@@ -14,6 +14,8 @@ from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
 
 app = typer.Typer(help="Deity AI Coding Agent Harness")
+runs_app = typer.Typer(help="Inspect persisted runs")
+app.add_typer(runs_app, name="runs")
 console = Console()
 
 
@@ -81,6 +83,60 @@ def sessions(
 
     for item in asyncio.run(list_sessions()):
         console.print(f"{item['id']}  {item['workspace']}")
+
+
+@runs_app.command("inspect")
+def inspect_run(
+    run_id: str,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
+    workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Show the safe recovery decision and unresolved tool IDs."""
+    try:
+        settings = load_config(config or Path.home() / ".config/deity/config.toml")
+        service = RunService(
+            db_path=db or Path.home() / ".local/share/deity/deity.db",
+            workspace=(workspace or Path.cwd()).resolve(strict=True),
+            limits=settings.run,
+        )
+        report = asyncio.run(service.inspect(run_id))
+        console.print(f"{report['decision']}: {report['reason']}")
+        for item in report["unresolved_tools"]:
+            console.print(f"{item['call_id']} {item['tool_name']} {item['status']}")
+    except (ValueError, OSError, KeyError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+
+
+@app.command("resume")
+def resume_run(
+    run_id: str,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Continue an interrupted task as a new run from a safe checkpoint."""
+    try:
+        settings = load_config(config or Path.home() / ".config/deity/config.toml")
+        workdir = (workspace or Path.cwd()).resolve(strict=True)
+
+        def approve(name: str, args: dict[str, object]) -> bool:
+            displayed = {key: value for key, value in args.items() if key != "content"}
+            console.print(f"工具 {name} 请求执行：{displayed}")
+            return typer.confirm("允许本次调用？", default=False)
+
+        service = RunService.from_config(
+            settings,
+            db_path=db or Path.home() / ".local/share/deity/deity.db",
+            workspace=workdir,
+            approve=approve,
+        )
+        result = asyncio.run(service.resume(run_id))
+        console.print(result.final_text or "无最终回答")
+    except (ValueError, OSError, KeyError, ModelFailure, ProtocolError, BudgetExceeded) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
 
 
 if __name__ == "__main__":
