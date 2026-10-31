@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import os
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,7 @@ from typing import Any
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped]
 from mcp import Client, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from mcp.types import TextContent
 
 from deity.core.contracts import AgentRequest, ToolCall, ToolResult
@@ -18,12 +21,20 @@ from deity.core.contracts import AgentRequest, ToolCall, ToolResult
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 
+class McpCallNotIssued(RuntimeError):
+    """The connection failed before the business request could be sent."""
+
+
+class McpToolChanged(ValueError):
+    """A reconnected server changed an advertised tool definition."""
+
+
 def _check_schema(value: Any, depth: int = 0) -> None:
     """Reject remote references and excessively nested server schemas."""
     if depth > 12:
         raise ValueError("MCP tool schema too deep")
     if isinstance(value, dict):
-        if "$ref" in value:
+        if "$ref" in value or "$dynamicRef" in value or "$recursiveRef" in value:
             raise ValueError("MCP tool schema references are unsupported")
         for nested in value.values():
             _check_schema(nested, depth + 1)
@@ -44,7 +55,15 @@ class McpServerConfig:
     timeout_seconds: float = 15.0
 
     def __post_init__(self) -> None:
-        if not _NAME.fullmatch(self.name) or not self.command or self.timeout_seconds <= 0:
+        if (
+            not _NAME.fullmatch(self.name)
+            or not self.command
+            or len(self.command) > 4096
+            or len(self.args) > 32
+            or any(len(arg) > 4096 for arg in self.args)
+            or len(self.env_names) > 16
+            or not 0 < self.timeout_seconds <= 120
+        ):
             raise ValueError("invalid MCP server configuration")
 
 
@@ -64,14 +83,12 @@ class McpSessionManager:
     """Use a fresh bounded connection per discovery or call."""
 
     def __init__(self, servers: tuple[McpServerConfig, ...]) -> None:
-        if len({item.name for item in servers}) != len(servers):
+        if len(servers) > 8 or len({item.name for item in servers}) != len(servers):
             raise ValueError("duplicate MCP server")
         self.servers = {item.name: item for item in servers}
 
     @staticmethod
     def _params(config: McpServerConfig) -> StdioServerParameters:
-        import os
-
         env = {name: os.environ[name] for name in config.env_names if name in os.environ}
         return StdioServerParameters(
             command=config.command,
@@ -79,6 +96,14 @@ class McpSessionManager:
             cwd=config.cwd,
             env=env,
         )
+
+    @classmethod
+    @asynccontextmanager
+    async def _connect(cls, config: McpServerConfig) -> AsyncIterator[Client]:
+        """Keep server stderr out of CLI output and persisted evidence."""
+        with open(os.devnull, "w", encoding="utf-8") as errlog:  # noqa: ASYNC230
+            async with Client(stdio_client(cls._params(config), errlog=errlog)) as client:
+                yield client
 
     @staticmethod
     async def _list_all(client: Client) -> list[Any]:
@@ -101,7 +126,7 @@ class McpSessionManager:
         config = self.servers[server]
 
         async def collect() -> tuple[McpTool, ...]:
-            async with Client(self._params(config)) as client:
+            async with self._connect(config) as client:
                 all_tools = await self._list_all(client)
             found: list[McpTool] = []
             names: set[str] = set()
@@ -124,17 +149,28 @@ class McpSessionManager:
     async def call(self, tool: McpTool, arguments: dict[str, Any], call_id: str) -> ToolResult:
         config = self.servers[tool.server]
         Draft202012Validator(tool.schema).validate(arguments)
+        issued = False
 
         async def invoke() -> ToolResult:
-            async with Client(self._params(config)) as client:
+            nonlocal issued
+            async with self._connect(config) as client:
                 listed = await self._list_all(client)
                 current = next((item for item in listed if item.name == tool.name), None)
-                if current is None or current.input_schema != tool.schema:
-                    raise ValueError("MCP tool changed after discovery")
+                if (
+                    current is None
+                    or current.input_schema != tool.schema
+                    or (current.description or "")[:2000] != tool.description
+                ):
+                    raise McpToolChanged("MCP tool changed after discovery")
+                issued = True
                 result = await client.call_tool(tool.name, arguments)
             output = "\n".join(
                 item.text for item in result.content if isinstance(item, TextContent)
             )
+            for name in config.env_names:
+                secret = os.environ.get(name)
+                if secret:
+                    output = output.replace(secret, "[REDACTED]")
             return ToolResult(
                 call_id,
                 "error" if result.is_error else "ok",
@@ -142,7 +178,16 @@ class McpSessionManager:
                 truncated=len(output) > 16_000,
             )
 
-        return await asyncio.wait_for(invoke(), config.timeout_seconds)
+        try:
+            return await asyncio.wait_for(invoke(), config.timeout_seconds)
+        except asyncio.CancelledError:
+            raise
+        except McpToolChanged:
+            raise
+        except Exception as exc:
+            if not issued:
+                raise McpCallNotIssued(type(exc).__name__) from None
+            raise
 
 
 class McpCompositeDispatcher:
@@ -162,7 +207,7 @@ class McpCompositeDispatcher:
         self.manager = manager
         self.tools = {tool.qualified_name: tool for tool in tools}
         self.approve = approve
-        self._prepared: set[tuple[str, str]] = set()
+        self._prepared: dict[tuple[str, str], str] = {}
 
     def definitions(self) -> tuple[dict[str, Any], ...]:
         local: tuple[dict[str, Any], ...] = self.local.definitions()
@@ -182,18 +227,25 @@ class McpCompositeDispatcher:
             result: ToolResult | None = await self.local.prepare(call, context)
             return result
         try:
-            if len(json.dumps(call.arguments, ensure_ascii=False)) > 16_000:
+            arguments_json = json.dumps(
+                call.arguments, ensure_ascii=False, sort_keys=True, allow_nan=False
+            )
+            if len(arguments_json) > 16_000:
                 return ToolResult(call.call_id, "error", "invalid_arguments")
             Draft202012Validator(tool.schema).validate(call.arguments)
-        except (ValidationError, UnicodeError):
+        except (TypeError, ValueError, ValidationError, UnicodeError):
             return ToolResult(call.call_id, "error", "invalid_arguments")
         if self.approve is None or not await asyncio.to_thread(
             self.approve,
             "mcp_tool",
-            {"server": tool.server, "tool": tool.name, "arguments": call.arguments},
+            {
+                "server": tool.server,
+                "tool": tool.name,
+                "arguments": json.loads(arguments_json),
+            },
         ):
             return ToolResult(call.call_id, "denied", "permission_denied")
-        self._prepared.add((context.run_id, call.call_id))
+        self._prepared[(context.run_id, call.call_id)] = arguments_json
         return None
 
     async def dispatch(self, call: ToolCall, context: AgentRequest) -> ToolResult:
@@ -202,7 +254,18 @@ class McpCompositeDispatcher:
             result: ToolResult = await self.local.dispatch(call, context)
             return result
         key = (context.run_id, call.call_id)
-        if key not in self._prepared:
+        prepared_json = self._prepared.pop(key, None)
+        if prepared_json is None:
             return ToolResult(call.call_id, "denied", "approval_required")
-        self._prepared.remove(key)
-        return await self.manager.call(tool, call.arguments, call.call_id)
+        try:
+            current_json = json.dumps(
+                call.arguments, ensure_ascii=False, sort_keys=True, allow_nan=False
+            )
+        except (TypeError, ValueError, UnicodeError):
+            return ToolResult(call.call_id, "denied", "approval_changed")
+        if current_json != prepared_json:
+            return ToolResult(call.call_id, "denied", "approval_changed")
+        try:
+            return await self.manager.call(tool, json.loads(prepared_json), call.call_id)
+        except McpCallNotIssued:
+            return ToolResult(call.call_id, "error", "mcp_call_not_issued")

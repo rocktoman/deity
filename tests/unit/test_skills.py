@@ -32,6 +32,58 @@ async def test_ten_skills_index_only_and_explicit_load(tmp_path: Path) -> None:
     assert result.evidence_id is not None and result.evidence_id.startswith("skill:skill3:")
 
 
+@pytest.mark.asyncio
+async def test_resource_requires_prior_activation_and_body_reference(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    root.mkdir()
+    create_skill(root, "safe", "Read resources/allowed.txt")
+    resource_dir = root / "safe/resources"
+    resource_dir.mkdir()
+    (resource_dir / "allowed.txt").write_text("allowed")
+    (resource_dir / "unlisted.txt").write_text("unlisted")
+    dispatcher = SkillDispatcher(LocalToolDispatcher(), SkillCatalog((("project", root),)))
+    request = AgentRequest("s", "t", str(tmp_path), "use safe", "fake")
+    early = await dispatcher.dispatch(
+        ToolCall("c1", "load_skill_resource", {"name": "safe", "path": "resources/allowed.txt"}),
+        request,
+    )
+    assert early.status == "denied"
+    assert (
+        await dispatcher.dispatch(ToolCall("c2", "load_skill", {"name": "safe"}), request)
+    ).status == "ok"
+    unlisted = await dispatcher.dispatch(
+        ToolCall("c3", "load_skill_resource", {"name": "safe", "path": "resources/unlisted.txt"}),
+        request,
+    )
+    assert unlisted.status == "denied"
+    listed = await dispatcher.dispatch(
+        ToolCall("c4", "load_skill_resource", {"name": "safe", "path": "resources/allowed.txt"}),
+        request,
+    )
+    assert listed.status == "ok" and listed.output == "allowed"
+
+
+@pytest.mark.asyncio
+async def test_skill_loaded_content_has_run_budget(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    root.mkdir()
+    create_skill(root, "safe", "Read large.txt")
+    (root / "safe/large.txt").write_text("x" * 15_000)
+    dispatcher = SkillDispatcher(LocalToolDispatcher(), SkillCatalog((("project", root),)))
+    request = AgentRequest("s", "t", str(tmp_path), "use safe", "fake", run_id="run")
+    assert (
+        await dispatcher.dispatch(ToolCall("load", "load_skill", {"name": "safe"}), request)
+    ).status == "ok"
+    statuses = []
+    for index in range(5):
+        result = await dispatcher.dispatch(
+            ToolCall(f"r{index}", "load_skill_resource", {"name": "safe", "path": "large.txt"}),
+            request,
+        )
+        statuses.append(result.status)
+    assert statuses == ["ok", "ok", "ok", "ok", "denied"]
+
+
 def test_duplicate_and_outside_resource_rejected(tmp_path: Path) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -89,3 +141,17 @@ def test_skill_changed_after_discovery_is_rejected(tmp_path: Path) -> None:
     (root / "safe/SKILL.md").write_text("---\nname: safe\ndescription: Changed\n---\nnew body")
     with pytest.raises(ValueError, match="changed"):
         catalog.load("safe")
+
+
+def test_skill_index_has_total_context_limit(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    root.mkdir()
+    for index in range(30):
+        directory = root / f"skill{index}"
+        directory.mkdir()
+        (directory / "SKILL.md").write_text(
+            f"---\nname: skill{index}\ndescription: {'x' * 400}\n---\nbody"
+        )
+    catalog = SkillCatalog((("project", root),))
+    with pytest.raises(ValueError, match="index"):
+        catalog.index()

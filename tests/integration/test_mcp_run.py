@@ -62,6 +62,8 @@ async def test_mcp_run_requires_launch_and_call_approval(tmp_path: Path) -> None
         assert [event["type"] for event in events].index("ToolClaimed") < [
             event["type"] for event in events
         ].index("ToolCompleted")
+        claim = next(event for event in events if event["type"] == "ToolClaimed")
+        assert claim["payload"]["approval"] == "approved"
     finally:
         await repo.close()
 

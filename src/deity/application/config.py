@@ -138,6 +138,8 @@ def load_config(path: Path) -> Config:
             )
         if set(mcp) - {"servers"} or not isinstance(mcp.get("servers", {}), dict):
             raise ValueError
+        if len(mcp.get("servers", {})) > 8:
+            raise ValueError
         servers: list[McpServerSettings] = []
         for name, item in mcp.get("servers", {}).items():
             if not isinstance(item, dict) or set(item) - {
@@ -158,16 +160,22 @@ def load_config(path: Path) -> Config:
             if (
                 not isinstance(command, str)
                 or not command
+                or len(command) > 4096
                 or not isinstance(args, list)
+                or len(args) > 32
                 or not all(isinstance(x, str) for x in args)
+                or any(len(x) > 4096 for x in args)
                 or not isinstance(cwd, str)
                 or not cwd
+                or len(cwd) > 4096
                 or not isinstance(env_names, list)
+                or len(env_names) > 16
                 or not all(
                     isinstance(x, str) and re.fullmatch(r"[A-Z][A-Z0-9_]*", x) for x in env_names
                 )
                 or type(timeout) not in (int, float)
                 or timeout <= 0
+                or timeout > 120
             ):
                 raise ValueError
             servers.append(

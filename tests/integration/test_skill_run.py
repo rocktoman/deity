@@ -47,6 +47,56 @@ async def test_model_explicitly_loads_one_of_ten_skills(tmp_path: Path) -> None:
     assert result.final_text == "done" and "body 3" in model.loaded
     repo = await SQLiteSessionRepository.open(db_path)
     try:
-        assert "SkillActivated" in [event["type"] for event in await repo.events(result.run_id)]
+        activation = next(
+            event for event in await repo.events(result.run_id) if event["type"] == "SkillActivated"
+        )
+        assert activation["payload"]["skill_id"] == "skill3"
+        assert activation["payload"]["source"] == "project"
+        assert len(activation["payload"]["sha256"]) == 64
+    finally:
+        await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_resource_event_records_explicit_path(tmp_path: Path) -> None:
+    root = tmp_path / ".deity/skills/demo"
+    root.mkdir(parents=True)
+    (root / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo\n---\nRead resources/answer.txt"
+    )
+    (root / "resources").mkdir()
+    (root / "resources/answer.txt").write_text("answer")
+
+    class ResourceModel:
+        turn = 0
+
+        async def stream(self, _request: ModelRequest):
+            self.turn += 1
+            if self.turn == 1:
+                name, args = "load_skill", '{"name":"demo"}'
+            elif self.turn == 2:
+                name, args = "load_skill_resource", '{"name":"demo","path":"resources/answer.txt"}'
+            else:
+                yield ModelEvent("text_delta", text="done")
+                yield ModelEvent("message_completed")
+                return
+            yield ModelEvent("tool_call_started", call_id=f"c{self.turn}", name=name)
+            yield ModelEvent("tool_call_arguments_delta", call_id=f"c{self.turn}", text=args)
+            yield ModelEvent("message_completed")
+
+    db_path = tmp_path / "deity.db"
+    service = RunService(
+        db_path=db_path, workspace=tmp_path, model=ResourceModel(), skills_enabled=True
+    )
+    result = await service.run("read demo", model_name="fake")
+    repo = await SQLiteSessionRepository.open(db_path)
+    try:
+        resource = next(
+            event
+            for event in await repo.events(result.run_id)
+            if event["type"] == "SkillResourceLoaded"
+        )
+        assert resource["payload"]["path"] == "resources/answer.txt"
+        assert resource["payload"]["source"] == "project"
     finally:
         await repo.close()

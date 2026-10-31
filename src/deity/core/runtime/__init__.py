@@ -367,7 +367,18 @@ class AgentLoop:
                         else None
                     )
                     if not await self._repository.claim_tool(
-                        run_id, call.call_id, call.name, call.arguments, epoch=epoch
+                        run_id,
+                        call.call_id,
+                        call.name,
+                        call.arguments,
+                        epoch=epoch,
+                        approval=(
+                            "approved"
+                            if prepared_result is None
+                            else "denied"
+                            if prepared_result.status == "denied"
+                            else "invalid"
+                        ),
                     ):
                         raise ProtocolError("工具调用已被占用")
                     if prepared_result is None:

@@ -19,6 +19,7 @@ def test_mcp_cli_list_and_test(tmp_path: Path) -> None:
         app, ["mcp", "list", "--config", str(config), "--workspace", str(tmp_path)]
     )
     assert listed.exit_code == 0 and "one" in listed.output
+    assert "enabled" in listed.output and "not_started" in listed.output
     tested = runner.invoke(
         app,
         [

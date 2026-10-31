@@ -194,6 +194,7 @@ class SessionRepository(Protocol):
         name: str,
         args: dict[str, Any],
         epoch: int | None = None,
+        approval: str | None = None,
     ) -> bool: ...
     async def record_tool(
         self, run_id: str, result: ToolResult, epoch: int | None = None

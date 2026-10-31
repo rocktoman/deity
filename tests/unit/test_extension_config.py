@@ -33,6 +33,20 @@ def test_mcp_server_config_is_strict(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_mcp_server_limits_are_enforced(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[mcp.servers.demo]\ncommand = "python"\ntimeout_seconds = 3600\n')
+    with pytest.raises(ValueError):
+        load_config(path)
+    path.write_text(
+        '[mcp.servers.demo]\ncommand = "python"\nargs = ['
+        + ",".join('"x"' for _ in range(33))
+        + "]\n"
+    )
+    with pytest.raises(ValueError):
+        load_config(path)
+
+
 def test_hook_registration_requires_explicit_fields(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(

@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,33 @@ from pydantic import BaseModel, ConfigDict
 from deity.core.contracts import AgentRequest, ToolCall, ToolResult
 
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+
+
+def _read_bounded_file(root: Path, parts: tuple[str, ...]) -> bytes:
+    """Read through directory handles without following replaced symlinks."""
+    try:
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        fd = os.open(root, flags | os.O_DIRECTORY)
+        try:
+            for part in parts[:-1]:
+                child = os.open(part, flags | os.O_DIRECTORY, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            child = os.open(parts[-1], flags, dir_fd=fd)
+            try:
+                details = os.fstat(child)
+                if not stat.S_ISREG(details.st_mode) or details.st_size > 16_000:
+                    raise ValueError("Skill file unavailable or too large")
+                content = os.read(child, 16_001)
+                if len(content) > 16_000:
+                    raise ValueError("Skill file too large")
+                return content
+            finally:
+                os.close(child)
+        finally:
+            os.close(fd)
+    except OSError:
+        raise ValueError("Skill file unavailable") from None
 
 
 @dataclass(frozen=True)
@@ -27,8 +56,11 @@ class SkillManifest:
 class SkillCatalog:
     """Read only bounded metadata until a model explicitly selects a Skill."""
 
-    def __init__(self, roots: tuple[tuple[str, Path], ...]) -> None:
+    def __init__(
+        self, roots: tuple[tuple[str, Path], ...], *, tolerate_errors: bool = False
+    ) -> None:
         self._skills: dict[str, SkillManifest] = {}
+        self.errors: list[str] = []
         for source, root in roots:
             if not root.exists():
                 continue
@@ -37,24 +69,30 @@ class SkillCatalog:
             if len(directories) > 64:
                 raise ValueError("too many Skills")
             for directory in directories:
-                if not directory.is_dir() or directory.is_symlink():
-                    continue
-                path = directory / "SKILL.md"
-                if path.is_symlink() or not path.is_file():
-                    continue
-                if not path.resolve(strict=True).is_relative_to(resolved_root):
-                    raise ValueError("Skill escapes configured root")
-                if path.stat().st_size > 16_000:
-                    raise ValueError("Skill too large")
-                with path.open(encoding="utf-8") as stream:
-                    header = stream.read(2_048)
-                name, description = self._metadata(header)
-                if name != directory.name or name in self._skills:
-                    raise ValueError("Skill name mismatch or duplicate")
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                self._skills[name] = SkillManifest(
-                    name, description, source, path, digest, resolved_root
-                )
+                try:
+                    if not directory.is_dir() or directory.is_symlink():
+                        continue
+                    path = directory / "SKILL.md"
+                    if path.is_symlink() or not path.is_file():
+                        continue
+                    if not path.resolve(strict=True).is_relative_to(resolved_root):
+                        raise ValueError("Skill escapes configured root")
+                    raw = _read_bounded_file(resolved_root, (directory.name, "SKILL.md"))
+                    header = raw[:2_048].decode("utf-8")
+                    name, description = self._metadata(header)
+                    if name != directory.name:
+                        raise ValueError("Skill name mismatch")
+                    if name in self._skills:
+                        first = self._skills[name]
+                        raise ValueError(f"duplicate Skill ID; first source: {first.source}")
+                    digest = hashlib.sha256(raw).hexdigest()
+                    self._skills[name] = SkillManifest(
+                        name, description, source, path, digest, resolved_root
+                    )
+                except (ValueError, OSError, UnicodeError) as exc:
+                    if not tolerate_errors:
+                        raise
+                    self.errors.append(f"{source}:{directory.name}: {exc}")
 
     @staticmethod
     def _metadata(header: str) -> tuple[str, str]:
@@ -79,10 +117,18 @@ class SkillCatalog:
 
     def index(self) -> tuple[dict[str, str], ...]:
         """Expose only metadata to the initial model context."""
-        return tuple(
-            {"name": item.name, "description": item.description, "source": item.source}
+        entries = tuple(
+            {
+                "name": item.name,
+                "description": item.description,
+                "source": item.source,
+                "sha256": item.digest,
+            }
             for item in self._skills.values()
         )
+        if len(json.dumps(entries, ensure_ascii=False).encode("utf-8")) > 8_192:
+            raise ValueError("Skill index exceeds context budget")
+        return entries
 
     def fingerprint(self) -> str:
         """Detect edits to any indexed Skill before a resumed Run."""
@@ -95,16 +141,11 @@ class SkillCatalog:
     def load(self, name: str) -> tuple[str, str]:
         """Load one selected body and return its content hash."""
         manifest = self.inspect(name)
-        if (
-            manifest.path.is_symlink()
-            or not manifest.path.resolve(strict=True).is_relative_to(manifest.root)
-            or manifest.path.stat().st_size > 16_000
-        ):
-            raise ValueError("Skill changed or too large")
-        body = manifest.path.read_text(encoding="utf-8")
-        digest = hashlib.sha256(body.encode()).hexdigest()
+        raw = _read_bounded_file(manifest.root, (name, "SKILL.md"))
+        digest = hashlib.sha256(raw).hexdigest()
         if digest != manifest.digest:
             raise ValueError("Skill changed after discovery")
+        body = raw.decode("utf-8")
         current_name, _ = self._metadata(body[:2_048])
         if current_name != name:
             raise ValueError("Skill changed")
@@ -113,27 +154,20 @@ class SkillCatalog:
     def resource(self, name: str, relative_path: str) -> tuple[str, str]:
         """Read one explicitly requested text resource within the selected Skill."""
         manifest = self.inspect(name)
-        if manifest.path.is_symlink() or not manifest.path.resolve(strict=True).is_relative_to(
-            manifest.root
+        if (
+            hashlib.sha256(_read_bounded_file(manifest.root, (name, "SKILL.md"))).hexdigest()
+            != manifest.digest
         ):
             raise ValueError("Skill changed after discovery")
-        if hashlib.sha256(manifest.path.read_bytes()).hexdigest() != manifest.digest:
-            raise ValueError("Skill changed after discovery")
         relative = Path(relative_path)
-        if relative.is_absolute() or ".." in relative.parts or len(relative.parts) > 5:
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or len(relative.parts) > 5
+            or len(relative_path) > 1024
+        ):
             raise ValueError("Skill resource boundary")
-        root = manifest.path.parent.resolve(strict=True)
-        path = root / relative
-        candidate = root
-        for part in relative.parts:
-            candidate /= part
-            if candidate.is_symlink():
-                raise ValueError("Skill resource symlink")
-        if not path.resolve(strict=True).is_relative_to(root):
-            raise ValueError("Skill resource boundary")
-        if not path.is_file() or path.stat().st_size > 16_000:
-            raise ValueError("Skill resource unavailable")
-        content = path.read_text(encoding="utf-8")
+        content = _read_bounded_file(manifest.root, (name, *relative.parts)).decode("utf-8")
         return content, hashlib.sha256(content.encode()).hexdigest()
 
 
@@ -152,6 +186,16 @@ class SkillDispatcher:
     def __init__(self, inner: Any, catalog: SkillCatalog) -> None:
         self.inner = inner
         self.catalog = catalog
+        self._active_bodies: dict[tuple[str, str], str] = {}
+        self._content_bytes: dict[str, int] = {}
+
+    def _charge(self, run_id: str, content: str) -> bool:
+        current = self._content_bytes.get(run_id, 0)
+        updated = current + len(content.encode("utf-8"))
+        if updated > 65_536:
+            return False
+        self._content_bytes[run_id] = updated
+        return True
 
     def definitions(self) -> tuple[dict[str, Any], ...]:
         inner_definitions: tuple[dict[str, Any], ...] = self.inner.definitions()
@@ -176,13 +220,26 @@ class SkillDispatcher:
             if call.name == "load_skill":
                 args = SkillArgs.model_validate(call.arguments)
                 body, digest = self.catalog.load(args.name)
+                if not self._charge(context.run_id, body):
+                    return ToolResult(call.call_id, "denied", "skill_context_budget")
+                self._active_bodies[(context.run_id, args.name)] = body
+                source = self.catalog.inspect(args.name).source
                 return ToolResult(
-                    call.call_id, "ok", body, evidence_id=f"skill:{args.name}:{digest}"
+                    call.call_id, "ok", body, evidence_id=f"skill:{args.name}:{digest}:{source}"
                 )
             args2 = SkillResourceArgs.model_validate(call.arguments)
+            active_body = self._active_bodies.get((context.run_id, args2.name))
+            if active_body is None or args2.path not in active_body:
+                return ToolResult(call.call_id, "denied", "skill_resource_not_referenced")
             content, digest = self.catalog.resource(args2.name, args2.path)
+            if not self._charge(context.run_id, content):
+                return ToolResult(call.call_id, "denied", "skill_context_budget")
+            source = self.catalog.inspect(args2.name).source
             return ToolResult(
-                call.call_id, "ok", content, evidence_id=f"skill_resource:{args2.name}:{digest}"
+                call.call_id,
+                "ok",
+                content,
+                evidence_id=f"skill_resource:{args2.name}:{digest}:{source}:{args2.path}",
             )
         except (ValueError, KeyError, OSError, UnicodeError):
             return ToolResult(call.call_id, "error", "skill_unavailable")

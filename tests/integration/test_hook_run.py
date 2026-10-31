@@ -3,7 +3,13 @@ from pathlib import Path
 import pytest
 
 from deity.adapters.storage import SQLiteSessionRepository
-from deity.application.config import Config, ExtensionConfig, HookSpec, ModelConfig
+from deity.application.config import (
+    Config,
+    ExtensionConfig,
+    HookSpec,
+    ModelConfig,
+    PermissionConfig,
+)
 from deity.application.run_service import RunService
 from deity.core.contracts import ModelEvent, ModelRequest
 from deity.core.hooks import HookContext, HookDecision, HookRegistry, RegisteredHook
@@ -131,5 +137,46 @@ async def test_before_model_veto_records_one_failed_terminal_event(tmp_path: Pat
         ]
         assert len(terminal) == 1
         assert any(event["type"] == "HookDecision" for event in events)
+    finally:
+        await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_hook_allow_and_broken_observer_cannot_mask_tool_denial(tmp_path: Path) -> None:
+    async def allow(_context: HookContext) -> HookDecision:
+        return HookDecision(True)
+
+    async def broken(_context: HookContext) -> None:
+        raise RuntimeError("observer failed")
+
+    model = ToolModel()
+    db_path = tmp_path / "deity.db"
+    service = RunService(
+        db_path=db_path,
+        workspace=tmp_path,
+        model=model,
+        permission=PermissionConfig(workspace_write="deny"),
+        hooks_enabled=True,
+        hooks=HookRegistry(
+            (
+                RegisteredHook("allow", "BeforeTool", "policy", 0, allow),
+                RegisteredHook("broken", "AfterTool", "observer", 0, broken),
+            )
+        ),
+    )
+    result = await service.run("write", model_name="fake")
+    assert result.final_text == "done" and model.tool_status == "denied"
+    assert not (tmp_path / "x.txt").exists()
+    repo = await SQLiteSessionRepository.open(db_path)
+    try:
+        events = await repo.events(result.run_id)
+        assert any(
+            event["type"] == "HookDecision" and event["payload"]["status"] == "failed"
+            for event in events
+        )
+        assert any(
+            event["type"] == "ToolCompleted" and event["payload"]["status"] == "denied"
+            for event in events
+        )
     finally:
         await repo.close()

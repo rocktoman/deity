@@ -50,6 +50,7 @@ class RunService:
         mcp_enabled: bool = False,
         mcp_servers: tuple[McpServerSettings, ...] = (),
         skills_enabled: bool = False,
+        skill_diagnostics: bool = False,
         hooks_enabled: bool = False,
         hooks: HookRegistry | None = None,
     ) -> None:
@@ -85,12 +86,14 @@ class RunService:
                 (
                     ("user", Path.home() / ".config/deity/skills"),
                     ("project", project_skills),
-                )
+                ),
+                tolerate_errors=skill_diagnostics,
             )
             if skills_enabled
             else None
         )
         if self.skill_catalog is not None:
+            self.skill_catalog.index()
             self.extension_fingerprint = hashlib.sha256(
                 (self.extension_fingerprint + self.skill_catalog.fingerprint()).encode()
             ).hexdigest()
@@ -246,8 +249,9 @@ class RunService:
         return McpCompositeDispatcher(local, manager, tuple(discovered), self.approve)
 
     def mcp_list(self) -> list[str]:
-        """Return configured server names without starting processes."""
-        return [server.name for server in self.mcp_servers]
+        """Return configured server state without starting processes."""
+        state = "enabled" if self.mcp_enabled else "disabled"
+        return [f"{server.name} [{state}] not_started" for server in self.mcp_servers]
 
     async def mcp_test(self) -> list[str]:
         """Approve launch, connect and validate schemas without business calls."""
@@ -264,6 +268,10 @@ class RunService:
         """Return bounded Skill metadata without loading bodies."""
         return self.skill_catalog.index() if self.skill_catalog is not None else ()
 
+    def skills_errors(self) -> tuple[str, ...]:
+        """Return source-qualified parse errors for inspection commands."""
+        return tuple(self.skill_catalog.errors) if self.skill_catalog is not None else ()
+
     def skills_inspect(self, name: str) -> dict[str, str]:
         """Inspect one Skill's metadata without executing its content."""
         if self.skill_catalog is None:
@@ -274,6 +282,7 @@ class RunService:
             "description": item.description,
             "source": item.source,
             "path": str(item.path),
+            "sha256": item.digest,
         }
 
     async def run(

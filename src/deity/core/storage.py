@@ -97,6 +97,7 @@ class InMemorySessionRepository:
         name: str,
         args: dict[str, Any],
         epoch: int | None = None,
+        approval: str | None = None,
     ) -> bool:
         """Reserve a call ID in this run."""
         key = (run_id, call_id)

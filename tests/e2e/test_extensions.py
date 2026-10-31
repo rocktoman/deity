@@ -116,6 +116,23 @@ async def test_x03_crash_boundaries_never_replay_mcp_effect(tmp_path: Path) -> N
             )
         finally:
             await repo.close()
+        if point in {"after_intent", "after_effect"}:
+
+            class NeverCalledModel:
+                calls = 0
+
+                async def stream(self, _request: ModelRequest):
+                    self.calls += 1
+                    yield ModelEvent("text_delta", text="should not run")
+
+            model = NeverCalledModel()
+            service = RunService(db_path=root / "deity.db", workspace=root, model=model)
+            assert (await service.inspect(run_id))["reason"] == "unresolved_tool"
+            with pytest.raises(ValueError, match="unresolved_tool"):
+                await service.resume(run_id)
+            assert model.calls == 0
+            if marker.exists():
+                assert marker.read_text().count("executed") == 1
 
 
 @pytest.mark.asyncio

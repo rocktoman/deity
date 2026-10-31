@@ -171,6 +171,8 @@ class SQLiteSessionRepository:
                         "WHERE run_id=? AND status='pending'",
                         (row["id"],),
                     )
+                    if row["owner_id"] is not None:
+                        await db.execute("DELETE FROM run_leases WHERE run_id=?", (row["id"],))
                     await repo._event(row["id"], "RunInterrupted", {})
                 await db.commit()
             except Exception:
@@ -686,6 +688,7 @@ class SQLiteSessionRepository:
         name: str,
         args: dict[str, Any],
         epoch: int | None = None,
+        approval: str | None = None,
     ) -> bool:
         """Reserve a call ID before any possible side effect."""
         safe_args = _redact(args)
@@ -696,12 +699,16 @@ class SQLiteSessionRepository:
                 cursor = await self.db.execute(
                     "INSERT OR IGNORE INTO tool_executions "
                     "(id, run_id, call_id, tool_name, args_json, status, result_json, "
-                    "approval, intent_at) VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, datetime('now'))",
-                    (str(uuid4()), run_id, call_id, name, json.dumps(safe_args)),
+                    "approval, intent_at) VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, datetime('now'))",
+                    (str(uuid4()), run_id, call_id, name, json.dumps(safe_args), approval),
                 )
                 claimed = cursor.rowcount == 1
                 if claimed:
-                    await self._event(run_id, "ToolClaimed", {"call_id": call_id, "name": name})
+                    await self._event(
+                        run_id,
+                        "ToolClaimed",
+                        {"call_id": call_id, "name": name, "approval": approval},
+                    )
                 await self.db.commit()
             except Exception:
                 await self.db.rollback()
@@ -758,6 +765,16 @@ class SQLiteSessionRepository:
                     else:
                         kind = None
                     if kind is not None:
+                        parts = result.evidence_id.split(":", 4)
+                        skill_details: dict[str, Any] = {}
+                        if len(parts) >= 4:
+                            skill_details = {
+                                "skill_id": parts[1],
+                                "sha256": parts[2],
+                                "source": parts[3],
+                            }
+                        if kind == "SkillResourceLoaded" and len(parts) == 5:
+                            skill_details["path"] = parts[4]
                         await self._event(
                             run_id,
                             kind,
@@ -765,6 +782,7 @@ class SQLiteSessionRepository:
                                 "schema_version": 1,
                                 "call_id": result.call_id,
                                 "reference": result.evidence_id,
+                                **skill_details,
                             },
                         )
                 await self.db.commit()

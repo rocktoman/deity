@@ -33,9 +33,16 @@ def skills_list(
         db_path=Path.home() / ".local/share/deity/deity.db",
         workspace=(workspace or Path.cwd()).resolve(strict=True),
         skills_enabled=True,
+        skill_diagnostics=True,
     )
     for item in service.skills_list():
-        typer.echo(f"{item['name']} [{item['source']}] {item['description']}")
+        typer.echo(
+            f"{item['name']} [{item['source']}] sha256:{item['sha256'][:12]} {item['description']}"
+        )
+    for error in service.skills_errors():
+        typer.echo(f"ERROR {error}")
+    if service.skills_errors():
+        raise typer.Exit(code=2)
 
 
 @skills_app.command("inspect")
@@ -44,15 +51,22 @@ def skills_inspect(
     workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     """Show one Skill's source and description without executing it."""
+    service: RunService | None = None
     try:
         service = RunService(
             db_path=Path.home() / ".local/share/deity/deity.db",
             workspace=(workspace or Path.cwd()).resolve(strict=True),
             skills_enabled=True,
+            skill_diagnostics=True,
         )
         item = service.skills_inspect(name)
-        typer.echo(f"{item['name']} [{item['source']}] {item['path']}\n{item['description']}")
+        typer.echo(
+            f"{item['name']} [{item['source']}] sha256:{item['sha256']} "
+            f"{item['path']}\n{item['description']}"
+        )
     except (KeyError, ValueError, OSError) as exc:
+        for error in service.skills_errors() if service is not None else ():
+            typer.echo(f"ERROR {error}")
         console.print(str(exc), style="red")
         raise typer.Exit(code=2) from None
 
@@ -71,7 +85,7 @@ def mcp_list(
         mcp_servers=settings.mcp_servers,
     )
     for name in service.mcp_list():
-        console.print(name)
+        typer.echo(name)
 
 
 @mcp_app.command("test")
