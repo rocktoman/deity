@@ -10,7 +10,7 @@ Deity 是计划以 Python 3.12+ 构建的开源 AI Coding Agent 运行系统。�
 
 **V0.3 可靠运行时已形成候选实现。** 在 V0.1 闭环上增加 SQLite v2 事实与 Checkpoint、确定性上下文压缩、租约与显式续跑、模型有界重试和取消、R01–R06 故障注入评估。候选验收结果与当前限制见 [V0.3 验收记录](docs/04-evaluation/v0.3-candidate-2026-10-31.md)。
 
-**V0.4 扩展能力已接入，候选验收进行中。** 本地 stdio MCP、按需加载 Skills 与显式注册 Hooks 均默认关闭；确定性扩展评估使用 `uv run --locked python -m evals.runners.extensions`。完整范围、使用方法和安全边界见 [V0.4 使用说明](docs/03-development/v0.4-usage.md)。
+**V0.4 扩展能力已通过候选验收。** 本地 stdio MCP、按需加载 Skills 与显式注册 Hooks 均默认关闭；确定性扩展评估使用 `uv run --locked python -m evals.runners.extensions`。结果见 [V0.4 验收记录](docs/04-evaluation/v0.4-candidate-2026-10-31.md)，配置和安全边界见 [V0.4 使用说明](docs/03-development/v0.4-usage.md)。
 
 ## 核心选择
 
