@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 import typer
 from rich.console import Console
@@ -35,7 +36,7 @@ def main(
 
 @app.command()
 def run(
-    task: str,
+    task: Annotated[list[str] | None, typer.Argument(help="单次任务；省略后进入交互模式")] = None,
     config: Annotated[Path | None, typer.Option("--config", help="TOML 配置路径")] = None,
     workspace: Annotated[Path | None, typer.Option("--workspace", help="工作区路径")] = None,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite 路径")] = None,
@@ -55,8 +56,14 @@ def run(
         service = RunService.from_config(
             settings, db_path=db_path, workspace=workdir, approve=approve
         )
-        result = asyncio.run(service.run(task, model_name=settings.model.name, session_id=session))  # type: ignore[union-attr]
-        console.print(result.final_text or "无最终回答")
+        model_name = settings.model.name  # type: ignore[union-attr]
+        if task is None:
+            asyncio.run(_interactive(service, model_name, session))
+        else:
+            result = asyncio.run(
+                service.run(" ".join(task), model_name=model_name, session_id=session)
+            )
+            console.print(result.final_text or "无最终回答")
     except (ModelFailure, ProtocolError, BudgetExceeded) as exc:
         console.print(f"运行失败：{exc}", style="red")
         raise typer.Exit(code=1) from None
@@ -66,6 +73,28 @@ def run(
     except KeyboardInterrupt:
         console.print("运行已取消", style="yellow")
         raise typer.Exit(code=130) from None
+
+
+async def _interactive(service: RunService, model_name: str, session_id: str | None) -> None:
+    """Read successive prompts within one persisted conversation session."""
+    active_session = session_id or str(uuid4())
+    console.print("Deity 交互模式。输入 /exit 退出。")
+    while True:
+        try:
+            prompt = input("你> ").strip()
+        except EOFError:
+            console.print()
+            return
+        if prompt in {"/exit", "/quit"}:
+            return
+        if not prompt:
+            continue
+        try:
+            result = await service.run(prompt, model_name=model_name, session_id=active_session)
+        except (ModelFailure, ProtocolError, BudgetExceeded, ValueError, OSError) as exc:
+            console.print(f"运行失败：{exc}", style="red")
+            continue
+        console.print(result.final_text or "无最终回答")
 
 
 @app.command()

@@ -126,15 +126,23 @@ class RunService:
                 and instructions_file.stat().st_size <= 16_000
             ):
                 instructions = instructions_file.read_text(encoding="utf-8")
+            context = ContextBuilder(project_instructions=instructions)
             loop = AgentLoop(
                 self.model,
                 dispatcher,
                 repository=repo,
-                context=ContextBuilder(project_instructions=instructions),
+                context=context,
                 workspace_fingerprint=lambda: workspace_digest(self.workspace, (self.db_path,)),
             )
+            prior = [
+                message
+                for message in (await repo.messages(active_session))[-8:]
+                if message["role"] in {"user", "assistant"} and isinstance(message["content"], str)
+            ]
+            initial_messages = context.initial(task)
+            initial_messages[-1:-1] = prior
             self._active_loop = loop
-            result = await loop.run(request)
+            result = await loop.run(request, initial_messages=initial_messages)
             await repo.append_message(active_session, result.run_id, "user", task)
             await repo.append_message(
                 active_session, result.run_id, "assistant", result.final_text or ""

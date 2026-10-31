@@ -121,14 +121,16 @@ class AgentLoop:
         self._active_task.cancel()
         return True
 
-    async def run(self, request: AgentRequest) -> AgentResult:
+    async def run(
+        self, request: AgentRequest, initial_messages: list[dict[str, Any]] | None = None
+    ) -> AgentResult:
         """Run a task with a single owner and bounded model/tool turns."""
         if min(request.max_turns, request.max_tool_calls, request.deadline_seconds) <= 0:
             raise ValueError("运行预算必须大于零")
         if self._owner.locked():
             raise RuntimeError("AgentLoop already has an active run")
         async with self._owner:
-            return await self._run_owned(request)
+            return await self._run_owned(request, initial_messages=initial_messages)
 
     async def run_existing(
         self,
@@ -206,8 +208,12 @@ class AgentLoop:
         started_at = time.monotonic()
         previous_elapsed = float((initial_budget or {}).get("elapsed_seconds", 0))
         deadline = started_at + limits.deadline_seconds - previous_elapsed
-        messages = initial_messages or self._context.initial(request.user_text)
-        if initial_messages is None:
+        messages = (
+            initial_messages
+            if initial_messages is not None
+            else self._context.initial(request.user_text)
+        )
+        if initial_budget is None:
             await self._repository.save_checkpoint(
                 run_id, messages, self._budget_payload(0, 0, elapsed_seconds=0), epoch=epoch
             )
