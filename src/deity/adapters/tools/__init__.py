@@ -76,6 +76,12 @@ def auto_shell_allowed(args: dict[str, Any], root: Path) -> bool:
         return auto_shell_allowed({"argv": nested}, root)
     if command in {"pwd", "echo"}:
         return True
+    if command == "ls":
+        return all(
+            item.startswith("-")
+            or (not Path(item).is_absolute() and (root / item).resolve().is_relative_to(root))
+            for item in argv[1:]
+        )
     if command in {"pytest", "mypy"}:
         return True
     if command == "ruff":
@@ -160,10 +166,11 @@ class LocalToolDispatcher:
             )
         except (BoundaryError, OSError):
             return self._record(call, "denied", "workspace_boundary")
-        if call.name in WRITE_TOOLS | {"shell"} and (
-            self.approve is None or not await asyncio.to_thread(self.approve, call.name, args)
-        ):
-            return self._record(call, "denied", "approval_required")
+        if call.name in WRITE_TOOLS | {"shell"}:
+            if self.approve is None:
+                return self._record(call, "denied", "approval_required")
+            if not await asyncio.to_thread(self.approve, call.name, args):
+                return self._record(call, "denied", "permission_denied")
         try:
             output, exit_code, stream_truncated = await self._execute(call.name, args, root, path)
         except TimeoutError:

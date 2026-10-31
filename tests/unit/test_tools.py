@@ -24,6 +24,8 @@ def request(root: Path) -> AgentRequest:
         (["git", "push"], False),
         (["rm", "-rf", "."], False),
         (["python3", "../outside.py"], False),
+        (["ls", "-la"], True),
+        (["ls", "../"], False),
     ],
 )
 def test_auto_shell_policy(tmp_path: Path, argv: list[str], allowed: bool) -> None:
@@ -55,6 +57,16 @@ async def test_write_requires_approval_and_preserves_existing(tmp_path: Path) ->
     )
     assert again.status == "error"
     assert (tmp_path / "a.txt").read_text() == "new"
+
+
+@pytest.mark.asyncio
+async def test_explicit_policy_denial_is_not_reported_as_missing_approval(tmp_path: Path) -> None:
+    tools = LocalToolDispatcher(approve=lambda name, args: False)
+    result = await tools.dispatch(
+        ToolCall("deny", "shell", {"argv": ["rm", "-rf", "."]}), request(tmp_path)
+    )
+    assert result.status == "denied"
+    assert result.output == "permission_denied"
 
 
 @pytest.mark.asyncio

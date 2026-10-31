@@ -27,11 +27,33 @@ async def test_second_turn_receives_same_session_history(tmp_path: Path) -> None
     service = RunService(db_path=tmp_path / "deity.db", workspace=tmp_path, model=model)
     await service.run("first question", model_name="fake", session_id="conversation")
     await service.run("second question", model_name="fake", session_id="conversation")
-    assert [(item["role"], item["content"]) for item in model.requests[1].messages] == [
+    messages = model.requests[1].messages
+    assert messages[0]["role"] == "system"
+    assert "Deity" in messages[0]["content"]
+    assert [(item["role"], item["content"]) for item in messages[1:]] == [
         ("user", "first question"),
         ("assistant", "answer-1"),
         ("user", "second question"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_repository_instructions_do_not_replace_current_task(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("只修改现有模块")
+
+    class Model:
+        async def stream(self, request: ModelRequest):
+            self.messages = request.messages
+            yield ModelEvent("text_delta", text="done")
+            yield ModelEvent("message_completed")
+
+    model = Model()
+    service = RunService(db_path=tmp_path / "deity.db", workspace=tmp_path, model=model)
+    await service.run("在当前目录创建 bubble_sort.py", model_name="fake")
+    assert [item["role"] for item in model.messages] == ["system", "user", "user"]
+    assert "只修改现有模块" not in model.messages[0]["content"]
+    assert "只修改现有模块" in model.messages[1]["content"]
+    assert model.messages[-1] == {"role": "user", "content": "在当前目录创建 bubble_sort.py"}
 
 
 def test_run_without_task_enters_prompt_and_reuses_session(monkeypatch: pytest.MonkeyPatch) -> None:

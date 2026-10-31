@@ -13,7 +13,7 @@ from deity.adapters.storage import SQLiteSessionRepository
 from deity.adapters.tools import LocalToolDispatcher, auto_shell_allowed
 from deity.adapters.tools.workspace import workspace_digest
 from deity.application.config import Config, PermissionConfig, RunConfig
-from deity.core.context import ContextBuilder
+from deity.core.context import HARNESS_SYSTEM_INSTRUCTIONS, ContextBuilder
 from deity.core.context.reliable import normalize_unicode
 from deity.core.contracts import AgentRequest, AgentResult, ModelProvider, RecoveryDecision
 from deity.core.runtime import AgentLoop
@@ -126,7 +126,10 @@ class RunService:
                 and instructions_file.stat().st_size <= 16_000
             ):
                 instructions = instructions_file.read_text(encoding="utf-8")
-            context = ContextBuilder(project_instructions=instructions)
+            context = ContextBuilder(
+                system_instructions=HARNESS_SYSTEM_INSTRUCTIONS,
+                project_instructions=instructions,
+            )
             loop = AgentLoop(
                 self.model,
                 dispatcher,

@@ -196,10 +196,16 @@ def test_context_is_serializable_and_bounded() -> None:
 
 
 def test_project_instructions_are_context_not_authority() -> None:
-    context = ContextBuilder(project_instructions="read-only project note")
+    context = ContextBuilder(
+        system_instructions="Follow the user's current task",
+        project_instructions="read-only project note",
+    )
     messages = context.initial("hello")
     assert messages[0]["role"] == "system"
-    assert "read-only project note" in messages[0]["content"]
+    assert "Follow the user's current task" in messages[0]["content"]
+    assert "read-only project note" not in messages[0]["content"]
+    assert messages[1]["role"] == "user"
+    assert "read-only project note" in messages[1]["content"]
     assert messages[-1] == {"role": "user", "content": "hello"}
 
 
