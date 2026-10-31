@@ -12,7 +12,12 @@ from typing import Any
 from uuid import uuid4
 
 from deity.core.context import ContextBuilder
-from deity.core.context.reliable import ConservativeEstimator, ContextBudget, ContextCompactor
+from deity.core.context.reliable import (
+    ConservativeEstimator,
+    ContextBudget,
+    ContextCompactor,
+    normalize_unicode,
+)
 from deity.core.contracts import (
     AgentRequest,
     AgentResult,
@@ -125,6 +130,7 @@ class AgentLoop:
         self, request: AgentRequest, initial_messages: list[dict[str, Any]] | None = None
     ) -> AgentResult:
         """Run a task with a single owner and bounded model/tool turns."""
+        request = replace(request, user_text=normalize_unicode(request.user_text))
         if min(request.max_turns, request.max_tool_calls, request.deadline_seconds) <= 0:
             raise ValueError("运行预算必须大于零")
         if self._owner.locked():
@@ -444,5 +450,11 @@ class AgentLoop:
                 raise ProtocolError("工具参数 JSON 不完整") from exc
             if not isinstance(arguments, dict):
                 raise ProtocolError("工具参数必须为对象")
+            try:
+                json.dumps(
+                    {"call_id": call_id, "name": name, "arguments": arguments}, ensure_ascii=False
+                ).encode("utf-8")
+            except UnicodeEncodeError:
+                raise ProtocolError("工具参数含非法 Unicode 字符") from None
             calls.append(ToolCall(call_id, name, arguments))
-        return "".join(text_parts), calls, (input_tokens, output_tokens)
+        return normalize_unicode("".join(text_parts)), calls, (input_tokens, output_tokens)

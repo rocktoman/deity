@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import aiosqlite
 
-from deity.core.context.reliable import canonical_json
+from deity.core.context.reliable import canonical_json, normalize_unicode
 from deity.core.contracts import AgentRequest, RunLease, RunStatus, ToolCall, ToolResult
 from deity.core.state import transition
 
@@ -53,7 +53,7 @@ def _redact(value: Any) -> Any:
         return re.sub(
             r"(?i)\b(api_key|token|secret|password)\s*[:=]\s*[^\s,;]+",
             r"\1=[redacted]",
-            value,
+            normalize_unicode(value),
         )
     return value
 

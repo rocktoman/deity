@@ -39,6 +39,18 @@ async def test_write_requires_approval_and_preserves_existing(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_invalid_unicode_write_is_rejected_before_file_creation(tmp_path: Path) -> None:
+    tools = LocalToolDispatcher(approve=lambda name, args: True)
+    result = await tools.dispatch(
+        ToolCall("invalid", "write_file", {"path": "bad.py", "content": "x\ud800"}),
+        request(tmp_path),
+    )
+    assert result.status == "error"
+    assert result.output == "invalid_unicode"
+    assert not (tmp_path / "bad.py").exists()
+
+
+@pytest.mark.asyncio
 async def test_patch_conflict_keeps_file(tmp_path: Path) -> None:
     path = tmp_path / "a.txt"
     path.write_text("current")

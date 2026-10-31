@@ -14,6 +14,7 @@ from deity.adapters.tools import LocalToolDispatcher
 from deity.adapters.tools.workspace import workspace_digest
 from deity.application.config import Config, PermissionConfig, RunConfig
 from deity.core.context import ContextBuilder
+from deity.core.context.reliable import normalize_unicode
 from deity.core.contracts import AgentRequest, AgentResult, ModelProvider, RecoveryDecision
 from deity.core.runtime import AgentLoop
 
@@ -87,6 +88,7 @@ class RunService:
         """Execute and persist a task within the selected workspace."""
         if self.model is None:
             raise ValueError("model is required to run")
+        task = normalize_unicode(task)
         repo = await SQLiteSessionRepository.open(self.db_path)
         try:
 
@@ -135,7 +137,7 @@ class RunService:
                 workspace_fingerprint=lambda: workspace_digest(self.workspace, (self.db_path,)),
             )
             prior = [
-                message
+                {"role": message["role"], "content": normalize_unicode(message["content"])}
                 for message in (await repo.messages(active_session))[-8:]
                 if message["role"] in {"user", "assistant"} and isinstance(message["content"], str)
             ]

@@ -12,12 +12,19 @@ class ContextOverflow(ValueError):
     """Required context cannot fit the configured model window."""
 
 
+def normalize_unicode(value: str) -> str:
+    """Join valid surrogate pairs and replace isolated surrogates at text boundaries."""
+    if not any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+        return value
+    return value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+
 def sanitize_text(value: str) -> str:
     """Redact credential-shaped assignments before model or storage use."""
     return re.sub(
         r"(?i)\b(api_key|token|secret|password)\s*[:=]\s*[^\s,;]+",
         r"\1=[redacted]",
-        value,
+        normalize_unicode(value),
     )
 
 

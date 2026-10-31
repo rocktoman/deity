@@ -1,6 +1,7 @@
 """Validated local tool dispatch and approval policy."""
 
 import asyncio
+import json
 import os
 import signal
 from collections.abc import Callable
@@ -104,6 +105,10 @@ class LocalToolDispatcher:
             args = schema.model_validate(call.arguments).model_dump()
         except ValidationError:
             return self._record(call, "error", "invalid_arguments")
+        try:
+            json.dumps(args, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            return self._record(call, "error", "invalid_unicode")
         root = Path(context.workspace).resolve(strict=True)
         try:
             path = (

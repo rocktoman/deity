@@ -33,9 +33,9 @@ def workspace_digest(root: Path, excluded: tuple[Path, ...] = ()) -> str:
             if str(path.resolve(strict=False)) in excluded_names:
                 continue
             relative = path.relative_to(root).as_posix()
-            digest.update(relative.encode("utf-8") + b"\0")
+            digest.update(os.fsencode(relative) + b"\0")
             if path.is_symlink():
-                digest.update(b"symlink:" + os.readlink(path).encode("utf-8"))
+                digest.update(b"symlink:" + os.fsencode(os.readlink(path)))
                 continue
             seen += 1
             if seen > _MAX_FILES:
