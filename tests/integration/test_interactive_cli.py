@@ -116,3 +116,84 @@ def test_run_accepts_unquoted_chinese_words(monkeypatch: pytest.MonkeyPatch) -> 
     result = CliRunner().invoke(cli.app, ["run", "我想问你", "一件事"])
     assert result.exit_code == 0, result.output
     assert calls == ["我想问你 一件事"]
+
+
+def test_slash_skill_selects_only_the_next_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    cli = importlib.import_module("deity.interfaces.cli.main")
+    calls: list[str] = []
+
+    class FakeService:
+        def skills_list(self) -> tuple[dict[str, str], ...]:
+            return (
+                {"name": "check-python-bugs", "description": "检查 Bug", "source": "user"},
+                {"name": "fix-python-bugs", "description": "修复 Bug", "source": "user"},
+            )
+
+        def skills_inspect(self, name: str) -> dict[str, str]:
+            return {"name": name, "source": "user", "description": "修复 Bug", "path": "/tmp/skill"}
+
+        async def run(self, task: str, **kwargs: Any) -> AgentResult:
+            calls.append(task)
+            return AgentResult("run-1", RunStatus.COMPLETED, "ok")
+
+    config = Config(model=ModelConfig("openai_compatible", "fake", "FAKE_KEY"))
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli.RunService, "from_config", lambda *args, **kwargs: FakeService())
+    result = CliRunner().invoke(cli.app, [], input="/skill\n2\n修复这个问题\n下一题\n/exit\n")
+    assert result.exit_code == 0, result.output
+    assert "fix-python-bugs" in result.output
+    assert calls == ["请先加载并使用 fix-python-bugs Skill。任务：修复这个问题", "下一题"]
+
+
+def test_slash_mcp_inspects_selected_server_without_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = importlib.import_module("deity.interfaces.cli.main")
+    inspected: list[str] = []
+    tasks: list[str] = []
+
+    class FakeService:
+        def mcp_list(self) -> list[str]:
+            return ["python_check [enabled] not_started", "pytest_runner [enabled] not_started"]
+
+        async def mcp_test(self, server_name: str | None = None) -> list[str]:
+            inspected.append(server_name or "")
+            return ["mcp:pytest_runner:run_pytest"]
+
+        async def run(self, task: str, **kwargs: Any) -> AgentResult:
+            tasks.append(task)
+            return AgentResult("run-1", RunStatus.COMPLETED, "ok")
+
+    config = Config(model=ModelConfig("openai_compatible", "fake", "FAKE_KEY"))
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli.RunService, "from_config", lambda *args, **kwargs: FakeService())
+    result = CliRunner().invoke(cli.app, [], input="/mcp\n2\n1\n执行测试\n/help\n/exit\n")
+    assert result.exit_code == 0, result.output
+    assert inspected == ["pytest_runner"]
+    assert "mcp:pytest_runner:run_pytest" in result.output
+    assert tasks == ["如适用，请使用 mcp:pytest_runner:run_pytest 工具。任务：执行测试"]
+
+
+def test_slash_selection_is_consumed_after_failed_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    cli = importlib.import_module("deity.interfaces.cli.main")
+    tasks: list[str] = []
+
+    class FakeService:
+        def skills_list(self) -> tuple[dict[str, str], ...]:
+            return ({"name": "check-bugs", "description": "检查 Bug", "source": "user"},)
+
+        def skills_inspect(self, name: str) -> dict[str, str]:
+            return {"name": name, "source": "user", "description": "检查 Bug", "path": "/tmp/skill"}
+
+        async def run(self, task: str, **kwargs: Any) -> AgentResult:
+            tasks.append(task)
+            if len(tasks) == 1:
+                raise ValueError("模型不可用")
+            return AgentResult("run-2", RunStatus.COMPLETED, "ok")
+
+    config = Config(model=ModelConfig("openai_compatible", "fake", "FAKE_KEY"))
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli.RunService, "from_config", lambda *args, **kwargs: FakeService())
+    result = CliRunner().invoke(cli.app, [], input="/skill check-bugs\n第一题\n第二题\n/exit\n")
+    assert result.exit_code == 0, result.output
+    assert tasks == ["请先加载并使用 check-bugs Skill。任务：第一题", "第二题"]

@@ -13,6 +13,7 @@ from deity.adapters.storage import SQLiteSessionRepository
 from deity.application.config import load_config
 from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
+from deity.interfaces.cli.menu import choose
 
 app = typer.Typer(help="Deity AI Coding Agent Harness")
 runs_app = typer.Typer(help="Inspect persisted runs")
@@ -179,6 +180,8 @@ def run(
 async def _interactive(service: RunService, model_name: str, session_id: str | None) -> None:
     """Read successive prompts within one persisted conversation session."""
     active_session = session_id or str(uuid4())
+    pending_skill: str | None = None
+    pending_mcp_tool: str | None = None
     console.print("欢迎来到 Deity，我是你的编程助手。")
     while True:
         try:
@@ -190,8 +193,73 @@ async def _interactive(service: RunService, model_name: str, session_id: str | N
             return
         if not prompt:
             continue
+        if prompt == "/help":
+            console.print(
+                "/skill 选择 Skill；/mcp 查看并选择 MCP 工具；"
+                "选择会提示模型在下一条任务中使用；/exit 或 /quit 退出"
+            )
+            continue
+        if prompt == "/skill" or prompt.startswith("/skill "):
+            skills = service.skills_list()
+            names = [item["name"] for item in skills]
+            requested = prompt.removeprefix("/skill").strip()
+            selected = (
+                names.index(requested)
+                if requested in names
+                else choose(
+                    "可用 Skills", [f"{item['name']} [{item['source']}]" for item in skills]
+                )
+                if not requested
+                else None
+            )
+            if selected is None:
+                if requested:
+                    console.print(f"未找到 Skill：{requested}")
+                continue
+            item = service.skills_inspect(names[selected])
+            pending_skill = item["name"]
+            console.print(
+                f"已选择 {pending_skill} [{item['source']}]：{item['description']}\n"
+                f"来源：{item['path']}\n下一条任务将提示模型加载此 Skill。"
+            )
+            continue
+        if prompt == "/mcp":
+            servers = service.mcp_list()
+            selected = choose("已配置的 MCP servers", servers)
+            if selected is None:
+                continue
+            server_name = servers[selected].split()[0]
+            if "[disabled]" in servers[selected]:
+                console.print(f"{server_name} 已禁用；请在配置中开启 MCP。")
+                continue
+            try:
+                tools = await service.mcp_test(server_name)
+            except (ValueError, OSError, TimeoutError) as exc:
+                console.print(f"MCP 检查失败：{exc}", style="red")
+                continue
+            except Exception as exc:  # noqa: BLE001 - keep an external server failure in this menu
+                console.print(f"MCP 检查失败：{type(exc).__name__}", style="red")
+                continue
+            tool_index = choose(f"{server_name} 的工具（仅发现，未调用）", tools)
+            if tool_index is not None:
+                pending_mcp_tool = tools[tool_index]
+                console.print(
+                    f"已选择 {pending_mcp_tool}。下一条任务将提示模型使用此工具；实际调用仍需审批。"
+                )
+            continue
+        if prompt.startswith("/"):
+            console.print("未知命令。输入 /help 查看可用命令。")
+            continue
         try:
-            result = await service.run(prompt, model_name=model_name, session_id=active_session)
+            instructions: list[str] = []
+            if pending_skill:
+                instructions.append(f"请先加载并使用 {pending_skill} Skill。")
+            if pending_mcp_tool:
+                instructions.append(f"如适用，请使用 {pending_mcp_tool} 工具。")
+            task = f"{''.join(instructions)}任务：{prompt}" if instructions else prompt
+            pending_skill = None
+            pending_mcp_tool = None
+            result = await service.run(task, model_name=model_name, session_id=active_session)
         except (ModelFailure, ProtocolError, BudgetExceeded, ValueError, OSError) as exc:
             console.print(f"运行失败：{exc}", style="red")
             continue

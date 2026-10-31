@@ -63,6 +63,8 @@ deity skills list --workspace /path/to/repo
 deity skills inspect <name> --workspace /path/to/repo
 ```
 
+进入 `deity` 的 `Deity> ` 提示符后，可输入 `/help` 查看交互命令。启用 Skills 后，`/skill` 显示当前工作区的用户与项目 Skill；用 ↑↓ 和回车选择后，**下一条任务**会提示模型加载该 Skill，实际是否加载以工具调用为准。`/skill <name>` 可直接选择。`/mcp` 先选择已配置的 server，再选择其工具；发现阶段不调用业务工具，首次启动仍需批准。选中工具只会向模型附加下一条任务的使用提示，不限制运行时可用的其他已配置工具；实际调用仍需逐次审批。Esc 返回，非终端输入可用编号选择。斜杠命令不会发给模型；任务运行失败后，选择也不会自动沿用。
+
 独立命令可在仓库目录用 `uv tool install --editable .` 安装。交互模式在一次启动内复用会话，并将最近四轮问答作为后续模型上下文；单次命令执行后退出。模型配置默认从 `~/.config/deity/config.toml` 读取，密钥只从配置指定的环境变量读取。工具权限可显式配置为 `shell = "auto"`、`workspace_write = "auto"`，免去逐次确认；Shell 自动模式仅运行受限的测试和检查命令。删除文件时可以说 `删除 bubble_sort.py`，也可以在同一会话创建文件后说 `删除刚才新建的文件`；模型负责解析目标，受限的 `delete_file` 工具执行删除。
 
 ## MVP 成功标准

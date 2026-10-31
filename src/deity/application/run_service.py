@@ -197,12 +197,19 @@ class RunService:
         )
 
     async def _mcp_dispatcher(
-        self, repo: SQLiteSessionRepository, local: LocalToolDispatcher
+        self,
+        repo: SQLiteSessionRepository,
+        local: LocalToolDispatcher,
+        server_name: str | None = None,
     ) -> McpCompositeDispatcher | LocalToolDispatcher:
         if not self.mcp_enabled:
             return local
+        if server_name is not None and server_name not in {s.name for s in self.mcp_servers}:
+            raise ValueError(f"MCP server 未配置：{server_name}")
         configs: list[McpServerConfig] = []
         for server in self.mcp_servers:
+            if server_name is not None and server.name != server_name:
+                continue
             cwd = (self.workspace / server.cwd).resolve(strict=True)
             if not cwd.is_relative_to(self.workspace):
                 raise ValueError("MCP server working directory escapes workspace")
@@ -253,11 +260,11 @@ class RunService:
         state = "enabled" if self.mcp_enabled else "disabled"
         return [f"{server.name} [{state}] not_started" for server in self.mcp_servers]
 
-    async def mcp_test(self) -> list[str]:
+    async def mcp_test(self, server_name: str | None = None) -> list[str]:
         """Approve launch, connect and validate schemas without business calls."""
         repo = await SQLiteSessionRepository.open(self.db_path)
         try:
-            dispatcher = await self._mcp_dispatcher(repo, LocalToolDispatcher())
+            dispatcher = await self._mcp_dispatcher(repo, LocalToolDispatcher(), server_name)
             if isinstance(dispatcher, McpCompositeDispatcher):
                 return sorted(dispatcher.tools)
             return []
