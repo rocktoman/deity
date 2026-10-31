@@ -84,6 +84,36 @@ async def test_skill_loaded_content_has_run_budget(tmp_path: Path) -> None:
     assert statuses == ["ok", "ok", "ok", "ok", "denied"]
 
 
+@pytest.mark.asyncio
+async def test_resumed_skill_activation_restores_resource_access(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    root.mkdir()
+    create_skill(root, "safe", "Read answer.txt")
+    (root / "safe/answer.txt").write_text("42")
+    catalog = SkillCatalog((("project", root),))
+    previous = SkillDispatcher(LocalToolDispatcher(), catalog)
+    request = AgentRequest("s", "t", str(tmp_path), "use safe", "fake", run_id="old")
+    loaded = await previous.dispatch(ToolCall("load", "load_skill", {"name": "safe"}), request)
+    assert loaded.status == "ok" and loaded.evidence_id is not None
+    _, name, digest, source = loaded.evidence_id.split(":")
+    successor = SkillDispatcher(LocalToolDispatcher(), catalog)
+    successor.restore_activations(
+        "new",
+        [
+            {
+                "type": "SkillActivated",
+                "payload": {"skill_id": name, "sha256": digest, "source": source},
+            }
+        ],
+    )
+    resumed = AgentRequest("s", "t", str(tmp_path), "use safe", "fake", run_id="new")
+    resource = await successor.dispatch(
+        ToolCall("resource", "load_skill_resource", {"name": "safe", "path": "answer.txt"}),
+        resumed,
+    )
+    assert resource.status == "ok" and resource.output == "42"
+
+
 def test_duplicate_and_outside_resource_rejected(tmp_path: Path) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"

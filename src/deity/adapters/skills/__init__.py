@@ -197,6 +197,34 @@ class SkillDispatcher:
         self._content_bytes[run_id] = updated
         return True
 
+    def restore_activations(self, run_id: str, events: list[dict[str, Any]]) -> None:
+        """Restore only committed Skill activations with unchanged content hashes."""
+        for event in events:
+            if event.get("type") != "SkillActivated":
+                continue
+            payload = event.get("payload", {})
+            name = payload.get("skill_id")
+            if not isinstance(name, str):
+                continue  # Legacy event lacks source and hash; loading again remains possible.
+            manifest = self.catalog.inspect(name)
+            if manifest.source != payload.get("source"):
+                raise ValueError("Skill source changed during resume")
+            body, digest = self.catalog.load(name)
+            if digest != payload.get("sha256"):
+                raise ValueError("Skill content changed during resume")
+            if not self._charge(run_id, body):
+                raise ValueError("Skill context budget exceeded during resume")
+            self._active_bodies[(run_id, name)] = body
+
+    def transfer_activations(
+        self, previous: "SkillDispatcher", source_run_id: str, target_run_id: str
+    ) -> None:
+        """Bind verified resume activations to the newly created successor Run."""
+        for (active_run_id, name), body in previous._active_bodies.items():
+            if active_run_id == source_run_id:
+                self._active_bodies[(target_run_id, name)] = body
+        self._content_bytes[target_run_id] = previous._content_bytes.get(source_run_id, 0)
+
     def definitions(self) -> tuple[dict[str, Any], ...]:
         inner_definitions: tuple[dict[str, Any], ...] = self.inner.definitions()
         return inner_definitions + (

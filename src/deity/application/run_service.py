@@ -285,6 +285,28 @@ class RunService:
             "sha256": item.digest,
         }
 
+    async def _skill_resources_unchanged(
+        self, repo: SQLiteSessionRepository, run_id: str, last_event_seq: int
+    ) -> bool:
+        """Verify every resource that was visible before the recovery checkpoint."""
+        if self.skill_catalog is None:
+            return True
+        for event in await repo.events(run_id):
+            if event["sequence"] > last_event_seq or event["type"] != "SkillResourceLoaded":
+                continue
+            payload = event["payload"]
+            name, path = payload.get("skill_id"), payload.get("path")
+            if not isinstance(name, str) or not isinstance(path, str):
+                return False
+            try:
+                manifest = self.skill_catalog.inspect(name)
+                _content, digest = self.skill_catalog.resource(name, path)
+            except (KeyError, ValueError, OSError):
+                return False
+            if manifest.source != payload.get("source") or digest != payload.get("sha256"):
+                return False
+        return True
+
     async def run(
         self, task: str, *, model_name: str, session_id: str | None = None
     ) -> AgentResult:
@@ -393,6 +415,10 @@ class RunService:
                 reason = "config_changed"
             elif checkpoint["budget"].get("workspace_fingerprint") is None:
                 reason = "unsupported_legacy_checkpoint"
+            elif not await self._skill_resources_unchanged(
+                repo, run_id, checkpoint["last_event_seq"]
+            ):
+                reason = "skill_resource_changed"
             elif checkpoint["budget"]["workspace_fingerprint"] != workspace_digest(
                 self.workspace, (self.db_path,)
             ):
@@ -448,6 +474,15 @@ class RunService:
                 self.workspace, (self.db_path,)
             ):
                 raise ValueError("workspace changed during recovery")
+            restored_skills: SkillDispatcher | None = None
+            if self.skill_catalog is not None:
+                restored_skills = SkillDispatcher(LocalToolDispatcher(), self.skill_catalog)
+                prior_events = [
+                    event
+                    for event in await repo.events(run_id)
+                    if event["sequence"] <= checkpoint["last_event_seq"]
+                ]
+                restored_skills.restore_activations(run_id, prior_events)
             successor = await repo.create_resumed_run(run_id, checkpoint["id"])
 
             request = AgentRequest(
@@ -472,6 +507,8 @@ class RunService:
             )
             if self.skill_catalog is not None:
                 dispatcher = SkillDispatcher(dispatcher, self.skill_catalog)
+                if restored_skills is not None:
+                    dispatcher.transfer_activations(restored_skills, run_id, successor)
             loop = AgentLoop(
                 self.model,
                 dispatcher,
