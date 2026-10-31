@@ -5,10 +5,18 @@ import contextvars
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal
 
 HookPoint = Literal["BeforeModel", "BeforeTool", "AfterTool", "BeforeFinish"]
 HookKind = Literal["observer", "policy"]
+
+
+class HookFailurePolicy(StrEnum):
+    """Fixed V0.4 handling for untrusted local Hook failures."""
+
+    FAIL_CLOSED = "fail_closed"
+    ISOLATE = "isolate"
 
 
 @dataclass(frozen=True)
@@ -53,6 +61,8 @@ class HookRegistry:
     def __init__(self, hooks: tuple[RegisteredHook, ...], timeout_seconds: float = 2.0) -> None:
         if timeout_seconds <= 0 or len({(h.name, h.point) for h in hooks}) != len(hooks):
             raise ValueError("invalid Hook registration")
+        if any(h.point == "AfterTool" and h.kind == "policy" for h in hooks):
+            raise ValueError("AfterTool only accepts observer Hooks")
         self.hooks = tuple(sorted(hooks, key=lambda h: (h.priority, h.name, h.point)))
         self.timeout_seconds = timeout_seconds
         self._inside: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -77,12 +87,17 @@ class HookRegistry:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - third-party hooks must be isolated
+                    failure_policy = (
+                        HookFailurePolicy.FAIL_CLOSED
+                        if hook.kind == "policy"
+                        else HookFailurePolicy.ISOLATE
+                    )
                     outcomes.append(
                         HookOutcome(
                             hook.name,
                             point,
                             hook.kind,
-                            "veto" if hook.kind == "policy" else "failed",
+                            "veto" if failure_policy == HookFailurePolicy.FAIL_CLOSED else "failed",
                             type(exc).__name__,
                         )
                     )

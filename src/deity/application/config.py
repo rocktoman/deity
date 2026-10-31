@@ -125,6 +125,7 @@ def load_config(path: Path) -> Config:
                 or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", item["name"]) is None
                 or item["point"] not in {"BeforeModel", "BeforeTool", "AfterTool", "BeforeFinish"}
                 or item["kind"] not in {"observer", "policy"}
+                or (item["point"] == "AfterTool" and item["kind"] == "policy")
                 or not isinstance(item["callable"], str)
                 or re.fullmatch(r"[A-Za-z_][\w.]*:[A-Za-z_][\w]*", item["callable"]) is None
                 or type(item["priority"]) is not int

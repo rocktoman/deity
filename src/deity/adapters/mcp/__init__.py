@@ -4,11 +4,11 @@ import asyncio
 import json
 import os
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped]
@@ -19,6 +19,7 @@ from mcp.types import TextContent
 from deity.core.contracts import AgentRequest, ToolCall, ToolResult
 
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+_T = TypeVar("_T")
 
 
 class McpCallNotIssued(RuntimeError):
@@ -86,6 +87,12 @@ class McpSessionManager:
         if len(servers) > 8 or len({item.name for item in servers}) != len(servers):
             raise ValueError("duplicate MCP server")
         self.servers = {item.name: item for item in servers}
+        self._slots = asyncio.Semaphore(4)
+
+    async def _bounded(self, operation: Callable[[], Awaitable[_T]]) -> _T:
+        """Limit simultaneously active stdio sessions across discovery and calls."""
+        async with self._slots:
+            return await operation()
 
     @staticmethod
     def _params(config: McpServerConfig) -> StdioServerParameters:
@@ -144,7 +151,7 @@ class McpSessionManager:
                 found.append(McpTool(server, tool.name, (tool.description or "")[:2000], schema))
             return tuple(found)
 
-        return await asyncio.wait_for(collect(), config.timeout_seconds)
+        return await asyncio.wait_for(self._bounded(collect), config.timeout_seconds)
 
     async def call(self, tool: McpTool, arguments: dict[str, Any], call_id: str) -> ToolResult:
         config = self.servers[tool.server]
@@ -179,7 +186,7 @@ class McpSessionManager:
             )
 
         try:
-            return await asyncio.wait_for(invoke(), config.timeout_seconds)
+            return await asyncio.wait_for(self._bounded(invoke), config.timeout_seconds)
         except asyncio.CancelledError:
             raise
         except McpToolChanged:

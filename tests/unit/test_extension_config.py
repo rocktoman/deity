@@ -56,3 +56,6 @@ def test_hook_registration_requires_explicit_fields(tmp_path: Path) -> None:
     )
     config = load_config(path)
     assert config.hook_specs[0].callable_path == "deity.examples.v0_4_hook:deny_delete"
+    path.write_text(path.read_text().replace('point = "BeforeTool"', 'point = "AfterTool"'))
+    with pytest.raises(ValueError):
+        load_config(path)

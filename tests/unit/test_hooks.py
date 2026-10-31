@@ -64,3 +64,11 @@ async def test_context_is_immutable_and_cancellation_propagates() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+def test_after_tool_rejects_policy_hook() -> None:
+    async def allow(_context: HookContext) -> HookDecision:
+        return HookDecision(True)
+
+    with pytest.raises(ValueError, match="AfterTool"):
+        HookRegistry((RegisteredHook("invalid", "AfterTool", "policy", 0, allow),))

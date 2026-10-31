@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Self
@@ -184,3 +185,30 @@ async def test_mcp_denied_approval_never_dispatches(tmp_path: Path) -> None:
     assert denied is not None and denied.status == "denied"
     assert (await dispatcher.dispatch(call, request)).status == "denied"
     assert manager.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_bounds_concurrent_calls(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class SlowClient(FakeClient):
+        active = 0
+        peak = 0
+
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            type(self).active += 1
+            type(self).peak = max(type(self).peak, type(self).active)
+            try:
+                await asyncio.sleep(0.02)
+                return await super().call_tool(name, arguments)
+            finally:
+                type(self).active -= 1
+
+    monkeypatch.setattr("deity.adapters.mcp.Client", SlowClient)
+    manager = McpSessionManager((McpServerConfig("one", "python", cwd=tmp_path),))
+    tool = (await manager.discover("one"))[0]
+    results = await asyncio.gather(
+        *(manager.call(tool, {"text": "hello"}, f"c{index}") for index in range(12))
+    )
+    assert all(result.status == "ok" for result in results)
+    assert SlowClient.peak <= 4
