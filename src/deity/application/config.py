@@ -9,8 +9,8 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class PermissionConfig:
-    shell: Literal["ask", "deny"] = "ask"
-    workspace_write: Literal["ask", "deny"] = "ask"
+    shell: Literal["ask", "auto", "deny"] = "ask"
+    workspace_write: Literal["ask", "auto", "deny"] = "ask"
 
 
 @dataclass(frozen=True)
@@ -101,7 +101,11 @@ def load_config(path: Path) -> Config:
         ):
             raise ValueError
         policy = PermissionConfig(**permission)
-        if policy.shell not in ("ask", "deny") or policy.workspace_write not in ("ask", "deny"):
+        if policy.shell not in ("ask", "auto", "deny") or policy.workspace_write not in (
+            "ask",
+            "auto",
+            "deny",
+        ):
             raise ValueError
         model_config = ModelConfig(**model) if model else None
         if model_config is not None and (

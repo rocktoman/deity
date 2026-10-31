@@ -27,6 +27,14 @@ def test_project_config_cannot_relax_permission(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_explicit_auto_permission_is_valid(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[permission]\nshell = "auto"\nworkspace_write = "auto"\n')
+    config = load_config(path)
+    assert config.permission.shell == "auto"
+    assert config.permission.workspace_write == "auto"
+
+
 def test_deepseek_environment_name_and_output_budget(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(

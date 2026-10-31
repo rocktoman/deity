@@ -81,10 +81,10 @@ def run(
 async def _interactive(service: RunService, model_name: str, session_id: str | None) -> None:
     """Read successive prompts within one persisted conversation session."""
     active_session = session_id or str(uuid4())
-    console.print("Deity 交互模式。输入 /exit 退出。")
+    console.print("欢迎来到 Deity，我是你的编程助手。")
     while True:
         try:
-            prompt = input("你> ").strip()
+            prompt = input("Deity> ").strip()
         except EOFError:
             console.print()
             return

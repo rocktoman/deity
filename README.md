@@ -55,7 +55,7 @@ deity runs inspect <run-id> --workspace /path/to/repo
 deity resume <run-id> --workspace /path/to/repo --config ~/.config/deity/config.toml
 ```
 
-独立命令可在仓库目录用 `uv tool install --editable .` 安装。交互模式在一次启动内复用会话，并将最近四轮问答作为后续模型上下文；单次命令执行后退出。模型配置默认从 `~/.config/deity/config.toml` 读取，密钥只从配置指定的环境变量读取。
+独立命令可在仓库目录用 `uv tool install --editable .` 安装。交互模式在一次启动内复用会话，并将最近四轮问答作为后续模型上下文；单次命令执行后退出。模型配置默认从 `~/.config/deity/config.toml` 读取，密钥只从配置指定的环境变量读取。工具权限可显式配置为 `shell = "auto"`、`workspace_write = "auto"`，免去逐次确认；Shell 自动模式仅运行受限的测试和检查命令。
 
 ## MVP 成功标准
 

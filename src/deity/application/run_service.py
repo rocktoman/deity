@@ -10,7 +10,7 @@ from uuid import uuid4
 from deity.adapters.model.anthropic import AnthropicProvider
 from deity.adapters.model.openai_compatible import OpenAICompatibleProvider
 from deity.adapters.storage import SQLiteSessionRepository
-from deity.adapters.tools import LocalToolDispatcher
+from deity.adapters.tools import LocalToolDispatcher, auto_shell_allowed
 from deity.adapters.tools.workspace import workspace_digest
 from deity.application.config import Config, PermissionConfig, RunConfig
 from deity.core.context import ContextBuilder
@@ -47,6 +47,15 @@ class RunService:
     def cancel(self, run_id: str) -> bool:
         """Signal cancellation to this service's active run."""
         return self._active_loop.cancel(run_id) if self._active_loop is not None else False
+
+    def _authorize(self, name: str, args: dict[str, Any]) -> bool:
+        """Apply configured permission before any optional interactive approval."""
+        policy = self.permission.shell if name == "shell" else self.permission.workspace_write
+        if policy == "deny":
+            return False
+        if policy == "auto":
+            return auto_shell_allowed(args, self.workspace) if name == "shell" else True
+        return self.approve(name, args) if self.approve is not None else False
 
     @classmethod
     def from_config(
@@ -91,18 +100,7 @@ class RunService:
         task = normalize_unicode(task)
         repo = await SQLiteSessionRepository.open(self.db_path)
         try:
-
-            def authorize(name: str, args: dict[str, Any]) -> bool:
-                if name == "shell" and self.permission.shell == "deny":
-                    return False
-                if (
-                    name in {"write_file", "apply_patch"}
-                    and self.permission.workspace_write == "deny"
-                ):
-                    return False
-                return self.approve(name, args) if self.approve is not None else False
-
-            dispatcher = LocalToolDispatcher(approve=authorize)
+            dispatcher = LocalToolDispatcher(approve=self._authorize)
             active_session = session_id or str(uuid4())
             request = AgentRequest(
                 session_id=active_session,
@@ -241,16 +239,6 @@ class RunService:
                 raise ValueError("workspace changed during recovery")
             successor = await repo.create_resumed_run(run_id, checkpoint["id"])
 
-            def authorize(name: str, args: dict[str, Any]) -> bool:
-                if name == "shell" and self.permission.shell == "deny":
-                    return False
-                if (
-                    name in {"write_file", "apply_patch"}
-                    and self.permission.workspace_write == "deny"
-                ):
-                    return False
-                return self.approve(name, args) if self.approve is not None else False
-
             request = AgentRequest(
                 session_id=info["session_id"],
                 task_id=info["task_id"],
@@ -269,7 +257,7 @@ class RunService:
             )
             loop = AgentLoop(
                 self.model,
-                LocalToolDispatcher(approve=authorize),
+                LocalToolDispatcher(approve=self._authorize),
                 repository=repo,
                 workspace_fingerprint=lambda: workspace_digest(self.workspace, (self.db_path,)),
             )

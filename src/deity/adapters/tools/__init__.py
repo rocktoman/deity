@@ -61,6 +61,48 @@ TOOL_ARGS: dict[str, type[Args]] = {
 WRITE_TOOLS = {"write_file", "apply_patch"}
 
 
+def auto_shell_allowed(args: dict[str, Any], root: Path) -> bool:
+    """Allow common local checks without opening arbitrary shell commands."""
+    argv = args.get("argv")
+    if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
+        return False
+    command = Path(argv[0]).name
+    if argv[0] != command and argv[0] != "./gradlew":
+        return False
+    if command == "uv" and len(argv) >= 3 and argv[1] == "run":
+        nested = argv[2:]
+        if nested and nested[0] == "--locked":
+            nested = nested[1:]
+        return auto_shell_allowed({"argv": nested}, root)
+    if command in {"pwd", "echo"}:
+        return True
+    if command in {"pytest", "mypy"}:
+        return True
+    if command == "ruff":
+        if len(argv) < 2:
+            return False
+        if argv[1] == "check":
+            return not any(flag.startswith("--fix") for flag in argv[2:]) and (
+                "--unsafe-fixes" not in argv
+            )
+        return argv[1] == "format" and "--check" in argv
+    if command in {"python", "python3"}:
+        if len(argv) >= 3 and argv[1] == "-m":
+            return argv[2] in {"pytest", "unittest", "compileall"}
+        if len(argv) >= 2 and not argv[1].startswith("-"):
+            script = Path(argv[1])
+            return (
+                not script.is_absolute()
+                and script.suffix == ".py"
+                and (root / script).resolve().is_relative_to(root)
+            )
+    if command == "mvn":
+        return len(argv) >= 2 and argv[1] == "test"
+    if command == "gradlew" and argv[0] == "./gradlew":
+        return len(argv) >= 2 and argv[1] == "test"
+    return False
+
+
 class BoundaryError(ValueError):
     """A path escapes the configured workspace."""
 

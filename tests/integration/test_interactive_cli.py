@@ -73,6 +73,10 @@ def test_bare_deity_enters_interactive_prompt(monkeypatch: pytest.MonkeyPatch) -
     assert result.exit_code == 0, result.output
     assert calls == ["你好"]
     assert "reply" in result.output
+    assert "欢迎来到 Deity，我是你的编程助手。" in result.output
+    assert "Deity> reply" in result.output
+    assert "Deity 交互模式" not in result.output
+    assert "你>" not in result.output
 
 
 def test_run_accepts_unquoted_chinese_words(monkeypatch: pytest.MonkeyPatch) -> None:

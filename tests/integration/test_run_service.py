@@ -54,3 +54,76 @@ async def test_deny_policy_cannot_be_overridden_by_approval(tmp_path: Path) -> N
     )
     await service.run("write", model_name="fake")
     assert not (tmp_path / "a.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_auto_permission_completes_write_and_safe_shell_without_prompt(
+    tmp_path: Path,
+) -> None:
+    class ToolModel:
+        def __init__(self) -> None:
+            self.turn = 0
+            self.results: list[str] = []
+
+        async def stream(self, request: ModelRequest):
+            self.turn += 1
+            if self.turn == 1:
+                yield ModelEvent("tool_call_started", call_id="w", name="write_file")
+                yield ModelEvent(
+                    "tool_call_arguments_delta",
+                    call_id="w",
+                    text='{"path":"bubble.py","content":"print(1)"}',
+                )
+                yield ModelEvent("tool_call_started", call_id="s", name="shell")
+                yield ModelEvent("tool_call_arguments_delta", call_id="s", text='{"argv":["pwd"]}')
+            else:
+                self.results = [m["status"] for m in request.messages if m["role"] == "tool"]
+                yield ModelEvent("text_delta", text="done")
+            yield ModelEvent("message_completed")
+
+    model = ToolModel()
+
+    def unexpected_approval(name: str, args: dict[str, object]) -> bool:
+        raise AssertionError("auto mode must not prompt")
+
+    service = RunService(
+        db_path=tmp_path / "deity.db",
+        workspace=tmp_path,
+        model=model,
+        approve=unexpected_approval,
+        permission=PermissionConfig(shell="auto", workspace_write="auto"),
+    )
+    result = await service.run("write bubble sort", model_name="fake")
+    assert result.status == RunStatus.COMPLETED
+    assert (tmp_path / "bubble.py").read_text() == "print(1)"
+    assert model.results == ["ok", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_auto_permission_rejects_destructive_shell(tmp_path: Path) -> None:
+    class ShellModel:
+        def __init__(self) -> None:
+            self.turn = 0
+            self.status = ""
+
+        async def stream(self, request: ModelRequest):
+            self.turn += 1
+            if self.turn == 1:
+                yield ModelEvent("tool_call_started", call_id="s", name="shell")
+                yield ModelEvent(
+                    "tool_call_arguments_delta", call_id="s", text='{"argv":["rm","-rf","."]}'
+                )
+            else:
+                self.status = next(m["status"] for m in request.messages if m["role"] == "tool")
+                yield ModelEvent("text_delta", text="done")
+            yield ModelEvent("message_completed")
+
+    model = ShellModel()
+    service = RunService(
+        db_path=tmp_path / "deity.db",
+        workspace=tmp_path,
+        model=model,
+        permission=PermissionConfig(shell="auto"),
+    )
+    await service.run("delete", model_name="fake")
+    assert model.status == "denied"

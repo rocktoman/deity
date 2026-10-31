@@ -3,12 +3,31 @@ from pathlib import Path
 
 import pytest
 
-from deity.adapters.tools import LocalToolDispatcher
+from deity.adapters.tools import LocalToolDispatcher, auto_shell_allowed
 from deity.core.contracts import AgentRequest, ToolCall
 
 
 def request(root: Path) -> AgentRequest:
     return AgentRequest("s", "t", str(root), "task", "fake")
+
+
+@pytest.mark.parametrize(
+    "argv,allowed",
+    [
+        (["uv", "run", "pytest", "-q"], True),
+        (["python3", "-m", "pytest"], True),
+        (["ruff", "check", ".", "--fix"], False),
+        (["ruff", "check", ".", "--fix-only"], False),
+        (["/tmp/pytest"], False),
+        (["python3", "-c", "print(1)"], False),
+        (["sh", "-c", "rm -rf ."], False),
+        (["git", "push"], False),
+        (["rm", "-rf", "."], False),
+        (["python3", "../outside.py"], False),
+    ],
+)
+def test_auto_shell_policy(tmp_path: Path, argv: list[str], allowed: bool) -> None:
+    assert auto_shell_allowed({"argv": argv}, tmp_path) is allowed
 
 
 @pytest.mark.asyncio

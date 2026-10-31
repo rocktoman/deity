@@ -117,6 +117,8 @@ workspace_write = "ask"
 
 `context_window_tokens` 必须按所选模型明确配置，不能把示例值当作实际模型容量。提供该字段后，新 Run 默认启用压缩；可用 `compaction_enabled = false` 回退。`max_output_tokens` 默认不设置，OpenAI-compatible 请求不会发送人为的 `max_tokens`；Anthropic 协议要求该字段，适配器在未配置时使用 4096。`resume_enabled = false` 会拒绝显式续跑，原 Run 及 v2 审计事实仍可查询。`deity runs inspect` 会返回安全恢复判定；有未知工具结果、活动租约、工作区漂移、配置变化或预算耗尽时不得自动续跑。
 
+需要连续完成本地编码任务时，可将 `[permission]` 中的 `shell` 与 `workspace_write` 显式设为 `"auto"`。工作区内文件写入不再逐次询问；Shell 自动模式仅运行受限的测试和检查命令，其余命令直接拒绝。默认值仍为 `"ask"`；本地工具权限不是 OS 沙箱。详见 [ADR-008](../02-architecture/adr-008-auto-tool-authorization.md)。
+
 ## 7. 开发与评审规范
 
 - Python 类型标注，边界优先 Protocol，避免循环依赖。

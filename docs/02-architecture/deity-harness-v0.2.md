@@ -354,7 +354,7 @@ sequenceDiagram
 
 - **模型 429/5xx**：仅在本轮尚无工具副作用时指数退避重试（有限次数 + jitter）；401/403、参数错误直接失败。
 - **工具执行失败**：转为 `ToolResult(status=error)` 并让模型修复；超时/取消按专用状态处理。
-- **审批超时/无交互模式**：默认拒绝，绝不自动允许；`--yes` 不等于完全放开危险操作。
+- **审批超时/无交互模式**：`ask` 模式默认拒绝；显式配置的 `auto` 模式只自动执行工作区内写入与受限 Shell 命令，见 [ADR-008](adr-008-auto-tool-authorization.md)。
 - **Ctrl+C**：CLI 调用 `RunService.cancel(run_id)` → cancellation token → 关闭模型 stream/终止 subprocess → 持久化 `RunCancelled`；第二次 Ctrl+C 可以强制退出，但记录恢复限制。
 - **模型响应不完整**：不执行部分工具调用，返回协议错误。
 - **进程崩溃**：遗留运行标记 interrupted；恢复仅提供历史上下文，不自动重复外部操作。
