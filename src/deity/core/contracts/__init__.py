@@ -28,7 +28,7 @@ class AgentRequest:
     max_turns: int = 30
     max_tool_calls: int = 100
     deadline_seconds: float = 900
-    max_output_tokens: int = 1024
+    max_output_tokens: int | None = None
     run_id: str = ""
     context_window_tokens: int | None = None
     compaction_enabled: bool = False

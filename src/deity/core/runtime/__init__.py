@@ -238,7 +238,7 @@ class AgentLoop:
                     raise BudgetExceeded("context_window_unknown")
                 budget = ContextBudget(
                     request.context_window_tokens,
-                    request.max_output_tokens,
+                    request.max_output_tokens or max(1, request.context_window_tokens // 10),
                     max(1, request.context_window_tokens // 10),
                 )
                 estimator = ConservativeEstimator()

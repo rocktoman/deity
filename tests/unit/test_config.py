@@ -9,6 +9,7 @@ def test_default_config_is_safe(tmp_path: Path) -> None:
     config = load_config(tmp_path / "absent.toml")
     assert config.permission.shell == "ask"
     assert config.permission.workspace_write == "ask"
+    assert config.run.max_output_tokens is None
 
 
 def test_invalid_config_rejected_without_secret(tmp_path: Path) -> None:

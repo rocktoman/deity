@@ -121,7 +121,10 @@ async def test_sdk_stream_is_closed(protocol: str) -> None:
 
     raw_stream = Raw()
 
+    seen_kwargs = {}
+
     async def create(**kwargs):
+        seen_kwargs.update(kwargs)
         return raw_stream
 
     provider = (
@@ -141,6 +144,10 @@ async def test_sdk_stream_is_closed(protocol: str) -> None:
     ]
     assert events[-1].kind == "message_completed"
     assert raw_stream.closed
+    if protocol == "openai":
+        assert "max_tokens" not in seen_kwargs
+    else:
+        assert seen_kwargs["max_tokens"] == 4096
 
 
 @pytest.mark.asyncio

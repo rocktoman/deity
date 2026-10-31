@@ -18,7 +18,7 @@ class RunConfig:
     max_turns: int = 30
     max_tool_calls: int = 100
     deadline_seconds: int = 900
-    max_output_tokens: int = 1024
+    max_output_tokens: int | None = None
     compaction_enabled: bool = False
     resume_enabled: bool = True
     max_input_tokens_total: int | None = None
@@ -77,9 +77,14 @@ def load_config(path: Path) -> Config:
             raise ValueError
         values = {
             key: run.get(key, getattr(RunConfig(), key))
-            for key in ("max_turns", "max_tool_calls", "deadline_seconds", "max_output_tokens")
+            for key in ("max_turns", "max_tool_calls", "deadline_seconds")
         }
         if any(type(value) is not int or value <= 0 for value in values.values()):
+            raise ValueError
+        max_output_tokens = run.get("max_output_tokens")
+        if max_output_tokens is not None and (
+            type(max_output_tokens) is not int or max_output_tokens <= 0
+        ):
             raise ValueError
         flags = {
             key: run.get(key, getattr(RunConfig(), key))
@@ -119,7 +124,7 @@ def load_config(path: Path) -> Config:
         ):
             raise ValueError
         return Config(
-            run=RunConfig(**values, **flags, **token_limits),
+            run=RunConfig(**values, max_output_tokens=max_output_tokens, **flags, **token_limits),
             permission=policy,
             model=model_config,
         )

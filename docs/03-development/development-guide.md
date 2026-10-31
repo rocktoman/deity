@@ -115,7 +115,7 @@ workspace_write = "ask"
 
 配置示例中的 URL 为占位符。环境变量可用 `DEITY_API_KEY` 等明确命名；不同 provider 的具体密钥映射在适配器中配置，严禁输出到日志。
 
-`context_window_tokens` 必须按所选模型明确配置。提供该字段后，新 Run 默认启用压缩；可用 `compaction_enabled = false` 回退。`resume_enabled = false` 会拒绝显式续跑，原 Run 及 v2 审计事实仍可查询。`deity runs inspect` 会返回安全恢复判定；有未知工具结果、活动租约、工作区漂移、配置变化或预算耗尽时不得自动续跑。
+`context_window_tokens` 必须按所选模型明确配置，不能把示例值当作实际模型容量。提供该字段后，新 Run 默认启用压缩；可用 `compaction_enabled = false` 回退。`max_output_tokens` 默认不设置，OpenAI-compatible 请求不会发送人为的 `max_tokens`；Anthropic 协议要求该字段，适配器在未配置时使用 4096。`resume_enabled = false` 会拒绝显式续跑，原 Run 及 v2 审计事实仍可查询。`deity runs inspect` 会返回安全恢复判定；有未知工具结果、活动租约、工作区漂移、配置变化或预算耗尽时不得自动续跑。
 
 ## 7. 开发与评审规范
 
