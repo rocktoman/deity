@@ -181,3 +181,6 @@ CLI、TUI、FastAPI、MCP、Skills、Sub-Agent 都必须通过 Application/Core 
 依赖可以按需增加，架构边界不能随意突破。
 
 模型可以生成建议，系统必须提供真实验证证据。
+
+## 9. commit
+commit时的message不要使用英文，使用中文
