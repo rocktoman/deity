@@ -219,6 +219,8 @@ class ExecutionContext:
 
 V0.1 内建：`read_file`, `list_files`, `grep`, `glob`, `apply_patch`, `write_file`, `shell`, `git_status`, `git_diff`。所有参数以 JSON Schema/Pydantic 校验；未知工具返回结构化 `unknown_tool`；超长输出截断并记录 `truncated=true`，不得静默截断。
 
+后续增加 `delete_file` 单文件工具：仅当前用户明确写出删除目标时可用；禁止目录、symlink、`.git` 与越界路径，不通过放开 `rm` 实现。见 [ADR-009](adr-009-explicit-file-deletion.md)。
+
 ### 5.2 执行管线
 
 ```text
@@ -231,7 +233,7 @@ normalized tool_call
  → persist ToolResult + audit event → append model-visible tool result
 ```
 
-**默认策略**：只读工作区内文件允许；工作区内写操作可配置为逐次确认或 session 授权；Shell 默认需要审批（可通过受控 allowlist 缩小审批范围）；工作区外写、删除、危险系统命令默认拒绝。拒绝不是异常崩溃，而是可反馈模型的 `denied` 工具结果。模型输出、仓库文件、工具 stdout 都视为不可信输入，不能通过提示词改变权限。
+**默认策略**：只读工作区内文件允许；工作区内写操作可配置为逐次确认或 session 授权；Shell 默认需要审批（可通过受控 allowlist 缩小审批范围）；工作区外写、未明确指定目标的删除、危险系统命令默认拒绝。拒绝不是异常崩溃，而是可反馈模型的 `denied` 工具结果。模型输出、仓库文件、工具 stdout 都视为不可信输入，不能通过提示词改变权限。
 
 **Shell 约束**：使用 `asyncio.create_subprocess_exec` 或受控 shell 调用；明确 cwd、env 白名单、超时、stdout/stderr 大小上限；取消时先终止进程组，宽限后强杀；不保证所有孙进程均可清理。路径校验不足以构成真正沙箱；Docker/OS 隔离属于后续阶段。密钥和令牌不写日志、不暴露给模型。
 

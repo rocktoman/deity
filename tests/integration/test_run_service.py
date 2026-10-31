@@ -127,3 +127,38 @@ async def test_auto_permission_rejects_destructive_shell(tmp_path: Path) -> None
     )
     await service.run("delete", model_name="fake")
     assert model.status == "denied"
+
+
+@pytest.mark.asyncio
+async def test_auto_permission_deletes_explicitly_named_file(tmp_path: Path) -> None:
+    target = tmp_path / "bubble_sort.py"
+    target.write_text("print(1)")
+
+    class DeleteModel:
+        def __init__(self) -> None:
+            self.turn = 0
+            self.status = ""
+
+        async def stream(self, request: ModelRequest):
+            self.turn += 1
+            if self.turn == 1:
+                yield ModelEvent("tool_call_started", call_id="d", name="delete_file")
+                yield ModelEvent(
+                    "tool_call_arguments_delta", call_id="d", text='{"path":"bubble_sort.py"}'
+                )
+            else:
+                self.status = next(m["status"] for m in request.messages if m["role"] == "tool")
+                yield ModelEvent("text_delta", text="deleted")
+            yield ModelEvent("message_completed")
+
+    model = DeleteModel()
+    service = RunService(
+        db_path=tmp_path / "deity.db",
+        workspace=tmp_path,
+        model=model,
+        permission=PermissionConfig(workspace_write="auto"),
+    )
+    result = await service.run("删除 bubble_sort.py", model_name="fake")
+    assert result.status == RunStatus.COMPLETED
+    assert model.status == "ok"
+    assert not target.exists()

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import signal
 from collections.abc import Callable
 from pathlib import Path
@@ -54,11 +55,26 @@ TOOL_ARGS: dict[str, type[Args]] = {
     "grep": SearchArgs,
     "write_file": WriteArgs,
     "apply_patch": PatchArgs,
+    "delete_file": PathArgs,
     "shell": ShellArgs,
     "git_status": EmptyArgs,
     "git_diff": EmptyArgs,
 }
-WRITE_TOOLS = {"write_file", "apply_patch"}
+WRITE_TOOLS = {"write_file", "apply_patch", "delete_file"}
+
+
+def explicit_delete_requested(prompt: str, path: str) -> bool:
+    """Require a named file and an affirmative delete request in this user turn."""
+    name = re.escape(path.removeprefix("./"))
+    target = rf"(?<![A-Za-z0-9_./-])(?:\./)?{name}(?![A-Za-z0-9_./-])"
+    for clause in re.split(r"[,，;；。\n]", prompt):
+        if (
+            re.search(target, clause)
+            and re.search(r"删除|删掉|删去|删了|移除|delete|remove|unlink", clause, re.IGNORECASE)
+            and not re.search(r"不要|别删|禁止|不需要|do not|never", clause, re.IGNORECASE)
+        ):
+            return True
+    return False
 
 
 def auto_shell_allowed(args: dict[str, Any], root: Path) -> bool:
@@ -134,7 +150,11 @@ class LocalToolDispatcher:
         return tuple(
             {
                 "name": name,
-                "description": name.replace("_", " "),
+                "description": (
+                    "Delete one workspace file explicitly named by the current user; never directories"
+                    if name == "delete_file"
+                    else name.replace("_", " ")
+                ),
                 "parameters": schema.model_json_schema(),
             }
             for name, schema in TOOL_ARGS.items()
@@ -161,11 +181,29 @@ class LocalToolDispatcher:
         try:
             path = (
                 self._path(root, args.get("path", "."))
-                if call.name in {"read_file", "list_files", "grep", "write_file", "apply_patch"}
+                if call.name
+                in {"read_file", "list_files", "grep", "write_file", "apply_patch", "delete_file"}
                 else root
             )
         except (BoundaryError, OSError):
             return self._record(call, "denied", "workspace_boundary")
+        if call.name == "delete_file":
+            relative = Path(args["path"])
+            if (
+                not explicit_delete_requested(context.user_text, args["path"])
+                or not relative.parts
+                or ".." in relative.parts
+                or ".git" in relative.parts
+            ):
+                return self._record(call, "denied", "explicit_delete_required")
+            candidate = root
+            for part in relative.parts:
+                candidate /= part
+                if candidate.is_symlink():
+                    return self._record(call, "denied", "symlink_boundary")
+            if not candidate.is_file():
+                return self._record(call, "denied", "not_regular_file")
+            path = candidate
         if call.name in WRITE_TOOLS | {"shell"}:
             if self.approve is None:
                 return self._record(call, "denied", "approval_required")
@@ -234,6 +272,9 @@ class LocalToolDispatcher:
             updated = current.replace(args["old"], args["new"], 1)
             path.write_text(updated, encoding="utf-8")
             return "patched", None, False
+        if name == "delete_file":
+            path.unlink()
+            return "deleted", None, False
         if name == "grep":
             return await self._process(["rg", "--", args["pattern"], str(path)], root)
         if name == "shell":

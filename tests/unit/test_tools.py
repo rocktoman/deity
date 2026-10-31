@@ -60,6 +60,52 @@ async def test_write_requires_approval_and_preserves_existing(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_delete_file_requires_named_user_request_and_approval(tmp_path: Path) -> None:
+    path = tmp_path / "bubble_sort.py"
+    path.write_text("print(1)")
+    call = ToolCall("delete", "delete_file", {"path": "bubble_sort.py"})
+    context = AgentRequest("s", "t", str(tmp_path), "删除 bubble_sort.py", "fake")
+    denied = await LocalToolDispatcher().dispatch(call, context)
+    assert denied.status == "denied"
+    assert path.exists()
+    deleted = await LocalToolDispatcher(approve=lambda name, args: True).dispatch(call, context)
+    assert deleted.status == "ok" and deleted.output == "deleted"
+    assert not path.exists()
+
+    path.write_text("print(2)")
+    context = AgentRequest(
+        "s", "next", str(tmp_path), "删除 bubble_sort.py，不要删除其他文件", "fake"
+    )
+    again = await LocalToolDispatcher(approve=lambda name, args: True).dispatch(call, context)
+    assert again.status == "ok"
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_file_rejects_unrequested_and_unsafe_targets(tmp_path: Path) -> None:
+    (tmp_path / "keep.py").write_text("keep")
+    (tmp_path / "subdir").mkdir()
+    (tmp_path / "link.py").symlink_to(tmp_path / "keep.py")
+    tools = LocalToolDispatcher(approve=lambda name, args: True)
+    cases = [
+        ("keep.py", "不要删除 keep.py", "denied"),
+        ("keep.py", "删除 other.py", "denied"),
+        ("keep.py", "删除 other.py，不要删除 keep.py", "denied"),
+        ("../outside.py", "删除 ../outside.py", "denied"),
+        ("subdir", "删除 subdir", "denied"),
+        ("link.py", "删除 link.py", "denied"),
+        (".git/config", "删除 .git/config", "denied"),
+    ]
+    for index, (path, prompt, expected) in enumerate(cases):
+        context = AgentRequest("s", "t", str(tmp_path), prompt, "fake")
+        result = await tools.dispatch(ToolCall(str(index), "delete_file", {"path": path}), context)
+        assert result.status == expected
+    assert (tmp_path / "keep.py").read_text() == "keep"
+    assert (tmp_path / "subdir").is_dir()
+    assert (tmp_path / "link.py").is_symlink()
+
+
+@pytest.mark.asyncio
 async def test_explicit_policy_denial_is_not_reported_as_missing_approval(tmp_path: Path) -> None:
     tools = LocalToolDispatcher(approve=lambda name, args: False)
     result = await tools.dispatch(

@@ -4,7 +4,7 @@
 
 ## 决策
 
-CLI 配置中的 `shell` 和 `workspace_write` 增加 `auto` 选项。默认仍为 `ask`；用户显式选择 `auto` 后，工作区内的 `write_file`、`apply_patch` 不再逐次询问，Shell 只自动运行受限的测试与检查命令。其他 Shell 命令直接拒绝，不弹确认框。`deny` 始终优先；工具参数校验、工作区路径边界、审计、超时和取消仍由原管线执行。运行与恢复使用同一授权规则。
+CLI 配置中的 `shell` 和 `workspace_write` 增加 `auto` 选项。默认仍为 `ask`；用户显式选择 `auto` 后，工作区内的 `write_file`、`apply_patch` 不再逐次询问，Shell 只自动运行受限的测试与检查命令。其他 Shell 命令直接拒绝，不弹确认框。`deny` 始终优先；工具参数校验、工作区路径边界、审计、超时和取消仍由原管线执行。运行与恢复使用同一授权规则。单文件删除的附加条件见 [ADR-009](adr-009-explicit-file-deletion.md)。
 
 ## 理由与限制
 
