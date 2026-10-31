@@ -1,0 +1,1 @@
+{"id":"X05","pytest":["tests/integration/test_hook_run.py::test_before_tool_hook_veto_is_audited_and_prevents_write","tests/unit/test_hooks.py"]}

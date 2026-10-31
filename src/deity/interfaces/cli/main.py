@@ -13,11 +13,110 @@ from deity.adapters.storage import SQLiteSessionRepository
 from deity.application.config import load_config
 from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
+from deity.interfaces.cli.menu import choose
 
 app = typer.Typer(help="Deity AI Coding Agent Harness")
 runs_app = typer.Typer(help="Inspect persisted runs")
 app.add_typer(runs_app, name="runs")
+mcp_app = typer.Typer(help="Manage local MCP servers")
+app.add_typer(mcp_app, name="mcp")
+skills_app = typer.Typer(help="Inspect configured Skills")
+app.add_typer(skills_app, name="skills")
 console = Console()
+
+
+@skills_app.command("list")
+def skills_list(
+    workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    """Show project and user Skills without loading their bodies."""
+    service = RunService(
+        db_path=Path.home() / ".local/share/deity/deity.db",
+        workspace=(workspace or Path.cwd()).resolve(strict=True),
+        skills_enabled=True,
+        skill_diagnostics=True,
+    )
+    for item in service.skills_list():
+        typer.echo(
+            f"{item['name']} [{item['source']}] sha256:{item['sha256'][:12]} {item['description']}"
+        )
+    for error in service.skills_errors():
+        typer.echo(f"ERROR {error}")
+    if service.skills_errors():
+        raise typer.Exit(code=2)
+
+
+@skills_app.command("inspect")
+def skills_inspect(
+    name: str,
+    workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    """Show one Skill's source and description without executing it."""
+    service: RunService | None = None
+    try:
+        service = RunService(
+            db_path=Path.home() / ".local/share/deity/deity.db",
+            workspace=(workspace or Path.cwd()).resolve(strict=True),
+            skills_enabled=True,
+            skill_diagnostics=True,
+        )
+        item = service.skills_inspect(name)
+        typer.echo(
+            f"{item['name']} [{item['source']}] sha256:{item['sha256']} "
+            f"{item['path']}\n{item['description']}"
+        )
+    except (KeyError, ValueError, OSError) as exc:
+        for error in service.skills_errors() if service is not None else ():
+            typer.echo(f"ERROR {error}")
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+
+
+@mcp_app.command("list")
+def mcp_list(
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    """Show configured MCP servers without starting them."""
+    settings = load_config(config or Path.home() / ".config/deity/config.toml")
+    service = RunService(
+        db_path=Path.home() / ".local/share/deity/deity.db",
+        workspace=(workspace or Path.cwd()).resolve(strict=True),
+        mcp_enabled=settings.extensions.mcp_enabled,
+        mcp_servers=settings.mcp_servers,
+    )
+    for name in service.mcp_list():
+        typer.echo(name)
+
+
+@mcp_app.command("test")
+def mcp_test(
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Check MCP transport and tool schemas without invoking business tools."""
+    try:
+        settings = load_config(config or Path.home() / ".config/deity/config.toml")
+        if not settings.extensions.mcp_enabled:
+            raise ValueError("MCP is disabled")
+
+        def approve(name: str, args: dict[str, object]) -> bool:
+            console.print(f"{name}: {args}")
+            return typer.confirm("允许启动此 MCP server？", default=False)
+
+        service = RunService(
+            db_path=db or Path.home() / ".local/share/deity/deity.db",
+            workspace=(workspace or Path.cwd()).resolve(strict=True),
+            approve=approve,
+            mcp_enabled=True,
+            mcp_servers=settings.mcp_servers,
+        )
+        for name in asyncio.run(service.mcp_test()):
+            typer.echo(name)
+    except (ValueError, OSError, TimeoutError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
 
 
 def version_callback(value: bool) -> None:
@@ -81,6 +180,8 @@ def run(
 async def _interactive(service: RunService, model_name: str, session_id: str | None) -> None:
     """Read successive prompts within one persisted conversation session."""
     active_session = session_id or str(uuid4())
+    pending_skill: str | None = None
+    pending_mcp_tool: str | None = None
     console.print("欢迎来到 Deity，我是你的编程助手。")
     while True:
         try:
@@ -92,8 +193,73 @@ async def _interactive(service: RunService, model_name: str, session_id: str | N
             return
         if not prompt:
             continue
+        if prompt == "/help":
+            console.print(
+                "/skill 选择 Skill；/mcp 查看并选择 MCP 工具；"
+                "选择会提示模型在下一条任务中使用；/exit 或 /quit 退出"
+            )
+            continue
+        if prompt == "/skill" or prompt.startswith("/skill "):
+            skills = service.skills_list()
+            names = [item["name"] for item in skills]
+            requested = prompt.removeprefix("/skill").strip()
+            selected = (
+                names.index(requested)
+                if requested in names
+                else choose(
+                    "可用 Skills", [f"{item['name']} [{item['source']}]" for item in skills]
+                )
+                if not requested
+                else None
+            )
+            if selected is None:
+                if requested:
+                    console.print(f"未找到 Skill：{requested}")
+                continue
+            item = service.skills_inspect(names[selected])
+            pending_skill = item["name"]
+            console.print(
+                f"已选择 {pending_skill} [{item['source']}]：{item['description']}\n"
+                f"来源：{item['path']}\n下一条任务将提示模型加载此 Skill。"
+            )
+            continue
+        if prompt == "/mcp":
+            servers = service.mcp_list()
+            selected = choose("已配置的 MCP servers", servers)
+            if selected is None:
+                continue
+            server_name = servers[selected].split()[0]
+            if "[disabled]" in servers[selected]:
+                console.print(f"{server_name} 已禁用；请在配置中开启 MCP。")
+                continue
+            try:
+                tools = await service.mcp_test(server_name)
+            except (ValueError, OSError, TimeoutError) as exc:
+                console.print(f"MCP 检查失败：{exc}", style="red")
+                continue
+            except Exception as exc:  # noqa: BLE001 - keep an external server failure in this menu
+                console.print(f"MCP 检查失败：{type(exc).__name__}", style="red")
+                continue
+            tool_index = choose(f"{server_name} 的工具（仅发现，未调用）", tools)
+            if tool_index is not None:
+                pending_mcp_tool = tools[tool_index]
+                console.print(
+                    f"已选择 {pending_mcp_tool}。下一条任务将提示模型使用此工具；实际调用仍需审批。"
+                )
+            continue
+        if prompt.startswith("/"):
+            console.print("未知命令。输入 /help 查看可用命令。")
+            continue
         try:
-            result = await service.run(prompt, model_name=model_name, session_id=active_session)
+            instructions: list[str] = []
+            if pending_skill:
+                instructions.append(f"请先加载并使用 {pending_skill} Skill。")
+            if pending_mcp_tool:
+                instructions.append(f"如适用，请使用 {pending_mcp_tool} 工具。")
+            task = f"{''.join(instructions)}任务：{prompt}" if instructions else prompt
+            pending_skill = None
+            pending_mcp_tool = None
+            result = await service.run(task, model_name=model_name, session_id=active_session)
         except (ModelFailure, ProtocolError, BudgetExceeded, ValueError, OSError) as exc:
             console.print(f"运行失败：{exc}", style="red")
             continue
@@ -114,7 +280,7 @@ def sessions(
             await repo.close()
 
     for item in asyncio.run(list_sessions()):
-        console.print(f"{item['id']}  {item['workspace']}")
+        typer.echo(f"{item['id']}  {item['workspace']}")
 
 
 @runs_app.command("inspect")
@@ -127,10 +293,11 @@ def inspect_run(
     """Show the safe recovery decision and unresolved tool IDs."""
     try:
         settings = load_config(config or Path.home() / ".config/deity/config.toml")
-        service = RunService(
+        service = RunService.from_config(
+            settings,
             db_path=db or Path.home() / ".local/share/deity/deity.db",
             workspace=(workspace or Path.cwd()).resolve(strict=True),
-            limits=settings.run,
+            inspection_only=True,
         )
         report = asyncio.run(service.inspect(run_id))
         console.print(f"{report['decision']}: {report['reason']}")

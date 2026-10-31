@@ -1,6 +1,7 @@
 """Provider-independent Agent Loop."""
 
 import asyncio
+import hashlib
 import json
 import os
 import random
@@ -30,13 +31,19 @@ from deity.core.contracts import (
     SessionRepository,
     ToolCall,
     ToolDispatcher,
+    ToolResult,
 )
+from deity.core.hooks import HookPoint, HookRegistry
 from deity.core.state import transition
 from deity.core.storage import InMemorySessionRepository
 
 
 class ProtocolError(ValueError):
     """The model stream violates the normalized protocol."""
+
+
+class PolicyVeto(RuntimeError):
+    """A trusted policy hook blocked the next Runtime action."""
 
 
 class BudgetExceeded(RuntimeError):
@@ -106,12 +113,14 @@ class AgentLoop:
         repository: SessionRepository | None = None,
         context: ContextBuilder | None = None,
         workspace_fingerprint: Callable[[], str] | None = None,
+        hooks: HookRegistry | None = None,
     ) -> None:
         self._model = model
         self._tools = tools
         self._repository = repository or InMemorySessionRepository()
         self._context = context or ContextBuilder()
         self._workspace_fingerprint = workspace_fingerprint
+        self._hooks = hooks
         self._owner = asyncio.Lock()
         self._active_task: asyncio.Task[Any] | None = None
         self._active_run_id: str | None = None
@@ -232,7 +241,21 @@ class AgentLoop:
             if time.monotonic() >= deadline:
                 raise BudgetExceeded("deadline_seconds")
             definitions = getattr(self._tools, "definitions", None)
-            tools = definitions() if callable(definitions) else ()
+            internal_tools = definitions() if callable(definitions) else ()
+            wire_to_internal: dict[str, str] = {}
+            tools_list: list[dict[str, Any]] = []
+            for definition in internal_tools:
+                name = str(definition["name"])
+                wire_name = (
+                    "mcp_" + hashlib.sha256(name.encode()).hexdigest()[:24]
+                    if name.startswith("mcp:")
+                    else name
+                )
+                if wire_name in wire_to_internal:
+                    raise ProtocolError("重复模型工具别名")
+                wire_to_internal[wire_name] = name
+                tools_list.append({**definition, "name": wire_name})
+            tools = tuple(tools_list)
             if request.compaction_enabled:
                 if request.context_window_tokens is None:
                     raise BudgetExceeded("context_window_unknown")
@@ -262,6 +285,7 @@ class AgentLoop:
             model_request = ModelRequest(
                 request.model, tuple(messages), tools, request.max_output_tokens
             )
+            await self._run_hook(run_id, epoch, "BeforeModel", {"turn": turn_index})
             for attempt in range(self._retry.max_attempts):
                 attempt_id = str(uuid4())
                 await self._repository.record_model_attempt(
@@ -272,6 +296,10 @@ class AgentLoop:
                         self._collect(self._tracked_stream(self._model.stream(model_request))),
                         timeout=max(0.001, deadline - time.monotonic()),
                     )
+                    calls = [
+                        replace(call, name=wire_to_internal.get(call.name, call.name))
+                        for call in calls
+                    ]
                     await self._repository.record_model_attempt(
                         run_id, attempt_id, attempt + 1, "completed", epoch=epoch
                     )
@@ -321,19 +349,59 @@ class AgentLoop:
                     if call.call_id in seen:
                         raise ProtocolError("重复 call_id")
                     seen.add(call.call_id)
-                    if not await self._repository.claim_tool(
-                        run_id, call.call_id, call.name, call.arguments, epoch=epoch
-                    ):
-                        raise ProtocolError("工具调用已被占用")
                 messages.append(self._context.assistant_calls(text, calls))
                 for call in calls:
                     self._cancellation.raise_if_cancelled()
-                    result = await asyncio.wait_for(
-                        self._tools.dispatch(call, request),
-                        timeout=max(0.001, deadline - time.monotonic()),
+                    veto = await self._run_hook(
+                        run_id,
+                        epoch,
+                        "BeforeTool",
+                        {"call_id": call.call_id, "name": call.name, "arguments": call.arguments},
                     )
+                    prepare = getattr(self._tools, "prepare", None)
+                    prepared_result: ToolResult | None = (
+                        ToolResult(call.call_id, "denied", "hook_veto")
+                        if veto
+                        else await prepare(call, request)
+                        if callable(prepare)
+                        else None
+                    )
+                    if not await self._repository.claim_tool(
+                        run_id,
+                        call.call_id,
+                        call.name,
+                        call.arguments,
+                        epoch=epoch,
+                        approval=(
+                            "approved"
+                            if prepared_result is None
+                            else "denied"
+                            if prepared_result.status == "denied"
+                            else "invalid"
+                        ),
+                    ):
+                        raise ProtocolError("工具调用已被占用")
+                    if prepared_result is None:
+                        try:
+                            result = await asyncio.wait_for(
+                                self._tools.dispatch(call, request),
+                                timeout=max(0.001, deadline - time.monotonic()),
+                            )
+                        except (Exception, asyncio.CancelledError) as exc:
+                            await self._repository.mark_tool_unknown(
+                                run_id, call.call_id, type(exc).__name__, epoch=epoch
+                            )
+                            raise
+                    else:
+                        result = prepared_result
                     tool_count += 1
                     await self._repository.record_tool(run_id, result, epoch=epoch)
+                    await self._run_hook(
+                        run_id,
+                        epoch,
+                        "AfterTool",
+                        {"call_id": call.call_id, "name": call.name, "status": result.status},
+                    )
                     await self._repository.record_step(run_id, "tool", result.status, epoch=epoch)
                     messages.append(self._context.tool_result(result))
                 await self._repository.save_checkpoint(
@@ -350,6 +418,7 @@ class AgentLoop:
                 )
                 continue
             if text:
+                await self._run_hook(run_id, epoch, "BeforeFinish", {"text_length": len(text)})
                 messages.append({"role": "assistant", "content": text})
                 await self._repository.save_checkpoint(
                     run_id,
@@ -366,6 +435,31 @@ class AgentLoop:
                 return AgentResult(run_id, RunStatus.COMPLETED, text)
             raise ProtocolError("模型响应为空")
         raise BudgetExceeded("max_turns")
+
+    async def _run_hook(
+        self, run_id: str, epoch: int, point: HookPoint, facts: dict[str, Any]
+    ) -> bool:
+        """Audit every registered Hook result before applying a veto."""
+        if self._hooks is None:
+            return False
+        outcomes = await self._hooks.invoke(run_id, point, facts)
+        veto = False
+        for outcome in outcomes:
+            await self._repository.record_hook_event(
+                run_id,
+                {
+                    "point": point,
+                    "name": outcome.name,
+                    "kind": outcome.kind,
+                    "status": outcome.status,
+                    "reason": outcome.reason,
+                },
+                epoch=epoch,
+            )
+            veto = veto or outcome.status == "veto"
+        if veto and point != "BeforeTool":
+            raise PolicyVeto(f"{point} vetoed")
+        return veto
 
     @staticmethod
     async def _tracked_stream(stream: AsyncIterator[ModelEvent]) -> AsyncIterator[ModelEvent]:

@@ -129,6 +129,7 @@ class LocalToolDispatcher:
         self.max_output_chars = max_output_chars
         self.audit: list[tuple[str, str, str]] = []
         self.seen: set[tuple[str, str]] = set()
+        self._prepared: dict[tuple[str, str], tuple[dict[str, Any], Path, Path]] = {}
 
     def definitions(self) -> tuple[dict[str, Any], ...]:
         """Return provider-neutral JSON schemas for the model."""
@@ -145,8 +146,8 @@ class LocalToolDispatcher:
             for name, schema in TOOL_ARGS.items()
         )
 
-    async def dispatch(self, call: ToolCall, context: AgentRequest) -> ToolResult:
-        """Execute one complete call after schema, boundary and policy checks."""
+    async def prepare(self, call: ToolCall, context: AgentRequest) -> ToolResult | None:
+        """Validate and authorize a complete call before durable intent."""
         key = (context.run_id or context.task_id, call.call_id)
         if key in self.seen:
             return self._record(call, "error", "duplicate_call_id")
@@ -189,6 +190,17 @@ class LocalToolDispatcher:
                 return self._record(call, "denied", "approval_required")
             if not await asyncio.to_thread(self.approve, call.name, args):
                 return self._record(call, "denied", "permission_denied")
+        self._prepared[key] = (args, root, path)
+        return None
+
+    async def dispatch(self, call: ToolCall, context: AgentRequest) -> ToolResult:
+        """Execute an approved call, or prepare first for standalone use."""
+        key = (context.run_id or context.task_id, call.call_id)
+        if key not in self._prepared:
+            early = await self.prepare(call, context)
+            if early is not None:
+                return early
+        args, root, path = self._prepared.pop(key)
         try:
             output, exit_code, stream_truncated = await self._execute(call.name, args, root, path)
         except TimeoutError:

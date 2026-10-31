@@ -35,6 +35,7 @@ class AgentRequest:
     max_input_tokens_total: int | None = None
     max_output_tokens_total: int | None = None
     provider_name: str = ""
+    extension_fingerprint: str = ""
 
     def config_fingerprint(self) -> str:
         """Hash recovery-relevant settings without including task text or secrets."""
@@ -50,6 +51,8 @@ class AgentRequest:
             "max_input_tokens_total": self.max_input_tokens_total,
             "max_output_tokens_total": self.max_output_tokens_total,
         }
+        if self.extension_fingerprint:
+            settings["extension_fingerprint"] = self.extension_fingerprint
         encoded = json.dumps(settings, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 
@@ -191,9 +194,16 @@ class SessionRepository(Protocol):
         name: str,
         args: dict[str, Any],
         epoch: int | None = None,
+        approval: str | None = None,
     ) -> bool: ...
     async def record_tool(
         self, run_id: str, result: ToolResult, epoch: int | None = None
+    ) -> None: ...
+    async def mark_tool_unknown(
+        self, run_id: str, call_id: str, reason: str, epoch: int | None = None
+    ) -> None: ...
+    async def record_hook_event(
+        self, run_id: str, payload: dict[str, Any], epoch: int | None = None
     ) -> None: ...
     async def record_step(
         self, run_id: str, kind: str, status: str, epoch: int | None = None

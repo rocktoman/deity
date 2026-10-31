@@ -1,0 +1,1 @@
+{"id":"X03","pytest":["tests/e2e/test_extensions.py::test_x03_crash_boundaries_never_replay_mcp_effect","tests/integration/test_mcp_run.py::test_server_crash_after_effect_is_unknown_and_not_retried"]}

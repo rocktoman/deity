@@ -44,11 +44,12 @@ async def test_v1_migration_keeps_history_and_creates_backup(tmp_path: Path) -> 
     repo = await SQLiteSessionRepository.open(path)
     async with repo.db.execute("SELECT MAX(version) FROM schema_migrations") as cursor:
         row = await cursor.fetchone()
-    assert row is not None and row[0] == 2
+    assert row is not None and row[0] == 3
     assert path.with_suffix(".v1.bak").exists()
     assert sqlite3.connect(path.with_suffix(".v1.bak")).execute(
         "SELECT version FROM schema_migrations"
     ).fetchone() == (1,)
+    assert path.with_suffix(".v2.bak").exists()
     await repo.close()
 
 
