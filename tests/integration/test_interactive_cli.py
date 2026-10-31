@@ -57,6 +57,24 @@ def test_run_without_task_enters_prompt_and_reuses_session(monkeypatch: pytest.M
     assert "reply-1" in result.output and "reply-2" in result.output
 
 
+def test_bare_deity_enters_interactive_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    cli = importlib.import_module("deity.interfaces.cli.main")
+    calls: list[str] = []
+
+    class FakeService:
+        async def run(self, task: str, **kwargs: Any) -> AgentResult:
+            calls.append(task)
+            return AgentResult("run-1", RunStatus.COMPLETED, "reply")
+
+    config = Config(model=ModelConfig("openai_compatible", "fake", "FAKE_KEY"))
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli.RunService, "from_config", lambda *args, **kwargs: FakeService())
+    result = CliRunner().invoke(cli.app, [], input="你好\n/exit\n")
+    assert result.exit_code == 0, result.output
+    assert calls == ["你好"]
+    assert "reply" in result.output
+
+
 def test_run_accepts_unquoted_chinese_words(monkeypatch: pytest.MonkeyPatch) -> None:
     cli = importlib.import_module("deity.interfaces.cli.main")
     calls: list[str] = []

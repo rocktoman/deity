@@ -47,7 +47,8 @@ CLI → Application → Agent Runtime
 
 ```bash
 deity --help
-deity run                         # 进入交互模式；每次直接输入问题，/exit 退出
+deity                             # 进入交互模式；每次直接输入问题，/exit 退出
+deity run                         # 同样可进入交互模式，兼容旧用法
 deity run 分析这个 Python 项目的架构    # 单次任务；可不加引号
 deity sessions
 deity runs inspect <run-id> --workspace /path/to/repo

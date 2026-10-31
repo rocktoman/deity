@@ -27,11 +27,14 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(False, "--version", callback=version_callback, is_eager=True),
 ) -> None:
-    """Run Deity from the local command line."""
+    """Enter the interactive session when no subcommand is provided."""
+    if ctx.invoked_subcommand is None:
+        run(task=None, config=None, workspace=None, db=None, session=None)
 
 
 @app.command()
