@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-import re
 import signal
 from collections.abc import Callable
 from pathlib import Path
@@ -61,20 +60,6 @@ TOOL_ARGS: dict[str, type[Args]] = {
     "git_diff": EmptyArgs,
 }
 WRITE_TOOLS = {"write_file", "apply_patch", "delete_file"}
-
-
-def explicit_delete_requested(prompt: str, path: str) -> bool:
-    """Require a named file and an affirmative delete request in this user turn."""
-    name = re.escape(path.removeprefix("./"))
-    target = rf"(?<![A-Za-z0-9_./-])(?:\./)?{name}(?![A-Za-z0-9_./-])"
-    for clause in re.split(r"[,，;；。\n]", prompt):
-        if (
-            re.search(target, clause)
-            and re.search(r"删除|删掉|删去|删了|移除|delete|remove|unlink", clause, re.IGNORECASE)
-            and not re.search(r"不要|别删|禁止|不需要|do not|never", clause, re.IGNORECASE)
-        ):
-            return True
-    return False
 
 
 def auto_shell_allowed(args: dict[str, Any], root: Path) -> bool:
@@ -151,7 +136,7 @@ class LocalToolDispatcher:
             {
                 "name": name,
                 "description": (
-                    "Delete one workspace file explicitly named by the current user; never directories"
+                    "Delete one regular workspace file selected from the user's request and conversation; never directories"
                     if name == "delete_file"
                     else name.replace("_", " ")
                 ),
@@ -189,13 +174,8 @@ class LocalToolDispatcher:
             return self._record(call, "denied", "workspace_boundary")
         if call.name == "delete_file":
             relative = Path(args["path"])
-            if (
-                not explicit_delete_requested(context.user_text, args["path"])
-                or not relative.parts
-                or ".." in relative.parts
-                or ".git" in relative.parts
-            ):
-                return self._record(call, "denied", "explicit_delete_required")
+            if not relative.parts or ".." in relative.parts or ".git" in relative.parts:
+                return self._record(call, "denied", "protected_path")
             candidate = root
             for part in relative.parts:
                 candidate /= part

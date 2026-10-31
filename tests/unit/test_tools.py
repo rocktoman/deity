@@ -60,11 +60,11 @@ async def test_write_requires_approval_and_preserves_existing(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_delete_file_requires_named_user_request_and_approval(tmp_path: Path) -> None:
+async def test_delete_file_requires_approval(tmp_path: Path) -> None:
     path = tmp_path / "bubble_sort.py"
     path.write_text("print(1)")
     call = ToolCall("delete", "delete_file", {"path": "bubble_sort.py"})
-    context = AgentRequest("s", "t", str(tmp_path), "删除 bubble_sort.py", "fake")
+    context = AgentRequest("s", "t", str(tmp_path), "删除刚才新建的文件", "fake")
     denied = await LocalToolDispatcher().dispatch(call, context)
     assert denied.status == "denied"
     assert path.exists()
@@ -72,25 +72,14 @@ async def test_delete_file_requires_named_user_request_and_approval(tmp_path: Pa
     assert deleted.status == "ok" and deleted.output == "deleted"
     assert not path.exists()
 
-    path.write_text("print(2)")
-    context = AgentRequest(
-        "s", "next", str(tmp_path), "删除 bubble_sort.py，不要删除其他文件", "fake"
-    )
-    again = await LocalToolDispatcher(approve=lambda name, args: True).dispatch(call, context)
-    assert again.status == "ok"
-    assert not path.exists()
-
 
 @pytest.mark.asyncio
-async def test_delete_file_rejects_unrequested_and_unsafe_targets(tmp_path: Path) -> None:
+async def test_delete_file_rejects_unsafe_targets(tmp_path: Path) -> None:
     (tmp_path / "keep.py").write_text("keep")
     (tmp_path / "subdir").mkdir()
     (tmp_path / "link.py").symlink_to(tmp_path / "keep.py")
     tools = LocalToolDispatcher(approve=lambda name, args: True)
     cases = [
-        ("keep.py", "不要删除 keep.py", "denied"),
-        ("keep.py", "删除 other.py", "denied"),
-        ("keep.py", "删除 other.py，不要删除 keep.py", "denied"),
         ("../outside.py", "删除 ../outside.py", "denied"),
         ("subdir", "删除 subdir", "denied"),
         ("link.py", "删除 link.py", "denied"),

@@ -162,3 +162,53 @@ async def test_auto_permission_deletes_explicitly_named_file(tmp_path: Path) -> 
     assert result.status == RunStatus.COMPLETED
     assert model.status == "ok"
     assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_auto_permission_deletes_file_resolved_from_previous_turn(tmp_path: Path) -> None:
+    class ConversationModel:
+        def __init__(self) -> None:
+            self.saw_history = False
+            self.delete_status = ""
+
+        async def stream(self, request: ModelRequest):
+            messages = request.messages
+            if messages[-1]["role"] == "tool":
+                if messages[-1]["call_id"] == "created-file":
+                    yield ModelEvent("text_delta", text="已创建 bubble_sort.py")
+                else:
+                    self.delete_status = messages[-1]["status"]
+                    yield ModelEvent("text_delta", text="已删除")
+            elif messages[-1]["content"] == "帮我创建冒泡排序文件":
+                yield ModelEvent("tool_call_started", call_id="created-file", name="write_file")
+                yield ModelEvent(
+                    "tool_call_arguments_delta",
+                    call_id="created-file",
+                    text='{"path":"bubble_sort.py","content":"print(1)"}',
+                )
+            else:
+                self.saw_history = any(
+                    item.get("content") == "已创建 bubble_sort.py" for item in messages
+                )
+                yield ModelEvent("tool_call_started", call_id="deleted-file", name="delete_file")
+                yield ModelEvent(
+                    "tool_call_arguments_delta",
+                    call_id="deleted-file",
+                    text='{"path":"bubble_sort.py"}',
+                )
+            yield ModelEvent("message_completed")
+
+    model = ConversationModel()
+    service = RunService(
+        db_path=tmp_path / "deity.db",
+        workspace=tmp_path,
+        model=model,
+        permission=PermissionConfig(workspace_write="auto"),
+    )
+    await service.run("帮我创建冒泡排序文件", model_name="fake", session_id="same-session")
+    assert (tmp_path / "bubble_sort.py").exists()
+    result = await service.run("删除刚才新建的文件", model_name="fake", session_id="same-session")
+    assert result.status == RunStatus.COMPLETED
+    assert model.saw_history
+    assert model.delete_status == "ok"
+    assert not (tmp_path / "bubble_sort.py").exists()
