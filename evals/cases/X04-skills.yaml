@@ -1,0 +1,1 @@
+{"id":"X04","pytest":["tests/integration/test_skill_run.py::test_model_explicitly_loads_one_of_ten_skills","tests/integration/test_skill_resume.py","tests/unit/test_skills.py"]}

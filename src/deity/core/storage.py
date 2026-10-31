@@ -115,6 +115,19 @@ class InMemorySessionRepository:
             {"role": "tool", "call_id": result.call_id, "content": result.output}
         )
 
+    async def mark_tool_unknown(
+        self, run_id: str, call_id: str, reason: str, epoch: int | None = None
+    ) -> None:
+        """Keep an unresolved call without inventing an outcome."""
+        if (run_id, call_id) not in self.calls:
+            raise ValueError("tool call not claimed")
+
+    async def record_hook_event(
+        self, run_id: str, payload: dict[str, Any], epoch: int | None = None
+    ) -> None:
+        """Accept a hook audit fact in the in-memory test repository."""
+        return
+
     async def record_step(
         self, run_id: str, kind: str, status: str, epoch: int | None = None
     ) -> None:

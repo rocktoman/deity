@@ -10,6 +10,8 @@ Deity 是计划以 Python 3.12+ 构建的开源 AI Coding Agent 运行系统。�
 
 **V0.3 可靠运行时已形成候选实现。** 在 V0.1 闭环上增加 SQLite v2 事实与 Checkpoint、确定性上下文压缩、租约与显式续跑、模型有界重试和取消、R01–R06 故障注入评估。候选验收结果与当前限制见 [V0.3 验收记录](docs/04-evaluation/v0.3-candidate-2026-10-31.md)。
 
+**V0.4 扩展能力已接入，候选验收进行中。** 本地 stdio MCP、按需加载 Skills 与显式注册 Hooks 均默认关闭；确定性扩展评估使用 `uv run --locked python -m evals.runners.extensions`。完整范围、使用方法和安全边界见 [V0.4 使用说明](docs/03-development/v0.4-usage.md)。
+
 ## 核心选择
 
 - Python 3.12+；本地 CLI 优先，未来可扩展 TUI、FastAPI、IDE。
@@ -39,6 +41,8 @@ CLI → Application → Agent Runtime
 | [开发指南](docs/03-development/development-guide.md) | Python 工程初始化、规范、开发顺序 |
 | [M0–M5 开发实施文档](docs/03-development/m0-m5-implementation-plan.md) | 各阶段编码、单元/集成测试与验收门禁 |
 | [V0.3 Reliable Runtime 实施文档](docs/03-development/v0.3-reliable-runtime-implementation.md) | 压缩、Checkpoint、恢复、重试、取消与长任务门禁 |
+| [V0.4 扩展实施文档](docs/03-development/v0.4-extensible-harness-implementation.md) | MCP、Skills、Hooks 与 X01–X06 门禁 |
+| [V0.4 使用说明](docs/03-development/v0.4-usage.md) | 扩展配置、CLI、授权和回退 |
 | [评估计划](docs/04-evaluation/evaluation-plan.md) | 固定测试任务、指标、门禁 |
 | [DeepSeek L3 基线](docs/04-evaluation/l3-deepseek-v4-flash-2026-10-31.md) | 真实模型 E01–E03 验收结果与限制 |
 | [AGENTS.md](AGENTS.md) | 仓库工程架构和 AI 协作规则 |
@@ -53,6 +57,10 @@ deity run 分析这个 Python 项目的架构    # 单次任务；可不加引�
 deity sessions
 deity runs inspect <run-id> --workspace /path/to/repo
 deity resume <run-id> --workspace /path/to/repo --config ~/.config/deity/config.toml
+deity mcp list --config ~/.config/deity/config.toml
+deity mcp test --config ~/.config/deity/config.toml
+deity skills list --workspace /path/to/repo
+deity skills inspect <name> --workspace /path/to/repo
 ```
 
 独立命令可在仓库目录用 `uv tool install --editable .` 安装。交互模式在一次启动内复用会话，并将最近四轮问答作为后续模型上下文；单次命令执行后退出。模型配置默认从 `~/.config/deity/config.toml` 读取，密钥只从配置指定的环境变量读取。工具权限可显式配置为 `shell = "auto"`、`workspace_write = "auto"`，免去逐次确认；Shell 自动模式仅运行受限的测试和检查命令。删除文件时可以说 `删除 bubble_sort.py`，也可以在同一会话创建文件后说 `删除刚才新建的文件`；模型负责解析目标，受限的 `delete_file` 工具执行删除。
@@ -62,6 +70,8 @@ deity resume <run-id> --workspace /path/to/repo --config ~/.config/deity/config.
 在隔离工作区中完成真实的读取 → 搜索 → 修改 → 执行测试 → 汇报证据的闭环；能够正确拒绝越界/危险操作、取消长命令、处理不完整工具参数、保留会话和事件，并通过固定评估集的阻断门禁。
 
 确定性评估命令：`uv run python -m evals.runners.runner` 和 `uv run python -m evals.runners.reliability`。真实模型候选验收单独运行 `uv run python -m evals.runners.l3_candidate`，固定 E01–E03 与长任务，报告写入 `evals/reports/`；密钥只从 `DEEPSEEK_API_KEY` 读取，真实模型结果不代替确定性测试。
+
+V0.4 扩展评估命令：`uv run --locked python -m evals.runners.extensions`。X01–X06 使用本地 fixture、临时 SQLite 和独立子进程，输出写入 `evals/reports/`。
 
 ## 参考与原创边界
 

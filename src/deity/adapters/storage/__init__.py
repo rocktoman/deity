@@ -73,11 +73,32 @@ def _backup_v1(path: Path) -> None:
             return
         backup_path = path.with_suffix(".v1.bak")
         if backup_path.exists():
+            with sqlite3.connect(backup_path) as saved:
+                if saved.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] != 1:
+                    raise ValueError("v1 backup verification failed")
             return
         with sqlite3.connect(backup_path) as target:
             source.backup(target)
             if target.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] != 1:
                 raise ValueError("v1 backup verification failed")
+
+
+def _backup_v2(path: Path) -> None:
+    """Keep a verified v2 snapshot before adding extension trust storage."""
+    with sqlite3.connect(path) as source:
+        current = source.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+        if current != 2:
+            return
+        backup_path = path.with_suffix(".v2.bak")
+        if backup_path.exists():
+            with sqlite3.connect(backup_path) as saved:
+                if saved.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] != 2:
+                    raise ValueError("v2 backup verification failed")
+            return
+        with sqlite3.connect(backup_path) as target:
+            source.backup(target)
+            if target.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] != 2:
+                raise ValueError("v2 backup verification failed")
 
 
 def _owner_alive(owner_id: str) -> bool:
@@ -114,6 +135,7 @@ class SQLiteSessionRepository:
         publisher: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> "SQLiteSessionRepository":
         """Open storage, migrate schema, and mark orphaned runs interrupted."""
+        existing = path.exists() and path.stat().st_size > 0
         path.parent.mkdir(parents=True, exist_ok=True)
         _backup_v1(path)
         db = await aiosqlite.connect(path)
@@ -125,6 +147,9 @@ class SQLiteSessionRepository:
         await db.commit()
         repo = cls(db, publisher)
         await repo._migrate_v2()
+        if existing:
+            _backup_v2(path)
+        await repo._migrate_v3()
         async with repo._lock:
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -135,9 +160,7 @@ class SQLiteSessionRepository:
                 ) as cursor:
                     rows = await cursor.fetchall()
                 for row in rows:
-                    if row["owner_id"] is not None and (
-                        row["expires_at"] > time.time() or _owner_alive(row["owner_id"])
-                    ):
+                    if row["owner_id"] is not None and _owner_alive(row["owner_id"]):
                         continue
                     await db.execute(
                         "UPDATE runs SET status='interrupted', ended_at=datetime('now') WHERE id=?",
@@ -371,6 +394,42 @@ class SQLiteSessionRepository:
             except Exception:
                 await self.db.rollback()
                 raise
+
+    async def _migrate_v3(self) -> None:
+        """Add digest-scoped local MCP launch authorization."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self.db.execute(
+                    "CREATE TABLE IF NOT EXISTS mcp_launch_trust("
+                    "server_name TEXT PRIMARY KEY, digest TEXT NOT NULL, approved_at TEXT NOT NULL)"
+                )
+                await self.db.execute(
+                    "INSERT OR IGNORE INTO schema_migrations VALUES (3, datetime('now'))"
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+
+    async def mcp_launch_trusted(self, server_name: str, digest: str) -> bool:
+        """Check whether the exact launch configuration was approved."""
+        async with self.db.execute(
+            "SELECT digest FROM mcp_launch_trust WHERE server_name=?", (server_name,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row is not None and row[0] == digest
+
+    async def trust_mcp_launch(self, server_name: str, digest: str) -> None:
+        """Persist an explicit approval for one launch digest."""
+        async with self._lock:
+            await self.db.execute(
+                "INSERT INTO mcp_launch_trust VALUES (?, ?, datetime('now')) "
+                "ON CONFLICT(server_name) DO UPDATE SET digest=excluded.digest, "
+                "approved_at=excluded.approved_at",
+                (server_name, digest),
+            )
+            await self.db.commit()
 
     async def close(self) -> None:
         """Close the database connection."""
@@ -691,12 +750,68 @@ class SQLiteSessionRepository:
                 await self._event(
                     run_id, "ToolCompleted", {"call_id": result.call_id, "status": result.status}
                 )
+                if result.status == "ok" and result.evidence_id is not None:
+                    if result.evidence_id.startswith("skill:"):
+                        kind = "SkillActivated"
+                    elif result.evidence_id.startswith("skill_resource:"):
+                        kind = "SkillResourceLoaded"
+                    else:
+                        kind = None
+                    if kind is not None:
+                        await self._event(
+                            run_id,
+                            kind,
+                            {
+                                "schema_version": 1,
+                                "call_id": result.call_id,
+                                "reference": result.evidence_id,
+                            },
+                        )
                 await self.db.commit()
             except Exception:
                 await self.db.rollback()
                 raise
 
         await self._publish(run_id, "ToolCompleted")
+
+    async def mark_tool_unknown(
+        self, run_id: str, call_id: str, reason: str, epoch: int | None = None
+    ) -> None:
+        """Record an uncertain external outcome without creating a tool message."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._assert_epoch(run_id, epoch)
+                cursor = await self.db.execute(
+                    "UPDATE tool_executions SET status='unknown' "
+                    "WHERE run_id=? AND call_id=? AND status='pending'",
+                    (run_id, call_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("tool call not pending")
+                await self._event(
+                    run_id, "ToolOutcomeUnknown", {"call_id": call_id, "reason": reason}
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "ToolOutcomeUnknown")
+
+    async def record_hook_event(
+        self, run_id: str, payload: dict[str, Any], epoch: int | None = None
+    ) -> None:
+        """Persist one versioned hook decision before exposing its effect."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._assert_epoch(run_id, epoch)
+                await self._event(run_id, "HookDecision", {"schema_version": 1, **payload})
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "HookDecision")
 
     async def events(self, run_id: str) -> list[dict[str, Any]]:
         """Read ordered audit events for a run."""

@@ -1,0 +1,1 @@
+{"id":"X06","pytest":["tests/e2e/test_extensions.py::test_x06_extensions_disabled_preserves_basic_run","tests/integration/test_reliable_storage.py::test_v1_migration_keeps_history_and_creates_backup","tests/integration/test_mcp_trust.py::test_v2_database_backup_and_forward_migration"]}

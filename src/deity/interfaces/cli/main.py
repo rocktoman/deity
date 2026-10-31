@@ -17,7 +17,91 @@ from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
 app = typer.Typer(help="Deity AI Coding Agent Harness")
 runs_app = typer.Typer(help="Inspect persisted runs")
 app.add_typer(runs_app, name="runs")
+mcp_app = typer.Typer(help="Manage local MCP servers")
+app.add_typer(mcp_app, name="mcp")
+skills_app = typer.Typer(help="Inspect configured Skills")
+app.add_typer(skills_app, name="skills")
 console = Console()
+
+
+@skills_app.command("list")
+def skills_list(
+    workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    """Show project and user Skills without loading their bodies."""
+    service = RunService(
+        db_path=Path.home() / ".local/share/deity/deity.db",
+        workspace=(workspace or Path.cwd()).resolve(strict=True),
+        skills_enabled=True,
+    )
+    for item in service.skills_list():
+        typer.echo(f"{item['name']} [{item['source']}] {item['description']}")
+
+
+@skills_app.command("inspect")
+def skills_inspect(
+    name: str,
+    workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    """Show one Skill's source and description without executing it."""
+    try:
+        service = RunService(
+            db_path=Path.home() / ".local/share/deity/deity.db",
+            workspace=(workspace or Path.cwd()).resolve(strict=True),
+            skills_enabled=True,
+        )
+        item = service.skills_inspect(name)
+        typer.echo(f"{item['name']} [{item['source']}] {item['path']}\n{item['description']}")
+    except (KeyError, ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+
+
+@mcp_app.command("list")
+def mcp_list(
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    """Show configured MCP servers without starting them."""
+    settings = load_config(config or Path.home() / ".config/deity/config.toml")
+    service = RunService(
+        db_path=Path.home() / ".local/share/deity/deity.db",
+        workspace=(workspace or Path.cwd()).resolve(strict=True),
+        mcp_enabled=settings.extensions.mcp_enabled,
+        mcp_servers=settings.mcp_servers,
+    )
+    for name in service.mcp_list():
+        console.print(name)
+
+
+@mcp_app.command("test")
+def mcp_test(
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Check MCP transport and tool schemas without invoking business tools."""
+    try:
+        settings = load_config(config or Path.home() / ".config/deity/config.toml")
+        if not settings.extensions.mcp_enabled:
+            raise ValueError("MCP is disabled")
+
+        def approve(name: str, args: dict[str, object]) -> bool:
+            console.print(f"{name}: {args}")
+            return typer.confirm("允许启动此 MCP server？", default=False)
+
+        service = RunService(
+            db_path=db or Path.home() / ".local/share/deity/deity.db",
+            workspace=(workspace or Path.cwd()).resolve(strict=True),
+            approve=approve,
+            mcp_enabled=True,
+            mcp_servers=settings.mcp_servers,
+        )
+        for name in asyncio.run(service.mcp_test()):
+            typer.echo(name)
+    except (ValueError, OSError, TimeoutError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
 
 
 def version_callback(value: bool) -> None:
@@ -114,7 +198,7 @@ def sessions(
             await repo.close()
 
     for item in asyncio.run(list_sessions()):
-        console.print(f"{item['id']}  {item['workspace']}")
+        typer.echo(f"{item['id']}  {item['workspace']}")
 
 
 @runs_app.command("inspect")
@@ -127,10 +211,11 @@ def inspect_run(
     """Show the safe recovery decision and unresolved tool IDs."""
     try:
         settings = load_config(config or Path.home() / ".config/deity/config.toml")
-        service = RunService(
+        service = RunService.from_config(
+            settings,
             db_path=db or Path.home() / ".local/share/deity/deity.db",
             workspace=(workspace or Path.cwd()).resolve(strict=True),
-            limits=settings.run,
+            inspection_only=True,
         )
         report = asyncio.run(service.inspect(run_id))
         console.print(f"{report['decision']}: {report['reason']}")

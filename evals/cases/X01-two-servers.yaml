@@ -1,0 +1,1 @@
+{"id":"X01","pytest":["tests/e2e/test_extensions.py::test_x01_two_local_servers_are_namespaced","tests/e2e/test_cli_extensions.py::test_full_extension_cli_walkthrough"]}
