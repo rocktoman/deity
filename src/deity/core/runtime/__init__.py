@@ -240,6 +240,17 @@ class AgentLoop:
             self._cancellation.raise_if_cancelled()
             if time.monotonic() >= deadline:
                 raise BudgetExceeded("deadline_seconds")
+            final_turn = turn_index == limits.max_turns - 1
+            if final_turn:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "已到本次运行的最后一个模型轮次。停止调用工具，基于已有证据直接"
+                            "给出最终结论；明确区分已确认问题、风险和未验证事项。"
+                        ),
+                    }
+                )
             definitions = getattr(self._tools, "definitions", None)
             internal_tools = definitions() if callable(definitions) else ()
             wire_to_internal: dict[str, str] = {}
@@ -255,7 +266,7 @@ class AgentLoop:
                     raise ProtocolError("重复模型工具别名")
                 wire_to_internal[wire_name] = name
                 tools_list.append({**definition, "name": wire_name})
-            tools = tuple(tools_list)
+            tools = () if final_turn else tuple(tools_list)
             if request.compaction_enabled:
                 if request.context_window_tokens is None:
                     raise BudgetExceeded("context_window_unknown")

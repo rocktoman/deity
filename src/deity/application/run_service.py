@@ -198,7 +198,6 @@ class RunService:
 
     async def _mcp_dispatcher(
         self,
-        repo: SQLiteSessionRepository,
         local: LocalToolDispatcher,
         server_name: str | None = None,
     ) -> McpCompositeDispatcher | LocalToolDispatcher:
@@ -213,32 +212,6 @@ class RunService:
             cwd = (self.workspace / server.cwd).resolve(strict=True)
             if not cwd.is_relative_to(self.workspace):
                 raise ValueError("MCP server working directory escapes workspace")
-            digest = hashlib.sha256(
-                json.dumps(
-                    {
-                        "name": server.name,
-                        "command": server.command,
-                        "args": server.args,
-                        "cwd": str(cwd),
-                        "env_names": server.env_names,
-                    },
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest()
-            if not await repo.mcp_launch_trusted(server.name, digest):
-                if self.approve is None or not self.approve(
-                    "mcp_server_start",
-                    {
-                        "server": server.name,
-                        "command": server.command,
-                        "args": list(server.args),
-                        "cwd": str(cwd),
-                        "env_names": list(server.env_names),
-                        "digest": digest,
-                    },
-                ):
-                    raise ValueError(f"MCP server launch denied: {server.name}")
-                await repo.trust_mcp_launch(server.name, digest)
             configs.append(
                 McpServerConfig(
                     server.name,
@@ -253,7 +226,7 @@ class RunService:
         discovered: list[McpTool] = []
         for configured_server in configs:
             discovered.extend(await manager.discover(configured_server.name))
-        return McpCompositeDispatcher(local, manager, tuple(discovered), self.approve)
+        return McpCompositeDispatcher(local, manager, tuple(discovered))
 
     def mcp_list(self) -> list[str]:
         """Return configured server state without starting processes."""
@@ -261,15 +234,11 @@ class RunService:
         return [f"{server.name} [{state}] not_started" for server in self.mcp_servers]
 
     async def mcp_test(self, server_name: str | None = None) -> list[str]:
-        """Approve launch, connect and validate schemas without business calls."""
-        repo = await SQLiteSessionRepository.open(self.db_path)
-        try:
-            dispatcher = await self._mcp_dispatcher(repo, LocalToolDispatcher(), server_name)
-            if isinstance(dispatcher, McpCompositeDispatcher):
-                return sorted(dispatcher.tools)
-            return []
-        finally:
-            await repo.close()
+        """Connect and validate schemas without business calls."""
+        dispatcher = await self._mcp_dispatcher(LocalToolDispatcher(), server_name)
+        if isinstance(dispatcher, McpCompositeDispatcher):
+            return sorted(dispatcher.tools)
+        return []
 
     def skills_list(self) -> tuple[dict[str, str], ...]:
         """Return bounded Skill metadata without loading bodies."""
@@ -324,7 +293,7 @@ class RunService:
         repo = await SQLiteSessionRepository.open(self.db_path)
         try:
             dispatcher: ToolDispatcher = await self._mcp_dispatcher(
-                repo, LocalToolDispatcher(approve=self._authorize)
+                LocalToolDispatcher(approve=self._authorize)
             )
             if self.skill_catalog is not None:
                 dispatcher = SkillDispatcher(dispatcher, self.skill_catalog)
@@ -510,7 +479,7 @@ class RunService:
                 extension_fingerprint=self.extension_fingerprint,
             )
             dispatcher: ToolDispatcher = await self._mcp_dispatcher(
-                repo, LocalToolDispatcher(approve=self._authorize)
+                LocalToolDispatcher(approve=self._authorize)
             )
             if self.skill_catalog is not None:
                 dispatcher = SkillDispatcher(dispatcher, self.skill_catalog)

@@ -376,7 +376,7 @@ sequenceDiagram
 | Context | `context_overflow` | 裁剪/明确失败 |
 | Runtime | `budget_exceeded`, `cancelled`, `internal_error` | 终止并审计 |
 
-预算：`max_turns`、`max_tool_calls`、每次模型调用 timeout、每次工具 timeout、总墙钟 deadline、输出字节上限；若 provider 返回 usage，记录 token/cost（成本依赖用户配置价目表，不伪造）；若无法准确统计，则记录 unknown。
+预算：`max_turns`、`max_tool_calls`、每次模型调用 timeout、每次工具 timeout、总墙钟 deadline、输出字节上限；最后一个允许的模型轮次不再提供工具，要求模型基于已有证据给出最终结论，避免工具探索直接耗尽轮次。若 provider 返回 usage，记录 token/cost（成本依赖用户配置价目表，不伪造）；若无法准确统计，则记录 unknown。
 
 ## 10. 工程结构、技术栈与测试门禁
 

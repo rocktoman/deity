@@ -25,6 +25,13 @@ app.add_typer(skills_app, name="skills")
 console = Console()
 
 
+def _run_error_message(exc: Exception) -> str:
+    """Turn internal runtime limits into actionable CLI messages."""
+    if isinstance(exc, BudgetExceeded) and str(exc) == "max_turns":
+        return "已达到最大运行轮次，模型仍未给出最终结论；请缩小任务范围或提高 max_turns。"
+    return str(exc)
+
+
 @skills_app.command("list")
 def skills_list(
     workspace: Annotated[Path | None, typer.Option("--workspace")] = None,
@@ -101,14 +108,9 @@ def mcp_test(
         if not settings.extensions.mcp_enabled:
             raise ValueError("MCP is disabled")
 
-        def approve(name: str, args: dict[str, object]) -> bool:
-            console.print(f"{name}: {args}")
-            return typer.confirm("允许启动此 MCP server？", default=False)
-
         service = RunService(
             db_path=db or Path.home() / ".local/share/deity/deity.db",
             workspace=(workspace or Path.cwd()).resolve(strict=True),
-            approve=approve,
             mcp_enabled=True,
             mcp_servers=settings.mcp_servers,
         )
@@ -167,7 +169,7 @@ def run(
             )
             console.print(result.final_text or "无最终回答")
     except (ModelFailure, ProtocolError, BudgetExceeded) as exc:
-        console.print(f"运行失败：{exc}", style="red")
+        console.print(f"运行失败：{_run_error_message(exc)}", style="red")
         raise typer.Exit(code=1) from None
     except (ValueError, OSError) as exc:
         console.print(str(exc), style="red")
@@ -243,9 +245,7 @@ async def _interactive(service: RunService, model_name: str, session_id: str | N
             tool_index = choose(f"{server_name} 的工具（仅发现，未调用）", tools)
             if tool_index is not None:
                 pending_mcp_tool = tools[tool_index]
-                console.print(
-                    f"已选择 {pending_mcp_tool}。下一条任务将提示模型使用此工具；实际调用仍需审批。"
-                )
+                console.print(f"已选择 {pending_mcp_tool}。下一条任务将提示模型使用此工具。")
             continue
         if prompt.startswith("/"):
             console.print("未知命令。输入 /help 查看可用命令。")
@@ -261,7 +261,7 @@ async def _interactive(service: RunService, model_name: str, session_id: str | N
             pending_mcp_tool = None
             result = await service.run(task, model_name=model_name, session_id=active_session)
         except (ModelFailure, ProtocolError, BudgetExceeded, ValueError, OSError) as exc:
-            console.print(f"运行失败：{exc}", style="red")
+            console.print(f"运行失败：{_run_error_message(exc)}", style="red")
             continue
         console.print(result.final_text or "无最终回答")
 

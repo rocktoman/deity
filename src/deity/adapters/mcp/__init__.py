@@ -198,14 +198,14 @@ class McpSessionManager:
 
 
 class McpCompositeDispatcher:
-    """Keep MCP tools on the same durable loop while requiring per-call approval."""
+    """Keep configured MCP tools on the same durable, validated loop."""
 
     def __init__(
         self,
         local: Any,
         manager: McpSessionManager,
         tools: tuple[McpTool, ...],
-        approve: Callable[[str, dict[str, Any]], bool] | None,
+        approve: Callable[[str, dict[str, Any]], bool] | None = None,
     ) -> None:
         names = [tool.qualified_name for tool in tools]
         if len(names) != len(set(names)):
@@ -213,7 +213,7 @@ class McpCompositeDispatcher:
         self.local = local
         self.manager = manager
         self.tools = {tool.qualified_name: tool for tool in tools}
-        self.approve = approve
+        self.approve = approve  # Kept for constructor compatibility; MCP no longer prompts.
         self._prepared: dict[tuple[str, str], str] = {}
 
     def definitions(self) -> tuple[dict[str, Any], ...]:
@@ -228,7 +228,7 @@ class McpCompositeDispatcher:
         )
 
     async def prepare(self, call: ToolCall, context: AgentRequest) -> ToolResult | None:
-        """Validate complete MCP arguments and authorize before durable intent."""
+        """Validate complete MCP arguments before durable intent."""
         tool = self.tools.get(call.name)
         if tool is None:
             result: ToolResult | None = await self.local.prepare(call, context)
@@ -242,16 +242,6 @@ class McpCompositeDispatcher:
             Draft202012Validator(tool.schema).validate(call.arguments)
         except (TypeError, ValueError, ValidationError, UnicodeError):
             return ToolResult(call.call_id, "error", "invalid_arguments")
-        if self.approve is None or not await asyncio.to_thread(
-            self.approve,
-            "mcp_tool",
-            {
-                "server": tool.server,
-                "tool": tool.name,
-                "arguments": json.loads(arguments_json),
-            },
-        ):
-            return ToolResult(call.call_id, "denied", "permission_denied")
         self._prepared[(context.run_id, call.call_id)] = arguments_json
         return None
 
@@ -263,15 +253,15 @@ class McpCompositeDispatcher:
         key = (context.run_id, call.call_id)
         prepared_json = self._prepared.pop(key, None)
         if prepared_json is None:
-            return ToolResult(call.call_id, "denied", "approval_required")
+            return ToolResult(call.call_id, "denied", "preparation_required")
         try:
             current_json = json.dumps(
                 call.arguments, ensure_ascii=False, sort_keys=True, allow_nan=False
             )
         except (TypeError, ValueError, UnicodeError):
-            return ToolResult(call.call_id, "denied", "approval_changed")
+            return ToolResult(call.call_id, "denied", "arguments_changed")
         if current_json != prepared_json:
-            return ToolResult(call.call_id, "denied", "approval_changed")
+            return ToolResult(call.call_id, "denied", "arguments_changed")
         try:
             return await self.manager.call(tool, json.loads(prepared_json), call.call_id)
         except McpCallNotIssued:
