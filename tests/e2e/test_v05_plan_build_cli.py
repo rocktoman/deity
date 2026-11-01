@@ -11,6 +11,10 @@ from pathlib import Path
 
 
 class PlanBuildModelHandler(BaseHTTPRequestHandler):
+    target_path = "feature.py"
+    old_text = 'VALUE = "old"'
+    new_text = 'VALUE = "new"'
+
     def do_POST(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         tools = {item["function"]["name"] for item in body["tools"]}
@@ -28,7 +32,7 @@ class PlanBuildModelHandler(BaseHTTPRequestHandler):
                         "ordinal": 1,
                         "title": "更新文件",
                         "description": "把旧值替换为新值",
-                        "files": ["feature.py"],
+                        "files": [self.target_path],
                         "verification": ["读取文件确认"],
                     }
                 ],
@@ -36,10 +40,14 @@ class PlanBuildModelHandler(BaseHTTPRequestHandler):
                 "verification": ["读取文件确认"],
             }
         elif "submit_plan" not in tools and len(prior) == 0:
-            name, arguments = "read_file", {"path": "feature.py"}
+            name, arguments = "read_file", {"path": self.target_path}
         elif "submit_plan" not in tools and len(prior) == 1:
             name = "apply_patch"
-            arguments = {"path": "feature.py", "old": 'VALUE = "old"', "new": 'VALUE = "new"'}
+            arguments = {
+                "path": self.target_path,
+                "old": self.old_text,
+                "new": self.new_text,
+            }
         if name:
             delta = {
                 "tool_calls": [
@@ -183,6 +191,63 @@ def test_plan_show_and_build_cli(tmp_path: Path) -> None:
         assert "feature.py 已有本地改动" in direct_dirty
         assert "V0.5 CLI 完成" in direct_dirty
         assert (tmp_path / "feature.py").read_text() == 'VALUE = "new"\n'
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_build_can_fill_staged_empty_file(tmp_path: Path) -> None:
+    class EmptyFileModelHandler(PlanBuildModelHandler):
+        target_path = "demo.py"
+        old_text = ""
+        new_text = "def sort_items(items):\n    return sorted(items)\n"
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), EmptyFileModelHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.com"], cwd=tmp_path, check=True
+        )
+        subprocess.run(["git", "config", "user.name", "Fixture"], cwd=tmp_path, check=True)
+        (tmp_path / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+        subprocess.run(["git", "add", "baseline.txt"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-qm", "基线"], cwd=tmp_path, check=True)
+        (tmp_path / "demo.py").write_bytes(b"")
+        subprocess.run(["git", "add", "demo.py"], cwd=tmp_path, check=True)
+        config = tmp_path / "config.toml"
+        config.write_text(
+            '[model]\nprovider="openai_compatible"\nname="test"\n'
+            'api_key_env="DEITY_TEST_API_KEY"\n'
+            f'base_url="http://127.0.0.1:{server.server_port}/v1"\n'
+            '[permission]\nworkspace_write="ask"\nshell="deny"\n'
+            "[coding]\nplan_build_enabled=true\ngit_guard_enabled=true\n",
+            encoding="utf-8",
+        )
+        executable = shutil.which("deity")
+        assert executable is not None
+        completed = subprocess.run(
+            [
+                executable,
+                "run",
+                "--config",
+                str(config),
+                "--workspace",
+                str(tmp_path),
+                "--db",
+                str(tmp_path / "deity.db"),
+            ],
+            input="/plan\n补全空文件\ny\ny\n/exit\n",
+            text=True,
+            capture_output=True,
+            env={**os.environ, "DEITY_TEST_API_KEY": "fixture"},
+            timeout=45,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert "demo.py 已有本地改动" in completed.stdout
+        assert "V0.5 CLI 完成" in completed.stdout
+        assert (tmp_path / "demo.py").read_text(encoding="utf-8") == EmptyFileModelHandler.new_text
     finally:
         server.shutdown()
         server.server_close()

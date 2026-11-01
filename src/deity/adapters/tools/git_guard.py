@@ -69,6 +69,8 @@ class GitGuardedDispatcher:
                 return ToolResult(call.call_id, "denied", "submodule_boundary")
             if relative in self._dirty and relative not in self.allow_dirty_paths:
                 return ToolResult(call.call_id, "denied", "initial_dirty_path")
+            if call.name == "delete_file" and relative in self._dirty:
+                return ToolResult(call.call_id, "denied", "initial_dirty_delete_denied")
             if call.name == "write_file":
                 if path.exists() or relative in self._baseline_paths:
                     return ToolResult(call.call_id, "denied", "create_target_exists")
@@ -76,7 +78,7 @@ class GitGuardedDispatcher:
                 expected = self.preimages.get((context.run_id, relative))
                 if self.require_read_before_write and expected is None:
                     return ToolResult(call.call_id, "denied", "read_before_write_required")
-                if expected is not None and self._sha(path) != expected:
+                if expected is not None and (not path.is_file() or self._sha(path) != expected):
                     return ToolResult(call.call_id, "denied", "preimage_mismatch")
             self._prepared[(context.run_id, call.call_id)] = json.loads(
                 json.dumps(call.arguments, ensure_ascii=False)

@@ -139,6 +139,8 @@ class LocalToolDispatcher:
                 "description": (
                     "Delete one regular workspace file selected from the user's request and conversation; never directories"
                     if name == "delete_file"
+                    else "Replace one exact string in an existing file; old may be empty only when the file is empty"
+                    if name == "apply_patch"
                     else name.replace("_", " ")
                 ),
                 "parameters": schema.model_json_schema(),
@@ -264,9 +266,9 @@ class LocalToolDispatcher:
             return "created", None, False
         if name == "apply_patch":
             current = path.read_text(encoding="utf-8")
-            if not args["old"] or current.count(args["old"]) != 1:
+            if (not args["old"] and current) or (args["old"] and current.count(args["old"]) != 1):
                 return "patch_conflict", 1, False
-            updated = current.replace(args["old"], args["new"], 1)
+            updated = current.replace(args["old"], args["new"], 1) if args["old"] else args["new"]
             path.write_text(updated, encoding="utf-8")
             return "patched", None, False
         if name == "delete_file":

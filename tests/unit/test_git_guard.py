@@ -48,6 +48,22 @@ def test_safe_patch_conflict_and_preimage_mismatch_leave_bytes_unchanged(tmp_pat
     assert path.read_bytes() == original
 
 
+def test_safe_patch_can_fill_only_an_empty_file(tmp_path: Path) -> None:
+    path = tmp_path / "sample.py"
+    path.write_bytes(b"")
+    result = SafePatchApplier(tmp_path).apply(
+        "sample.py", "", "value = 1\n", expected_sha256=_sha(path)
+    )
+    assert result.status == PatchApplyStatus.APPLIED
+    assert path.read_text(encoding="utf-8") == "value = 1\n"
+
+    conflict = SafePatchApplier(tmp_path).apply(
+        "sample.py", "", "value = 2\n", expected_sha256=_sha(path)
+    )
+    assert conflict.status == PatchApplyStatus.CONFLICT
+    assert path.read_text(encoding="utf-8") == "value = 1\n"
+
+
 def test_safe_patch_rejects_binary_symlink_and_protected_path(tmp_path: Path) -> None:
     binary = tmp_path / "binary.py"
     binary.write_bytes(b"\x00old")
@@ -144,3 +160,67 @@ async def test_approved_plan_can_create_target_absent_at_snapshot(tmp_path: Path
         request,
     )
     assert prepared is None
+
+
+@pytest.mark.asyncio
+async def test_dirty_allowlist_allows_empty_patch_but_not_delete(tmp_path: Path) -> None:
+    path = tmp_path / "demo.py"
+    path.write_bytes(b"")
+    snapshot = WorkspaceSnapshot(
+        "snapshot",
+        str(tmp_path),
+        "head",
+        (WorkspaceFileState("demo.py", "A.", _sha(path)),),
+        "digest",
+        "test",
+        "2026-01-01T00:00:00+00:00",
+    )
+    guard = GitGuardedDispatcher(
+        LocalToolDispatcher(approve=lambda _name, _args: True),
+        object(),
+        snapshot,
+        allow_dirty_paths=("demo.py",),
+        plan_targets=("demo.py",),
+    )
+    request = AgentRequest("s", "t", str(tmp_path), "task", "fake", run_id="run")
+    read = ToolCall("read", "read_file", {"path": "demo.py"})
+    assert await guard.prepare(read, request) is None
+    assert (await guard.dispatch(read, request)).status == "ok"
+    denied = await guard.prepare(ToolCall("delete", "delete_file", {"path": "demo.py"}), request)
+    assert denied is not None and denied.output == "initial_dirty_delete_denied"
+    patch = ToolCall("patch", "apply_patch", {"path": "demo.py", "old": "", "new": "x = 1\n"})
+    assert await guard.prepare(patch, request) is None
+    assert (await guard.dispatch(patch, request)).status == "ok"
+    assert path.read_text(encoding="utf-8") == "x = 1\n"
+
+
+@pytest.mark.asyncio
+async def test_missing_preimage_returns_conflict_instead_of_raising(tmp_path: Path) -> None:
+    path = tmp_path / "demo.py"
+    path.write_text("old", encoding="utf-8")
+    snapshot = WorkspaceSnapshot(
+        "snapshot",
+        str(tmp_path),
+        "head",
+        (WorkspaceFileState("demo.py", "M.", _sha(path)),),
+        "digest",
+        "test",
+        "2026-01-01T00:00:00+00:00",
+    )
+    guard = GitGuardedDispatcher(
+        LocalToolDispatcher(approve=lambda _name, _args: True),
+        object(),
+        snapshot,
+        allow_dirty_paths=("demo.py",),
+        plan_targets=("demo.py",),
+    )
+    request = AgentRequest("s", "t", str(tmp_path), "task", "fake", run_id="run")
+    read = ToolCall("read", "read_file", {"path": "demo.py"})
+    assert await guard.prepare(read, request) is None
+    assert (await guard.dispatch(read, request)).status == "ok"
+    path.unlink()
+    denied = await guard.prepare(
+        ToolCall("patch", "apply_patch", {"path": "demo.py", "old": "old", "new": "new"}),
+        request,
+    )
+    assert denied is not None and denied.output == "preimage_mismatch"

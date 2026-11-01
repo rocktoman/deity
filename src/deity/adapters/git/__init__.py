@@ -35,13 +35,7 @@ class SafePatchApplier:
     ) -> PatchApplyResult:
         """Return a typed conflict/denial without partially changing the target."""
         path = Path(relative_path)
-        if (
-            path.is_absolute()
-            or not path.parts
-            or ".." in path.parts
-            or ".git" in path.parts
-            or not old
-        ):
+        if path.is_absolute() or not path.parts or ".." in path.parts or ".git" in path.parts:
             return self._result(PatchApplyStatus.DENIED, relative_path, "protected_path")
         candidate = self.workspace
         for part in path.parts:
@@ -85,7 +79,7 @@ class SafePatchApplier:
         newline = "\r\n" if text.count("\r\n") > text.count("\n") - text.count("\r\n") else "\n"
         normalized_old = old.replace("\r\n", "\n").replace("\n", newline)
         normalized_new = new.replace("\r\n", "\n").replace("\n", newline)
-        if text.count(normalized_old) != 1:
+        if not old and original:
             return PatchApplyResult(
                 PatchApplyStatus.CONFLICT,
                 relative_path,
@@ -93,7 +87,15 @@ class SafePatchApplier:
                 None,
                 error_code="patch_context_not_unique",
             )
-        updated = text.replace(normalized_old, normalized_new, 1)
+        if old and text.count(normalized_old) != 1:
+            return PatchApplyResult(
+                PatchApplyStatus.CONFLICT,
+                relative_path,
+                before,
+                None,
+                error_code="patch_context_not_unique",
+            )
+        updated = text.replace(normalized_old, normalized_new, 1) if old else normalized_new
         encoded = updated.encode("utf-8")
         if bom:
             encoded = b"\xef\xbb\xbf" + encoded
