@@ -13,7 +13,10 @@ from deity.adapters.storage import SQLiteSessionRepository
 from deity.application.config import load_config
 from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
+from deity.interfaces.cli.code import code_app
 from deity.interfaces.cli.menu import choose
+from deity.interfaces.cli.plan import build_command, plan_command, plans_app
+from deity.interfaces.cli.verify import verify_command
 
 app = typer.Typer(help="Deity AI Coding Agent Harness")
 runs_app = typer.Typer(help="Inspect persisted runs")
@@ -22,6 +25,11 @@ mcp_app = typer.Typer(help="Manage local MCP servers")
 app.add_typer(mcp_app, name="mcp")
 skills_app = typer.Typer(help="Inspect configured Skills")
 app.add_typer(skills_app, name="skills")
+app.add_typer(plans_app, name="plans")
+app.add_typer(code_app, name="code")
+app.command("plan")(plan_command)
+app.command("build")(build_command)
+app.command("verify")(verify_command)
 console = Console()
 
 

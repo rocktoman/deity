@@ -1,0 +1,1 @@
+{"id":"A11","pytest":["tests/unit/test_verification.py::test_missing_dependency_and_flaky_repeat_are_inconclusive","tests/unit/test_verification.py::test_no_checks_cannot_be_passed","tests/unit/test_verification.py::test_verification_cancellation_cleans_process_group"]}

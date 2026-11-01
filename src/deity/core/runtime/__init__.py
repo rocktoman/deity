@@ -160,6 +160,18 @@ class AgentLoop:
         async with self._owner:
             return await self._run_owned(request, run_id, messages, budget)
 
+    async def run_created(
+        self,
+        request: AgentRequest,
+        run_id: str,
+        messages: list[dict[str, Any]],
+    ) -> AgentResult:
+        """Execute a pre-created Run with a fresh budget, such as Plan to Build."""
+        if self._owner.locked():
+            raise RuntimeError("AgentLoop already has an active run")
+        async with self._owner:
+            return await self._run_owned(request, run_id, messages, None)
+
     async def _run_owned(
         self,
         request: AgentRequest,
@@ -407,6 +419,9 @@ class AgentLoop:
                         result = prepared_result
                     tool_count += 1
                     await self._repository.record_tool(run_id, result, epoch=epoch)
+                    after_persist = getattr(self._tools, "after_persist", None)
+                    if callable(after_persist):
+                        await after_persist(call, result, request)
                     await self._run_hook(
                         run_id,
                         epoch,

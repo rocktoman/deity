@@ -11,19 +11,34 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+from deity.adapters.code_intelligence import LexicalCodeSearch
+from deity.adapters.git import GitWorkspaceAdapter
 from deity.adapters.mcp import McpCompositeDispatcher, McpServerConfig, McpSessionManager, McpTool
 from deity.adapters.model.anthropic import AnthropicProvider
 from deity.adapters.model.openai_compatible import OpenAICompatibleProvider
 from deity.adapters.skills import SkillCatalog, SkillDispatcher
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.adapters.tools import LocalToolDispatcher, auto_shell_allowed
+from deity.adapters.tools.code_intelligence import CodeIntelligenceDispatcher
+from deity.adapters.tools.git_guard import GitGuardedDispatcher
+from deity.adapters.tools.planning import PlanningDispatcher
 from deity.adapters.tools.workspace import workspace_digest
-from deity.application.config import Config, McpServerSettings, PermissionConfig, RunConfig
+from deity.application.config import (
+    CodeIntelligenceConfig,
+    CodingConfig,
+    Config,
+    GitGuardConfig,
+    McpServerSettings,
+    PermissionConfig,
+    RunConfig,
+    VerificationConfig,
+)
 from deity.core.context import HARNESS_SYSTEM_INSTRUCTIONS, ContextBuilder
 from deity.core.context.reliable import normalize_unicode
 from deity.core.contracts import (
     AgentRequest,
     AgentResult,
+    ExecutionMode,
     ModelProvider,
     RecoveryDecision,
     ToolDispatcher,
@@ -53,6 +68,11 @@ class RunService:
         skill_diagnostics: bool = False,
         hooks_enabled: bool = False,
         hooks: HookRegistry | None = None,
+        coding: CodingConfig | None = None,
+        code_intelligence: CodeIntelligenceConfig | None = None,
+        git_guard: GitGuardConfig | None = None,
+        verification: VerificationConfig | None = None,
+        coding_fingerprint: str = "",
     ) -> None:
         self.db_path = db_path
         self.workspace = workspace.resolve(strict=True)
@@ -67,6 +87,11 @@ class RunService:
         self.mcp_servers = mcp_servers
         self.skills_enabled = skills_enabled
         self.hooks = hooks if hooks_enabled else None
+        self.coding = coding or CodingConfig()
+        self.code_intelligence = code_intelligence or CodeIntelligenceConfig()
+        self.git_guard = git_guard or GitGuardConfig()
+        self.verification = verification or VerificationConfig()
+        self.coding_fingerprint = coding_fingerprint
         if self.hooks is not None:
             metadata = [
                 (item.name, item.point, item.kind, item.priority) for item in self.hooks.hooks
@@ -194,6 +219,22 @@ class RunService:
             hooks=HookRegistry(tuple(registered_hooks))
             if config.extensions.hooks_enabled
             else None,
+            coding=config.coding,
+            code_intelligence=config.code_intelligence,
+            git_guard=config.git_guard,
+            verification=config.verification,
+            coding_fingerprint=(
+                config.coding_fingerprint()
+                if any(
+                    (
+                        config.coding.plan_build_enabled,
+                        config.coding.code_intelligence_enabled,
+                        config.coding.git_guard_enabled,
+                        config.coding.verification_enabled,
+                    )
+                )
+                else ""
+            ),
         )
 
     async def _mcp_dispatcher(
@@ -283,20 +324,78 @@ class RunService:
                 return False
         return True
 
+    def _code_search(self) -> LexicalCodeSearch:
+        cache_path: Path | None = None
+        if self.code_intelligence.cache_enabled:
+            cache_root = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+            workspace_id = hashlib.sha256(str(self.workspace).encode()).hexdigest()[:24]
+            cache_path = cache_root / "deity/code-index" / f"{workspace_id}.json"
+        return LexicalCodeSearch(
+            self.workspace,
+            cache_path=cache_path,
+            max_files=self.code_intelligence.max_files,
+            max_file_bytes=self.code_intelligence.max_file_bytes,
+        )
+
+    async def _compose_dispatcher(
+        self,
+        repo: SQLiteSessionRepository,
+        mode: ExecutionMode,
+        *,
+        baseline: Any | None = None,
+        allow_dirty_paths: tuple[str, ...] = (),
+        change_set_id: str | None = None,
+    ) -> tuple[ToolDispatcher, GitGuardedDispatcher | None]:
+        dispatcher: ToolDispatcher = await self._mcp_dispatcher(
+            LocalToolDispatcher(approve=self._authorize)
+        )
+        if self.skill_catalog is not None:
+            dispatcher = SkillDispatcher(dispatcher, self.skill_catalog)
+        if self.coding.code_intelligence_enabled:
+            dispatcher = CodeIntelligenceDispatcher(dispatcher, self._code_search(), repo)
+        if mode == ExecutionMode.PLAN:
+            return (
+                PlanningDispatcher(
+                    dispatcher,
+                    repo,
+                    GitWorkspaceAdapter(self.workspace, ignored=(self.db_path,)),
+                ),
+                None,
+            )
+        if self.coding.git_guard_enabled:
+            if baseline is None:
+                baseline = await GitWorkspaceAdapter(
+                    self.workspace, ignored=(self.db_path,)
+                ).capture()
+                await repo.create_workspace_snapshot(baseline)
+            guarded = GitGuardedDispatcher(
+                dispatcher,
+                repo,
+                baseline,
+                allow_dirty_paths=allow_dirty_paths,
+                require_read_before_write=self.git_guard.require_read_before_write,
+                change_set_id=change_set_id,
+            )
+            return guarded, guarded
+        return dispatcher, None
+
     async def run(
-        self, task: str, *, model_name: str, session_id: str | None = None
+        self,
+        task: str,
+        *,
+        model_name: str,
+        session_id: str | None = None,
+        execution_mode: ExecutionMode = ExecutionMode.BUILD,
     ) -> AgentResult:
         """Execute and persist a task within the selected workspace."""
         if self.model is None:
             raise ValueError("model is required to run")
+        if execution_mode == ExecutionMode.PLAN and not self.coding.plan_build_enabled:
+            raise ValueError("Plan/Build is disabled")
         task = normalize_unicode(task)
         repo = await SQLiteSessionRepository.open(self.db_path)
         try:
-            dispatcher: ToolDispatcher = await self._mcp_dispatcher(
-                LocalToolDispatcher(approve=self._authorize)
-            )
-            if self.skill_catalog is not None:
-                dispatcher = SkillDispatcher(dispatcher, self.skill_catalog)
+            dispatcher, guarded = await self._compose_dispatcher(repo, execution_mode)
             active_session = session_id or str(uuid4())
             request = AgentRequest(
                 session_id=active_session,
@@ -314,6 +413,8 @@ class RunService:
                 max_output_tokens_total=self.limits.max_output_tokens_total,
                 provider_name=self.provider_id,
                 extension_fingerprint=self.extension_fingerprint,
+                execution_mode=execution_mode,
+                policy_fingerprint=self.coding_fingerprint,
             )
             instructions_file = self.workspace / "AGENTS.md"
             instructions = None
@@ -351,10 +452,101 @@ class RunService:
                 ]
             initial_messages[-1:-1] = prior
             self._active_loop = loop
-            result = await loop.run(request, initial_messages=initial_messages)
+            try:
+                result = await loop.run(request, initial_messages=initial_messages)
+            except BaseException:
+                if guarded is not None and guarded.run_id is not None:
+                    await repo.finalize_change_set(guarded.run_id, "unknown")
+                raise
+            if guarded is not None and guarded.change_set_id is not None:
+                diff = await GitWorkspaceAdapter(self.workspace, ignored=(self.db_path,)).diff()
+                await repo.record_evidence(result.run_id, "git_diff", diff)
+                await repo.finalize_change_set(result.run_id, "completed")
             await repo.append_message(active_session, result.run_id, "user", task)
             await repo.append_message(
                 active_session, result.run_id, "assistant", result.final_text or ""
+            )
+            return result
+        finally:
+            self._active_loop = None
+            await repo.close()
+
+    async def run_build(self, build_run_id: str, plan_id: str) -> AgentResult:
+        """Execute a pre-created Build Run without accepting requirement changes."""
+        if self.model is None:
+            raise ValueError("model is required to run")
+        if not self.coding.plan_build_enabled or not self.coding.git_guard_enabled:
+            raise ValueError("Plan/Build with Git Guard is required")
+        repo = await SQLiteSessionRepository.open(self.db_path)
+        try:
+            plan = await repo.get_plan(plan_id)
+            info = await repo.run_info(build_run_id)
+            change_set = await repo.change_set_for_run(build_run_id)
+            baseline = await repo.get_workspace_snapshot(change_set.baseline_snapshot_id)
+            allow_dirty = await repo.plan_build_allowlist(build_run_id)
+            targets = tuple(sorted({path for step in plan.draft.steps for path in step.files}))
+            current = await GitWorkspaceAdapter(self.workspace, ignored=(self.db_path,)).capture(
+                targets
+            )
+            if current.digest != baseline.digest:
+                raise ValueError("workspace drift before build execution")
+            dispatcher, _guarded = await self._compose_dispatcher(
+                repo,
+                ExecutionMode.BUILD,
+                baseline=baseline,
+                allow_dirty_paths=allow_dirty,
+                change_set_id=change_set.change_set_id,
+            )
+            request = AgentRequest(
+                session_id=info["session_id"],
+                task_id=info["task_id"],
+                workspace=str(self.workspace),
+                user_text=info["prompt"],
+                model=info["model_name"],
+                max_turns=self.limits.max_turns,
+                max_tool_calls=self.limits.max_tool_calls,
+                deadline_seconds=self.limits.deadline_seconds,
+                max_output_tokens=self.limits.max_output_tokens,
+                context_window_tokens=self.context_window_tokens,
+                compaction_enabled=self.limits.compaction_enabled,
+                max_input_tokens_total=self.limits.max_input_tokens_total,
+                max_output_tokens_total=self.limits.max_output_tokens_total,
+                provider_name=self.provider_id or info["model_provider"],
+                extension_fingerprint=self.extension_fingerprint,
+                execution_mode=ExecutionMode.BUILD,
+                plan_id=plan_id,
+                policy_fingerprint=self.coding_fingerprint,
+            )
+            context = ContextBuilder(system_instructions=HARNESS_SYSTEM_INSTRUCTIONS)
+            messages = context.initial(info["prompt"])
+            messages[-1:-1] = [
+                {
+                    "role": "user",
+                    "content": (
+                        "已批准且不可改变的结构化计划：\n"
+                        + json.dumps(asdict(plan.draft), ensure_ascii=False)
+                    ),
+                }
+            ]
+            loop = AgentLoop(
+                self.model,
+                dispatcher,
+                repository=repo,
+                context=context,
+                workspace_fingerprint=lambda: workspace_digest(self.workspace, (self.db_path,)),
+                hooks=self.hooks,
+            )
+            self._active_loop = loop
+            try:
+                result = await loop.run_created(request, build_run_id, messages)
+            except BaseException:
+                await repo.finalize_change_set(build_run_id, "unknown")
+                raise
+            diff = await GitWorkspaceAdapter(self.workspace, ignored=(self.db_path,)).diff()
+            await repo.record_evidence(build_run_id, "git_diff", diff)
+            await repo.finalize_change_set(build_run_id, "completed")
+            await repo.append_message(
+                info["session_id"], build_run_id, "assistant", result.final_text or ""
             )
             return result
         finally:

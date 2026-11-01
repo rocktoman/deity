@@ -1,0 +1,1 @@
+{"id":"A01","pytest":"tests/integration/test_plan_build.py::test_plan_dispatcher_denies_effects_and_persists_artifact"}

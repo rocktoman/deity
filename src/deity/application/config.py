@@ -28,6 +28,39 @@ class RunConfig:
 
 
 @dataclass(frozen=True)
+class CodingConfig:
+    version: int = 1
+    plan_build_enabled: bool = False
+    code_intelligence_enabled: bool = False
+    git_guard_enabled: bool = False
+    verification_enabled: bool = False
+    plan_ttl_seconds: int = 86_400
+
+
+@dataclass(frozen=True)
+class CodeIntelligenceConfig:
+    backend: Literal["lexical"] = "lexical"
+    cache_enabled: bool = True
+    max_files: int = 20_000
+    max_file_bytes: int = 2_000_000
+
+
+@dataclass(frozen=True)
+class GitGuardConfig:
+    protect_initial_dirty: bool = True
+    require_read_before_write: bool = True
+
+
+@dataclass(frozen=True)
+class VerificationConfig:
+    permission: Literal["ask", "auto", "deny"] = "ask"
+    timeout_seconds: int = 300
+    max_output_chars: int = 16_000
+    repeat: int = 1
+    commands: tuple[tuple[str, ...], ...] = ()
+
+
+@dataclass(frozen=True)
 class Config:
     run: RunConfig = field(default_factory=RunConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
@@ -35,6 +68,20 @@ class Config:
     extensions: "ExtensionConfig" = field(default_factory=lambda: ExtensionConfig())
     mcp_servers: tuple["McpServerSettings", ...] = ()
     hook_specs: tuple["HookSpec", ...] = ()
+    coding: CodingConfig = field(default_factory=CodingConfig)
+    code_intelligence: CodeIntelligenceConfig = field(default_factory=CodeIntelligenceConfig)
+    git_guard: GitGuardConfig = field(default_factory=GitGuardConfig)
+    verification: VerificationConfig = field(default_factory=VerificationConfig)
+
+    def coding_fingerprint(self) -> str:
+        """Hash V0.5 recovery-relevant policy without paths or secrets."""
+        payload = {
+            "coding": self.coding.__dict__,
+            "code_intelligence": self.code_intelligence.__dict__,
+            "git_guard": self.git_guard.__dict__,
+            "verification": self.verification.__dict__,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -96,6 +143,10 @@ def load_config(path: Path) -> Config:
             "extensions",
             "mcp",
             "hooks",
+            "coding",
+            "code_intelligence",
+            "git_guard",
+            "verification",
         }:
             raise ValueError
         run = data.get("run", {})
@@ -104,8 +155,114 @@ def load_config(path: Path) -> Config:
         extensions = data.get("extensions", {})
         mcp = data.get("mcp", {})
         hooks = data.get("hooks", {})
+        coding = data.get("coding", {})
+        code_intelligence = data.get("code_intelligence", {})
+        git_guard = data.get("git_guard", {})
+        verification = data.get("verification", {})
         if not all(
-            isinstance(item, dict) for item in (run, permission, model, extensions, mcp, hooks)
+            isinstance(item, dict)
+            for item in (
+                run,
+                permission,
+                model,
+                extensions,
+                mcp,
+                hooks,
+                coding,
+                code_intelligence,
+                git_guard,
+                verification,
+            )
+        ):
+            raise ValueError
+        if set(coding) - {
+            "version",
+            "plan_build_enabled",
+            "code_intelligence_enabled",
+            "git_guard_enabled",
+            "verification_enabled",
+            "plan_ttl_seconds",
+        }:
+            raise ValueError
+        coding_config = CodingConfig(**coding)
+        if (
+            coding_config.version != 1
+            or any(
+                type(getattr(coding_config, key)) is not bool
+                for key in (
+                    "plan_build_enabled",
+                    "code_intelligence_enabled",
+                    "git_guard_enabled",
+                    "verification_enabled",
+                )
+            )
+            or type(coding_config.plan_ttl_seconds) is not int
+            or not 300 <= coding_config.plan_ttl_seconds <= 604_800
+        ):
+            raise ValueError
+        if set(code_intelligence) - {
+            "backend",
+            "cache_enabled",
+            "max_files",
+            "max_file_bytes",
+        }:
+            raise ValueError
+        code_config = CodeIntelligenceConfig(**code_intelligence)
+        if (
+            code_config.backend != "lexical"
+            or type(code_config.cache_enabled) is not bool
+            or type(code_config.max_files) is not int
+            or not 1 <= code_config.max_files <= 100_000
+            or type(code_config.max_file_bytes) is not int
+            or not 1_024 <= code_config.max_file_bytes <= 8 * 1024 * 1024
+        ):
+            raise ValueError
+        if set(git_guard) - {"protect_initial_dirty", "require_read_before_write"}:
+            raise ValueError
+        git_config = GitGuardConfig(**git_guard)
+        if any(type(value) is not bool for value in git_config.__dict__.values()):
+            raise ValueError
+        if set(verification) - {
+            "permission",
+            "timeout_seconds",
+            "max_output_chars",
+            "repeat",
+            "commands",
+        }:
+            raise ValueError
+        raw_commands = verification.get("commands", [])
+        if (
+            not isinstance(raw_commands, list)
+            or len(raw_commands) > 16
+            or any(
+                not isinstance(command, list)
+                or not 1 <= len(command) <= 32
+                or any(
+                    not isinstance(argument, str)
+                    or not argument
+                    or len(argument) > 1000
+                    or any(char in argument for char in "\0\r\n")
+                    for argument in command
+                )
+                for command in raw_commands
+            )
+        ):
+            raise ValueError
+        commands = tuple(tuple(argument for argument in command) for command in raw_commands)
+        if any(command[0] in {"sh", "bash", "zsh", "cmd", "powershell"} for command in commands):
+            raise ValueError
+        verification_values = {
+            key: value for key, value in verification.items() if key != "commands"
+        }
+        verification_config = VerificationConfig(**verification_values, commands=commands)
+        if (
+            verification_config.permission not in {"ask", "auto", "deny"}
+            or type(verification_config.timeout_seconds) is not int
+            or not 1 <= verification_config.timeout_seconds <= 1_800
+            or type(verification_config.max_output_chars) is not int
+            or not 1_000 <= verification_config.max_output_chars <= 1_000_000
+            or type(verification_config.repeat) is not int
+            or not 1 <= verification_config.repeat <= 3
         ):
             raise ValueError
         if set(hooks) - {"registered"} or not isinstance(hooks.get("registered", []), list):
@@ -269,6 +426,10 @@ def load_config(path: Path) -> Config:
             extensions=ExtensionConfig(**extensions),
             mcp_servers=tuple(servers),
             hook_specs=tuple(hook_specs),
+            coding=coding_config,
+            code_intelligence=code_config,
+            git_guard=git_config,
+            verification=verification_config,
         )
     except (OSError, UnicodeError, tomllib.TOMLDecodeError, TypeError, ValueError):
         raise ValueError("配置无效：请检查 TOML 字段和权限设置") from None

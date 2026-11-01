@@ -27,8 +27,18 @@ async def test_v2_database_backup_and_forward_migration(tmp_path: Path) -> None:
     run_id = await repo.create_run(AgentRequest("s", "t", str(tmp_path), "old task", "fake"))
     await repo.close()
     with sqlite3.connect(path) as db:
+        for table in (
+            "verification_checks",
+            "verification_runs",
+            "file_changes",
+            "change_sets",
+            "plan_builds",
+            "plans",
+            "workspace_snapshots",
+        ):
+            db.execute(f"DROP TABLE {table}")
         db.execute("DROP TABLE mcp_launch_trust")
-        db.execute("DELETE FROM schema_migrations WHERE version=3")
+        db.execute("DELETE FROM schema_migrations WHERE version>=3")
     repo = await SQLiteSessionRepository.open(path)
     try:
         assert not await repo.mcp_launch_trusted("demo", "digest")

@@ -7,6 +7,87 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Protocol
 
+from deity.core.contracts.code_intelligence import (
+    CodeSearchPort,
+    CodeSearchResult,
+    IndexCache,
+    ReferenceQuery,
+    SymbolLocation,
+)
+from deity.core.contracts.planning import (
+    ExecutionMode,
+    PlanApproval,
+    PlanArtifact,
+    PlanDraft,
+    PlanRepository,
+    PlanStep,
+)
+from deity.core.contracts.verification import (
+    FinalReport,
+    VerificationCommand,
+    VerificationEvidence,
+    VerificationPlan,
+    VerificationRepository,
+    VerificationStatus,
+    Verifier,
+)
+from deity.core.contracts.workspace import (
+    ChangeSet,
+    ChangeSetRepository,
+    FileChange,
+    GitCheckpoint,
+    PatchApplyResult,
+    PatchApplyStatus,
+    WorkspaceFileState,
+    WorkspaceSnapshot,
+    WorkspaceSnapshotPort,
+)
+
+__all__ = (
+    "AgentRequest",
+    "AgentResult",
+    "ChangeSet",
+    "ChangeSetRepository",
+    "CodeSearchPort",
+    "CodeSearchResult",
+    "EventPublisher",
+    "ExecutionMode",
+    "FileChange",
+    "FinalReport",
+    "GitCheckpoint",
+    "IndexCache",
+    "ModelCapabilities",
+    "ModelEvent",
+    "ModelProvider",
+    "ModelRequest",
+    "PatchApplyResult",
+    "PatchApplyStatus",
+    "PlanApproval",
+    "PlanArtifact",
+    "PlanDraft",
+    "PlanRepository",
+    "PlanStep",
+    "RecoveryDecision",
+    "ReferenceQuery",
+    "RunBudget",
+    "RunLease",
+    "RunStatus",
+    "SessionRepository",
+    "SymbolLocation",
+    "ToolCall",
+    "ToolDispatcher",
+    "ToolResult",
+    "VerificationCommand",
+    "VerificationEvidence",
+    "VerificationPlan",
+    "VerificationRepository",
+    "VerificationStatus",
+    "Verifier",
+    "WorkspaceFileState",
+    "WorkspaceSnapshot",
+    "WorkspaceSnapshotPort",
+)
+
 
 class RunStatus(StrEnum):
     CREATED = "created"
@@ -36,6 +117,9 @@ class AgentRequest:
     max_output_tokens_total: int | None = None
     provider_name: str = ""
     extension_fingerprint: str = ""
+    execution_mode: ExecutionMode = ExecutionMode.BUILD
+    plan_id: str | None = None
+    policy_fingerprint: str = ""
 
     def config_fingerprint(self) -> str:
         """Hash recovery-relevant settings without including task text or secrets."""
@@ -53,6 +137,12 @@ class AgentRequest:
         }
         if self.extension_fingerprint:
             settings["extension_fingerprint"] = self.extension_fingerprint
+        if self.execution_mode != ExecutionMode.BUILD:
+            settings["execution_mode"] = self.execution_mode.value
+        if self.plan_id is not None:
+            settings["plan_id"] = self.plan_id
+        if self.policy_fingerprint:
+            settings["policy_fingerprint"] = self.policy_fingerprint
         encoded = json.dumps(settings, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 

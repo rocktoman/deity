@@ -33,7 +33,7 @@ class EchoModel:
 
 
 @pytest.mark.asyncio
-async def test_mcp_run_requires_launch_and_call_approval(tmp_path: Path) -> None:
+async def test_mcp_run_uses_explicit_configuration_authorization(tmp_path: Path) -> None:
     script = Path(__file__).parents[1] / "fixtures/mcp_echo_server.py"
     approvals: list[str] = []
 
@@ -55,7 +55,7 @@ async def test_mcp_run_requires_launch_and_call_approval(tmp_path: Path) -> None
     )
     result = await service.run("echo", model_name="fake")
     assert result.final_text == "done" and "hello" in model.output
-    assert approvals == ["mcp_server_start", "mcp_tool"]
+    assert approvals == []
     repo = await SQLiteSessionRepository.open(db_path)
     try:
         events = await repo.events(result.run_id)

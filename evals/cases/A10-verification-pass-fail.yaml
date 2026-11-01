@@ -1,0 +1,1 @@
+{"id":"A10","pytest":["tests/unit/test_verification.py::test_executor_reports_pass_fail_not_run_and_timeout","tests/integration/test_v05_services.py::test_verification_service_persists_evidence_and_final_status"]}

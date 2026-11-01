@@ -149,3 +149,24 @@ create clean fixture repo
 5. 在 M3/M4 之后逐步启用 E01–E08；对每个缺陷补回归用例。
 
 **关联**：`../02-architecture/deity-harness-v0.2.md`、`../03-development/development-guide.md`、`../../AGENTS.md`。
+
+## 10. V0.5 高级编码评估 A01–A12
+
+V0.5 增加 `uv run --locked python -m evals.runners.advanced`，固定覆盖：
+
+| ID | 场景 | 核心断言 |
+|---|---|---|
+| A01 | Plan 只读 | 写工具不可执行，计划可持久化 |
+| A02 | Plan→Build | 独立 Build Run、CLI 闭环、ChangeSet |
+| A03 | 计划过期/漂移 | TTL 与工作区变化阻断批准 |
+| A04 | Python 符号 | 定义候选、位置与置信度 |
+| A05 | Java 符号 | lexical 定义候选与文本引用 |
+| A06 | TypeScript/cache | TS/TSX 定位与内容 hash 失效 |
+| A07 | 初始 dirty 文件 | 默认拒绝，逐路径显式授权 |
+| A08 | Patch 边界 | preimage、CRLF/BOM、二进制、symlink、submodule |
+| A09 | 非 Git 工作区 | 文件 hash 基线与 ChangeSet |
+| A10 | Verification pass/fail | Evidence 与聚合状态来自实际退出码 |
+| A11 | Verification 不确定 | 缺依赖、超时、抖动、取消清理 |
+| A12 | 兼容性 | V0.5 开关关闭时旧路径保持通过 |
+
+A01–A12 属于确定性 L0/L1/L2 门禁。真实模型任务、token 与成本仍属于 L3；未运行时必须记为 `NOT_RUN/UNKNOWN`。

@@ -89,6 +89,13 @@ uv run pytest -q tests/integration
 
 V0.3 还须运行 `uv run python -m evals.runners.reliability`。候选版 L3 使用 `uv run python -m evals.runners.l3_candidate`，该命令调用真实 DeepSeek API，单独执行，不进入 PR CI。
 
+V0.4 与 V0.5 还须分别运行：
+
+```bash
+uv run --locked python -m evals.runners.extensions
+uv run --locked python -m evals.runners.advanced
+```
+
 ## 6. 配置与密钥
 
 建议 `~/.config/deity/config.toml`（用户配置）和可选 `.deity/config.toml`（项目配置，不能覆盖安全策略）。密钥从环境变量或 OS keychain 读取，不写入仓库或事件日志。
@@ -111,6 +118,31 @@ resume_enabled = true
 [permission]
 shell = "ask"
 workspace_write = "ask"
+
+[coding]
+version = 1
+plan_build_enabled = false
+code_intelligence_enabled = false
+git_guard_enabled = false
+verification_enabled = false
+plan_ttl_seconds = 86400
+
+[code_intelligence]
+backend = "lexical"
+cache_enabled = true
+max_files = 20000
+max_file_bytes = 2000000
+
+[git_guard]
+protect_initial_dirty = true
+require_read_before_write = true
+
+[verification]
+permission = "ask"
+timeout_seconds = 300
+max_output_chars = 16000
+repeat = 1
+# commands = [["python", "-m", "compileall", "src"]]
 ```
 
 配置示例中的 URL 为占位符。环境变量可用 `DEITY_API_KEY` 等明确命名；不同 provider 的具体密钥映射在适配器中配置，严禁输出到日志。
@@ -118,6 +150,8 @@ workspace_write = "ask"
 `context_window_tokens` 必须按所选模型明确配置，不能把示例值当作实际模型容量。提供该字段后，新 Run 默认启用压缩；可用 `compaction_enabled = false` 回退。`max_output_tokens` 默认不设置，OpenAI-compatible 请求不会发送人为的 `max_tokens`；Anthropic 协议要求该字段，适配器在未配置时使用 4096。`resume_enabled = false` 会拒绝显式续跑，原 Run 及 v2 审计事实仍可查询。`deity runs inspect` 会返回安全恢复判定；有未知工具结果、活动租约、工作区漂移、配置变化或预算耗尽时不得自动续跑。
 
 需要连续完成本地编码任务时，可将 `[permission]` 中的 `shell` 与 `workspace_write` 显式设为 `"auto"`。工作区内文件写入不再逐次询问；Shell 自动模式仅运行受限的测试和检查命令，其余命令直接拒绝。默认值仍为 `"ask"`；本地工具权限不是 OS 沙箱。详见 [ADR-008](../02-architecture/adr-008-auto-tool-authorization.md)。
+
+V0.5 所有开关默认关闭；Plan 模式由 Tool Runtime 强制只读，Build 不自动 stash/commit/reset，Verification 只执行探测或显式配置得到的 argv。详细命令、状态语义、SQLite v4 迁移和回退见 [V0.5 使用说明](v0.5-usage.md)。
 
 ## 7. 开发与评审规范
 

@@ -166,7 +166,9 @@ async def test_mcp_approval_cannot_mutate_authorized_arguments(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_mcp_denied_approval_never_dispatches(tmp_path: Path) -> None:
+async def test_mcp_explicit_configuration_ignores_legacy_approval_callback(
+    tmp_path: Path,
+) -> None:
     class RecordingManager:
         calls = 0
 
@@ -181,10 +183,9 @@ async def test_mcp_denied_approval_never_dispatches(tmp_path: Path) -> None:
     )
     request = AgentRequest("session", "task", str(tmp_path), "echo", "fake")
     call = ToolCall("call-1", "mcp:one:echo", {})
-    denied = await dispatcher.prepare(call, request)
-    assert denied is not None and denied.status == "denied"
-    assert (await dispatcher.dispatch(call, request)).status == "denied"
-    assert manager.calls == 0
+    assert await dispatcher.prepare(call, request) is None
+    assert (await dispatcher.dispatch(call, request)).status == "ok"
+    assert manager.calls == 1
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,1 @@
+{"id":"A09","pytest":"tests/integration/test_plan_build.py::test_build_rejects_initial_dirty_target_without_exact_allowlist"}

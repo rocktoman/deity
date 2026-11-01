@@ -8,6 +8,7 @@ import re
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,7 +17,24 @@ import aiosqlite
 
 from deity.core.context.reliable import canonical_json, normalize_unicode
 from deity.core.contracts import AgentRequest, RunLease, RunStatus, ToolCall, ToolResult
+from deity.core.contracts.planning import PlanArtifact
+from deity.core.contracts.verification import (
+    FinalReport,
+    VerificationCommand,
+    VerificationEvidence,
+    VerificationPlan,
+    VerificationStatus,
+)
+from deity.core.contracts.workspace import (
+    ChangeSet,
+    FileChange,
+    WorkspaceFileState,
+    WorkspaceSnapshot,
+)
+from deity.core.planning import parse_plan_draft, plan_sha256, requirements_sha256
 from deity.core.state import transition
+
+from .schema_v4 import backup_v3, migrate_v4
 
 SCHEMA = """
 PRAGMA foreign_keys=ON;
@@ -150,6 +168,9 @@ class SQLiteSessionRepository:
         if existing:
             _backup_v2(path)
         await repo._migrate_v3()
+        if existing:
+            backup_v3(path)
+        await migrate_v4(db)
         async with repo._lock:
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -413,6 +434,747 @@ class SQLiteSessionRepository:
             except Exception:
                 await self.db.rollback()
                 raise
+
+    async def create_workspace_snapshot(
+        self, snapshot: WorkspaceSnapshot, *, run_id: str | None = None
+    ) -> None:
+        """Persist a bounded workspace fact without scanning it inside SQLite."""
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", snapshot.digest) is None
+            or not snapshot.snapshot_id
+            or not snapshot.workspace_root
+            or len(snapshot.backend_version) > 100
+        ):
+            raise ValueError("invalid workspace snapshot")
+        status_json = canonical_json(
+            [
+                {"path": item.path, "status": item.status, "sha256": item.sha256}
+                for item in snapshot.files
+            ]
+        )
+        if len(status_json) > 4_000_000:
+            raise ValueError("workspace snapshot too large")
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self.db.execute(
+                    "INSERT INTO workspace_snapshots VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        snapshot.snapshot_id,
+                        snapshot.workspace_root,
+                        snapshot.git_head,
+                        status_json,
+                        snapshot.digest,
+                        snapshot.backend_version,
+                        snapshot.created_at,
+                    ),
+                )
+                if run_id is not None:
+                    await self._event(
+                        run_id,
+                        "WorkspaceSnapshotCaptured",
+                        {
+                            "schema_version": 1,
+                            "snapshot_id": snapshot.snapshot_id,
+                            "digest": snapshot.digest,
+                            "backend_version": snapshot.backend_version,
+                        },
+                    )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        if run_id is not None:
+            await self._publish(run_id, "WorkspaceSnapshotCaptured")
+
+    async def get_workspace_snapshot(self, snapshot_id: str) -> WorkspaceSnapshot:
+        """Read a stored snapshot with validated JSON shape."""
+        async with self.db.execute(
+            "SELECT * FROM workspace_snapshots WHERE id=?", (snapshot_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise KeyError(snapshot_id)
+        raw = json.loads(row["status_json"])
+        if not isinstance(raw, list):
+            raise ValueError("invalid workspace snapshot")  # noqa: TRY004
+        files = tuple(
+            WorkspaceFileState(item["path"], item["status"], item.get("sha256"))
+            for item in raw
+            if isinstance(item, dict)
+            and isinstance(item.get("path"), str)
+            and isinstance(item.get("status"), str)
+        )
+        if len(files) != len(raw):
+            raise ValueError("invalid workspace snapshot")
+        payload = {
+            "workspace": row["workspace_root"],
+            "git_head": row["git_head"],
+            "files": raw,
+            "backend_version": row["backend_version"],
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if digest != row["digest"] or re.fullmatch(r"[0-9a-f]{64}", row["digest"]) is None:
+            raise ValueError("workspace snapshot digest mismatch")
+        return WorkspaceSnapshot(
+            row["id"],
+            row["workspace_root"],
+            row["git_head"],
+            files,
+            row["digest"],
+            row["backend_version"],
+            row["created_at"],
+        )
+
+    async def create_plan(self, artifact: PlanArtifact) -> None:
+        """Persist one immutable plan and its source-run audit event."""
+        if (
+            artifact.status != "draft"
+            or re.fullmatch(r"[0-9a-f]{64}", artifact.sha256) is None
+            or re.fullmatch(r"[0-9a-f]{64}", artifact.requirements_sha256) is None
+            or artifact.sha256 != plan_sha256(artifact.draft)
+        ):
+            raise ValueError("invalid plan artifact")
+        artifact_json = canonical_json(asdict(artifact.draft))
+        if len(artifact_json) > 64_000:
+            raise ValueError("plan artifact too large")
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self.db.execute(
+                    "INSERT INTO plans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                    (
+                        artifact.plan_id,
+                        artifact.source_run_id,
+                        artifact.session_id,
+                        artifact.status,
+                        artifact.draft.schema_version,
+                        artifact_json,
+                        artifact.sha256,
+                        artifact.requirements_sha256,
+                        artifact.workspace_snapshot_id,
+                        artifact.created_at,
+                    ),
+                )
+                await self._event(
+                    artifact.source_run_id,
+                    "PlanSubmitted",
+                    {
+                        "schema_version": 1,
+                        "plan_id": artifact.plan_id,
+                        "sha256": artifact.sha256,
+                        "workspace_snapshot_id": artifact.workspace_snapshot_id,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(artifact.source_run_id, "PlanSubmitted")
+
+    async def get_plan(self, plan_id: str) -> PlanArtifact:
+        """Read and validate one stored PlanArtifact."""
+        async with self.db.execute(
+            "SELECT plans.*, tasks.prompt AS source_prompt FROM plans "
+            "JOIN runs ON plans.source_run_id=runs.id "
+            "JOIN tasks ON runs.task_id=tasks.id WHERE plans.id=?",
+            (plan_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise KeyError(plan_id)
+        draft_raw = json.loads(row["artifact_json"])
+        if not isinstance(draft_raw, dict):
+            raise ValueError("invalid stored plan")  # noqa: TRY004
+        draft = parse_plan_draft(draft_raw)
+        if (
+            row["status"] not in {"draft", "approved", "stale"}
+            or plan_sha256(draft) != row["sha256"]
+            or requirements_sha256(row["source_prompt"]) != row["requirements_sha256"]
+        ):
+            raise ValueError("stored plan integrity check failed")
+        return PlanArtifact(
+            row["id"],
+            row["source_run_id"],
+            row["session_id"],
+            draft,
+            row["sha256"],
+            row["requirements_sha256"],
+            row["workspace_snapshot_id"],
+            row["status"],
+            row["created_at"],
+        )
+
+    async def plan_for_run(self, run_id: str) -> PlanArtifact:
+        """Return the sole successful plan submitted by a Plan Run."""
+        async with self.db.execute(
+            "SELECT id FROM plans WHERE source_run_id=? ORDER BY created_at", (run_id,)
+        ) as cursor:
+            rows = list(await cursor.fetchall())
+        if len(rows) != 1:
+            raise KeyError(run_id)
+        return await self.get_plan(rows[0][0])
+
+    async def list_plans(self, session_id: str | None = None) -> tuple[PlanArtifact, ...]:
+        """List plans without exposing raw SQLite rows."""
+        query = "SELECT id FROM plans"
+        params: tuple[str, ...] = ()
+        if session_id is not None:
+            query += " WHERE session_id=?"
+            params = (session_id,)
+        query += " ORDER BY created_at DESC"
+        async with self.db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+        return tuple([await self.get_plan(row[0]) for row in rows])
+
+    async def mark_plan_stale(self, plan_id: str, reason: str) -> None:
+        """Make a draft permanently non-buildable and audit the reason."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                async with self.db.execute(
+                    "SELECT source_run_id, status FROM plans WHERE id=?", (plan_id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(plan_id)
+                if row["status"] == "draft":
+                    await self.db.execute("UPDATE plans SET status='stale' WHERE id=?", (plan_id,))
+                    await self._event(
+                        row["source_run_id"],
+                        "PlanMarkedStale",
+                        {"schema_version": 1, "plan_id": plan_id, "reason": reason},
+                    )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+
+    async def approve_plan_and_create_build(
+        self,
+        plan: PlanArtifact,
+        snapshot_id: str,
+        allow_dirty_paths: tuple[str, ...],
+    ) -> tuple[str, str]:
+        """Approve once and create the Build Run and active ChangeSet atomically."""
+        build_run_id, change_set_id = str(uuid4()), str(uuid4())
+        approval = canonical_json(
+            {
+                "schema_version": 1,
+                "plan_sha256": plan.sha256,
+                "requirements_sha256": plan.requirements_sha256,
+                "allow_dirty_paths": list(allow_dirty_paths),
+            }
+        )
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                async with self.db.execute(
+                    "SELECT status, sha256, requirements_sha256, source_run_id "
+                    "FROM plans WHERE id=?",
+                    (plan.plan_id,),
+                ) as cursor:
+                    current = await cursor.fetchone()
+                if current is None:
+                    raise KeyError(plan.plan_id)
+                if current["status"] != "draft":
+                    raise ValueError("plan already approved")
+                if (
+                    current["sha256"] != plan.sha256
+                    or current["requirements_sha256"] != plan.requirements_sha256
+                ):
+                    raise ValueError("plan hash changed")
+                async with self.db.execute(
+                    "SELECT task_id, model_provider, model_name, max_turns, max_tool_calls "
+                    "FROM runs WHERE id=?",
+                    (current["source_run_id"],),
+                ) as cursor:
+                    source = await cursor.fetchone()
+                if source is None:
+                    raise ValueError("source run missing")
+                await self.db.execute(
+                    "INSERT INTO runs VALUES (?, ?, 'created', ?, ?, NULL, NULL, NULL, ?, ?)",
+                    (
+                        build_run_id,
+                        source["task_id"],
+                        source["model_provider"],
+                        source["model_name"],
+                        source["max_turns"],
+                        source["max_tool_calls"],
+                    ),
+                )
+                await self.db.execute(
+                    "UPDATE plans SET status='approved', approved_at=datetime('now') WHERE id=?",
+                    (plan.plan_id,),
+                )
+                await self.db.execute(
+                    "INSERT INTO plan_builds VALUES (?, ?, ?, datetime('now'))",
+                    (plan.plan_id, build_run_id, approval),
+                )
+                await self.db.execute(
+                    "INSERT INTO change_sets VALUES (?, ?, ?, 'active', '{}', datetime('now'), NULL)",
+                    (change_set_id, build_run_id, snapshot_id),
+                )
+                await self._event(
+                    plan.source_run_id,
+                    "PlanApproved",
+                    {"schema_version": 1, "plan_id": plan.plan_id},
+                )
+                await self._event(
+                    build_run_id,
+                    "BuildRunLinked",
+                    {"schema_version": 1, "plan_id": plan.plan_id},
+                )
+                await self._event(
+                    build_run_id,
+                    "ChangeSetStarted",
+                    {"schema_version": 1, "change_set_id": change_set_id},
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(plan.source_run_id, "PlanApproved")
+        await self._publish(build_run_id, "BuildRunLinked")
+        await self._publish(build_run_id, "ChangeSetStarted")
+        return build_run_id, change_set_id
+
+    async def plan_build_allowlist(self, build_run_id: str) -> tuple[str, ...]:
+        """Read the exact dirty-path approval bound to a Build Run."""
+        async with self.db.execute(
+            "SELECT approval_json FROM plan_builds WHERE build_run_id=?", (build_run_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise KeyError(build_run_id)
+        payload = json.loads(row[0])
+        values = payload.get("allow_dirty_paths") if isinstance(payload, dict) else None
+        if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+            raise ValueError("invalid build approval")
+        return tuple(values)
+
+    async def ensure_change_set(self, run_id: str, snapshot_id: str) -> str:
+        """Create one active ChangeSet for an ordinary Build Run if absent."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                async with self.db.execute(
+                    "SELECT id FROM change_sets WHERE run_id=?", (run_id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is not None:
+                    await self.db.commit()
+                    return str(row[0])
+                change_set_id = str(uuid4())
+                await self.db.execute(
+                    "INSERT INTO change_sets VALUES (?, ?, ?, 'active', '{}', datetime('now'), NULL)",
+                    (change_set_id, run_id, snapshot_id),
+                )
+                await self._event(
+                    run_id,
+                    "ChangeSetStarted",
+                    {"schema_version": 1, "change_set_id": change_set_id},
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "ChangeSetStarted")
+        return change_set_id
+
+    async def record_file_change(self, change_set_id: str, run_id: str, change: FileChange) -> None:
+        """Record a file change only after the tool outcome has committed."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                async with self.db.execute(
+                    "SELECT COALESCE(MAX(ordinal),0)+1 FROM file_changes WHERE change_set_id=?",
+                    (change_set_id,),
+                ) as cursor:
+                    ordinal = await cursor.fetchone()
+                if ordinal is None:
+                    raise ValueError("file change ordinal unavailable")
+                await self.db.execute(
+                    "INSERT INTO file_changes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(uuid4()),
+                        change_set_id,
+                        ordinal[0],
+                        change.path,
+                        change.operation,
+                        change.before_sha256,
+                        change.after_sha256,
+                        change.source_call_id,
+                        change.status,
+                    ),
+                )
+                await self._event(
+                    run_id,
+                    "FileChangeRecorded",
+                    {
+                        "schema_version": 1,
+                        "change_set_id": change_set_id,
+                        "path": change.path,
+                        "operation": change.operation,
+                        "source_call_id": change.source_call_id,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "FileChangeRecorded")
+
+    async def finalize_change_set(self, run_id: str, status: str) -> None:
+        """Close the active ChangeSet without inventing Git commits."""
+        if status not in {"completed", "unknown"}:
+            raise ValueError("invalid change set status")
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                async with self.db.execute(
+                    "SELECT id FROM change_sets WHERE run_id=?", (run_id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    await self.db.commit()
+                    return
+                change_set_id = str(row[0])
+                async with self.db.execute(
+                    "SELECT path, operation, status FROM file_changes "
+                    "WHERE change_set_id=? ORDER BY ordinal",
+                    (change_set_id,),
+                ) as cursor:
+                    changes = [dict(item) for item in await cursor.fetchall()]
+                await self.db.execute(
+                    "UPDATE change_sets SET status=?, summary_json=?, completed_at=datetime('now') "
+                    "WHERE id=? AND status='active'",
+                    (status, canonical_json(changes), change_set_id),
+                )
+                await self._event(
+                    run_id,
+                    "ChangeSetFinalized",
+                    {
+                        "schema_version": 1,
+                        "change_set_id": change_set_id,
+                        "status": status,
+                        "file_count": len(changes),
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "ChangeSetFinalized")
+
+    async def change_set_for_run(self, run_id: str) -> ChangeSet:
+        """Read one Build Run's ordered ChangeSet."""
+        async with self.db.execute(
+            "SELECT id, baseline_snapshot_id, status FROM change_sets WHERE run_id=?", (run_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        async with self.db.execute(
+            "SELECT path, operation, before_sha256, after_sha256, source_call_id, status "
+            "FROM file_changes WHERE change_set_id=? ORDER BY ordinal",
+            (row["id"],),
+        ) as cursor:
+            changes = await cursor.fetchall()
+        return ChangeSet(
+            row["id"],
+            run_id,
+            row["baseline_snapshot_id"],
+            row["status"],
+            tuple(
+                FileChange(
+                    item["path"],
+                    item["operation"],
+                    item["before_sha256"],
+                    item["after_sha256"],
+                    item["source_call_id"],
+                    item["status"],
+                )
+                for item in changes
+            ),
+        )
+
+    async def create_verification(
+        self, run_id: str, snapshot_id: str | None, plan: VerificationPlan
+    ) -> str:
+        """Persist a fixed verification plan before starting subprocesses."""
+        verification_id = str(uuid4())
+        plan_json = canonical_json(
+            _redact(
+                {
+                    "commands": [
+                        {
+                            "kind": item.kind,
+                            "argv": list(item.argv),
+                            "required": item.required,
+                        }
+                        for item in plan.commands
+                    ],
+                    "diagnostics": list(plan.diagnostics),
+                }
+            )
+        )
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self.db.execute(
+                    "INSERT INTO verification_runs VALUES (?, ?, ?, 'running', ?, datetime('now'), NULL)",
+                    (verification_id, run_id, snapshot_id, plan_json),
+                )
+                await self._event(
+                    run_id,
+                    "VerificationPlanned",
+                    {
+                        "schema_version": 1,
+                        "verification_id": verification_id,
+                        "check_count": len(plan.commands),
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "VerificationPlanned")
+        return verification_id
+
+    async def record_code_index_updated(self, run_id: str, payload: dict[str, Any]) -> None:
+        """Audit one bounded code-index query after its ToolCompleted event committed."""
+        safe_payload = _redact({"schema_version": 1, **payload})
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._event(run_id, "CodeIndexUpdated", safe_payload)
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "CodeIndexUpdated")
+
+    async def record_verification_check(
+        self,
+        verification_id: str,
+        run_id: str,
+        ordinal: int,
+        evidence: VerificationEvidence,
+    ) -> None:
+        """Commit Evidence, check row and audit event in one transaction."""
+        payload = canonical_json(
+            _redact(
+                {
+                    "command": {
+                        "kind": evidence.command.kind,
+                        "argv": list(evidence.command.argv),
+                        "required": evidence.command.required,
+                    },
+                    "status": evidence.status.value,
+                    "exit_code": evidence.exit_code,
+                    "duration_ms": evidence.duration_ms,
+                    "output": evidence.output,
+                    "truncated": evidence.truncated,
+                    "reason": evidence.reason,
+                }
+            )
+        )
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self.db.execute(
+                    "INSERT INTO evidence VALUES (?, ?, 'verification', NULL, ?, ?, datetime('now'))",
+                    (
+                        evidence.evidence_id,
+                        run_id,
+                        f"{evidence.command.kind}:{evidence.status.value}",
+                        payload,
+                    ),
+                )
+                await self.db.execute(
+                    "INSERT INTO verification_checks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(uuid4()),
+                        verification_id,
+                        ordinal,
+                        evidence.command.kind,
+                        canonical_json(list(evidence.command.argv)),
+                        evidence.status.value,
+                        evidence.exit_code,
+                        evidence.evidence_id,
+                        evidence.duration_ms,
+                    ),
+                )
+                await self._event(
+                    run_id,
+                    "VerificationCheckCompleted",
+                    {
+                        "schema_version": 1,
+                        "verification_id": verification_id,
+                        "ordinal": ordinal,
+                        "status": evidence.status.value,
+                        "evidence_id": evidence.evidence_id,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "VerificationCheckCompleted")
+
+    async def complete_verification(
+        self, verification_id: str, run_id: str, status: VerificationStatus
+    ) -> None:
+        """Commit the aggregate only after every check fact exists."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                async with self.db.execute(
+                    "SELECT status, plan_json FROM verification_runs WHERE id=? AND run_id=?",
+                    (verification_id, run_id),
+                ) as cursor:
+                    verification = await cursor.fetchone()
+                if verification is None or verification["status"] != "running":
+                    raise ValueError("verification is not running")
+                plan = json.loads(verification["plan_json"])
+                expected = len(plan.get("commands", [])) if isinstance(plan, dict) else -1
+                async with self.db.execute(
+                    "SELECT status FROM verification_checks WHERE verification_id=? "
+                    "ORDER BY ordinal",
+                    (verification_id,),
+                ) as cursor:
+                    rows = list(await cursor.fetchall())
+                if len(rows) != expected:
+                    raise ValueError("verification checks are incomplete")
+                commands = plan.get("commands", []) if isinstance(plan, dict) else []
+                all_statuses = [VerificationStatus(row["status"]) for row in rows]
+                statuses = [
+                    item
+                    for item, command in zip(all_statuses, commands, strict=True)
+                    if command.get("required", True)
+                ] or all_statuses
+                computed = (
+                    VerificationStatus.NOT_RUN
+                    if not statuses
+                    else VerificationStatus.FAILED
+                    if VerificationStatus.FAILED in statuses
+                    else VerificationStatus.INCONCLUSIVE
+                    if VerificationStatus.INCONCLUSIVE in statuses
+                    else VerificationStatus.NOT_RUN
+                    if VerificationStatus.NOT_RUN in statuses
+                    else VerificationStatus.PASSED
+                )
+                if computed != status:
+                    raise ValueError("verification aggregate mismatch")
+                await self.db.execute(
+                    "UPDATE verification_runs SET status=?, ended_at=datetime('now') WHERE id=?",
+                    (status.value, verification_id),
+                )
+                await self._event(
+                    run_id,
+                    "VerificationCompleted",
+                    {
+                        "schema_version": 1,
+                        "verification_id": verification_id,
+                        "status": status.value,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "VerificationCompleted")
+
+    async def abort_verification(self, verification_id: str, run_id: str, reason: str) -> None:
+        """Close an interrupted verification without claiming completed checks."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await self.db.execute(
+                    "UPDATE verification_runs SET status='inconclusive', "
+                    "ended_at=datetime('now') WHERE id=? AND run_id=? AND status='running'",
+                    (verification_id, run_id),
+                )
+                if cursor.rowcount != 1:
+                    await self.db.commit()
+                    return
+                await self._event(
+                    run_id,
+                    "VerificationInterrupted",
+                    {
+                        "schema_version": 1,
+                        "verification_id": verification_id,
+                        "reason": reason,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "VerificationInterrupted")
+
+    async def verification_report(self, run_id: str) -> FinalReport:
+        """Rebuild a report only from committed verification and Evidence rows."""
+        async with self.db.execute(
+            "SELECT id, status, plan_json FROM verification_runs "
+            "WHERE run_id=? ORDER BY started_at DESC LIMIT 1",
+            (run_id,),
+        ) as cursor:
+            verification = await cursor.fetchone()
+        if verification is None:
+            raise KeyError(run_id)
+        plan = json.loads(verification["plan_json"])
+        commands = plan.get("commands", []) if isinstance(plan, dict) else []
+        async with self.db.execute(
+            "SELECT verification_checks.ordinal, verification_checks.status, "
+            "verification_checks.exit_code, verification_checks.duration_ms, "
+            "verification_checks.evidence_id, evidence.payload_json "
+            "FROM verification_checks JOIN evidence "
+            "ON verification_checks.evidence_id=evidence.id "
+            "WHERE verification_checks.verification_id=? ORDER BY verification_checks.ordinal",
+            (verification["id"],),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        checks: list[VerificationEvidence] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            command_payload = commands[row["ordinal"] - 1]
+            command = VerificationCommand(
+                command_payload["kind"],
+                tuple(command_payload["argv"]),
+                command_payload["required"],
+            )
+            checks.append(
+                VerificationEvidence(
+                    row["evidence_id"],
+                    command,
+                    VerificationStatus(row["status"]),
+                    row["exit_code"],
+                    row["duration_ms"],
+                    payload["output"],
+                    payload["truncated"],
+                    payload["reason"],
+                )
+            )
+        async with self.db.execute(
+            "SELECT id FROM change_sets WHERE run_id=?", (run_id,)
+        ) as cursor:
+            change_set = await cursor.fetchone()
+        risks = tuple(
+            item.reason or item.status.value
+            for item in checks
+            if item.status != VerificationStatus.PASSED
+        )
+        return FinalReport(
+            VerificationStatus(verification["status"]),
+            run_id,
+            str(change_set[0]) if change_set is not None else None,
+            tuple(checks),
+            risks,
+        )
 
     async def mcp_launch_trusted(self, server_name: str, digest: str) -> bool:
         """Check whether the exact launch configuration was approved."""
@@ -1006,14 +1768,15 @@ class SQLiteSessionRepository:
 
     async def record_evidence(
         self, run_id: str, kind: str, summary: str, call_id: str | None = None
-    ) -> None:
+    ) -> str:
         """Persist a verification fact and its event together."""
+        evidence_id = str(uuid4())
         async with self._lock:
             await self.db.execute("BEGIN IMMEDIATE")
             try:
                 await self.db.execute(
                     "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, '{}', datetime('now'))",
-                    (str(uuid4()), run_id, kind, call_id, _redact(summary)),
+                    (evidence_id, run_id, kind, call_id, _redact(summary)),
                 )
                 await self._event(
                     run_id, "VerificationRecorded", {"kind": kind, "call_id": call_id}
@@ -1023,6 +1786,7 @@ class SQLiteSessionRepository:
                 await self.db.rollback()
                 raise
         await self._publish(run_id, "VerificationRecorded")
+        return evidence_id
 
     async def sessions(self) -> list[dict[str, str]]:
         """List known sessions newest first."""

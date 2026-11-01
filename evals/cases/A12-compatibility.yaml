@@ -1,0 +1,1 @@
+{"id":"A12","pytest":["tests/integration/test_storage_v4.py","tests/unit/test_v05_config.py","tests/integration/test_mcp_run.py","tests/integration/test_skill_run.py","tests/integration/test_hook_run.py"]}

@@ -218,6 +218,11 @@ class LocalToolDispatcher:
         self.audit.append((call.call_id, call.name, result.status))
         return result
 
+    def discard(self, call: ToolCall, context: AgentRequest) -> None:
+        """Forget an authorized call when an outer safety policy replaces execution."""
+        key = (context.run_id or context.task_id, call.call_id)
+        self._prepared.pop(key, None)
+
     @staticmethod
     def _path(root: Path, user_path: str) -> Path:
         path = Path(user_path)

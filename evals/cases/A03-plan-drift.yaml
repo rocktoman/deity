@@ -1,0 +1,1 @@
+{"id":"A03","pytest":["tests/integration/test_plan_build.py::test_build_approval_is_unique_and_detects_workspace_drift","tests/integration/test_plan_build.py::test_expired_plan_is_marked_stale"]}
