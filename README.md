@@ -81,7 +81,7 @@ deity verify --run <run-id> --workspace /path/to/repo
 
 独立命令可在仓库目录用 `uv tool install --editable .` 安装。交互模式在一次启动内复用会话，并将最近四轮问答作为后续模型上下文；单次命令执行后退出。模型配置默认从 `~/.config/deity/config.toml` 读取，密钥只从配置指定的环境变量读取。工具权限可显式配置为 `shell = "auto"`、`workspace_write = "auto"`，免去逐次确认；Shell 自动模式仅运行受限的测试和检查命令。删除文件时可以说 `删除 bubble_sort.py`，也可以在同一会话创建文件后说 `删除刚才新建的文件`；模型负责解析目标，受限的 `delete_file` 工具执行删除。
 
-交互模式可输入 `/plan` 进入持续的计划模式：之后的任务会先展示计划并询问一次是否构建。拒绝时可用 `/build` 选择本会话草案，或用 `/build <plan-id> --allow-dirty <path>` 逐路径授权计划内已有改动；`/normal` 返回普通模式。Build 完成后仍保持计划模式。
+交互模式可输入 `/plan` 进入持续的计划模式：之后的任务会先展示计划并询问一次是否构建。若目标文件已有本地改动，构建前还会逐路径询问是否允许修改；拒绝时保留草案，可用 `/build` 继续，或用 `/build <plan-id> --allow-dirty <path>` 显式授权。`/normal` 返回普通模式。Build 完成后仍保持计划模式。
 
 ## MVP 成功标准
 

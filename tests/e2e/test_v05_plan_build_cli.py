@@ -152,6 +152,37 @@ def test_plan_show_and_build_cli(tmp_path: Path) -> None:
         assert immediate.count("Deity[plan]>") >= 2
         assert "允许本次调用" not in immediate
         assert (tmp_path / "feature.py").read_text() == 'VALUE = "new"\n'
+
+        def git(*arguments: str) -> None:
+            completed = subprocess.run(
+                ["git", *arguments], cwd=tmp_path, text=True, capture_output=True, check=False
+            )
+            assert completed.returncode == 0, completed.stderr
+
+        (tmp_path / "feature.py").write_text('VALUE = "base"\n')
+        git("init", "-q")
+        git("config", "user.email", "fixture@example.com")
+        git("config", "user.name", "Fixture")
+        git("add", "feature.py")
+        git("commit", "-qm", "基线")
+        (tmp_path / "feature.py").write_text('VALUE = "old"\n')
+        dirty = cli(
+            "run",
+            *common,
+            answer="/plan\n更新示例\ny\nn\n/build\n1\ny\ny\n/exit\n",
+        )
+        assert dirty.count("批准此计划并执行 Build？") == 2
+        assert dirty.count("feature.py 已有本地改动") == 2
+        assert "已保留计划" in dirty
+        assert "V0.5 CLI 完成" in dirty
+        assert "允许本次调用" not in dirty
+        assert (tmp_path / "feature.py").read_text() == 'VALUE = "new"\n'
+
+        (tmp_path / "feature.py").write_text('VALUE = "old"\n')
+        direct_dirty = cli("plan", "更新示例", *common, answer="y\ny\n")
+        assert "feature.py 已有本地改动" in direct_dirty
+        assert "V0.5 CLI 完成" in direct_dirty
+        assert (tmp_path / "feature.py").read_text() == 'VALUE = "new"\n'
     finally:
         server.shutdown()
         server.server_close()

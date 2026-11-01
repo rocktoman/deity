@@ -54,7 +54,8 @@ def plan_command(
                 artifact.plan_id,
                 (),
             )
-            console.print(result.final_text or "无最终回答")
+            if result is not None:
+                console.print(result.final_text or "无最终回答")
     except (ValueError, OSError, KeyError, ModelFailure, ProtocolError, BudgetExceeded) as exc:
         console.print(str(exc), style="red")
         raise typer.Exit(code=2) from None
@@ -131,6 +132,24 @@ def confirm_build(artifact: PlanArtifact, allow_dirty: tuple[str, ...] = ()) -> 
     return typer.confirm("批准此计划并执行 Build？", default=False)
 
 
+async def authorize_dirty_targets(
+    runner: RunService, plan_id: str, allow_dirty: tuple[str, ...] = ()
+) -> tuple[str, ...] | None:
+    """Request explicit path consent for dirty targets before starting Build."""
+    service = BuildService(
+        runner.db_path, runner.workspace, plan_ttl_seconds=runner.coding.plan_ttl_seconds
+    )
+    permitted = set(allow_dirty)
+    for path in await service.initial_dirty_targets(plan_id):
+        if path in permitted:
+            continue
+        if not typer.confirm(f"{path} 已有本地改动。允许本次 Build 修改此文件？", default=False):
+            console.print(f"已保留计划；可用 /build {plan_id} --allow-dirty {path} 稍后授权。")
+            return None
+        permitted.add(path)
+    return tuple(sorted(permitted))
+
+
 async def build_approved(
     runner: RunService, plan_id: str, allow_dirty: tuple[str, ...] = ()
 ) -> AgentResult:
@@ -147,7 +166,7 @@ def _execute_build(
     db_path: Path,
     plan_id: str,
     allow_dirty: tuple[str, ...],
-) -> AgentResult:
+) -> AgentResult | None:
     def approve(name: str, args: dict[str, object]) -> bool:
         displayed = {key: value for key, value in args.items() if key != "content"}
         console.print(f"工具 {name} 请求执行：{displayed}")
@@ -155,7 +174,13 @@ def _execute_build(
 
     runner = RunService.from_config(settings, db_path=db_path, workspace=workdir, approve=approve)
 
-    return asyncio.run(build_approved(runner, plan_id, allow_dirty))
+    async def execute() -> AgentResult | None:
+        allowed = await authorize_dirty_targets(runner, plan_id, allow_dirty)
+        if allowed is None:
+            return None
+        return await build_approved(runner, plan_id, allowed)
+
+    return asyncio.run(execute())
 
 
 def build_command(
@@ -188,7 +213,8 @@ def build_command(
             return
 
         result = _execute_build(settings, workdir, db_path, plan_id, tuple(allow_dirty or ()))
-        console.print(result.final_text or "无最终回答")
+        if result is not None:
+            console.print(result.final_text or "无最终回答")
     except (ValueError, OSError, KeyError, ModelFailure, ProtocolError, BudgetExceeded) as exc:
         console.print(str(exc), style="red")
         raise typer.Exit(code=2) from None

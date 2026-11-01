@@ -18,6 +18,7 @@ from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
 from deity.interfaces.cli.code import code_app
 from deity.interfaces.cli.menu import choose
 from deity.interfaces.cli.plan import (
+    authorize_dirty_targets,
     build_approved,
     build_command,
     confirm_build,
@@ -272,9 +273,13 @@ async def _interactive(service: RunService, model_name: str, session_id: str | N
                 ):
                     raise ValueError("--allow-dirty 路径必须属于计划目标")
                 if confirm_build(artifact, tuple(dirty_paths)):
-                    result = await build_approved(service, artifact.plan_id, tuple(dirty_paths))
-                    console.print(result.final_text or "无最终回答")
-                    plan_mode = True
+                    allowed = await authorize_dirty_targets(
+                        service, artifact.plan_id, tuple(dirty_paths)
+                    )
+                    if allowed is not None:
+                        result = await build_approved(service, artifact.plan_id, allowed)
+                        console.print(result.final_text or "无最终回答")
+                        plan_mode = True
                 else:
                     console.print("已取消 Build，计划仍可再次查看和批准。")
             except (
@@ -351,7 +356,10 @@ async def _interactive(service: RunService, model_name: str, session_id: str | N
                 )
                 console.print(f"计划 ID：{artifact.plan_id}")
                 if confirm_build(artifact):
-                    result = await build_approved(service, artifact.plan_id)
+                    allowed = await authorize_dirty_targets(service, artifact.plan_id)
+                    if allowed is None:
+                        continue
+                    result = await build_approved(service, artifact.plan_id, allowed)
                 else:
                     console.print("已保留计划；输入 /build 可稍后执行。")
                     continue

@@ -213,6 +213,7 @@ async def test_git_dirty_target_requires_exact_allowlist(tmp_path: Path) -> None
         await repo.close()
 
     service = BuildService(db_path, tmp_path, plan_ttl_seconds=3600)
+    assert await service.initial_dirty_targets(artifact.plan_id) == ("feature.py",)
     with pytest.raises(ValueError, match="initial dirty path"):
         await service.start(artifact.plan_id)
     started = await service.start(artifact.plan_id, allow_dirty_paths=("feature.py",))
