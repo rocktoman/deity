@@ -1,0 +1,1 @@
+{"id":"M12","name":"interrupted-restart","pytest":["tests/integration/test_storage_v6.py::test_restart_marks_orphaned_child_interrupted","tests/integration/test_storage_v6.py::test_restart_cancels_queued_child_after_parent_interrupt"]}

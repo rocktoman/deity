@@ -27,17 +27,18 @@ async def test_v4_backup_and_v5_migration(tmp_path: Path) -> None:
     await repo.close()
     with sqlite3.connect(path) as db:
         for table in (
+            "delegations",
             "sandbox_cleanups",
             "sandbox_artifacts",
             "artifact_manifests",
             "sandbox_executions",
         ):
             db.execute(f"DROP TABLE {table}")
-        db.execute("DELETE FROM schema_migrations WHERE version=5")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (5, 6)")
     repo = await SQLiteSessionRepository.open(path)
     try:
         async with repo.db.execute("SELECT MAX(version) FROM schema_migrations") as cursor:
-            assert (await cursor.fetchone())[0] == 5
+            assert (await cursor.fetchone())[0] == 6
         async with repo.db.execute("SELECT name FROM sqlite_master WHERE type='table'") as cursor:
             tables = {row[0] for row in await cursor.fetchall()}
         assert {
@@ -59,13 +60,14 @@ async def test_v4_backup_restores_in_isolated_path(tmp_path: Path) -> None:
     await repo.close()
     with sqlite3.connect(path) as db:
         for table in (
+            "delegations",
             "sandbox_cleanups",
             "sandbox_artifacts",
             "artifact_manifests",
             "sandbox_executions",
         ):
             db.execute(f"DROP TABLE {table}")
-        db.execute("DELETE FROM schema_migrations WHERE version=5")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (5, 6)")
     repo = await SQLiteSessionRepository.open(path)
     await repo.close()
     restored = tmp_path / "isolated" / "restored-v4.db"
@@ -86,13 +88,14 @@ async def test_corrupt_v4_backup_blocks_migration(tmp_path: Path) -> None:
     await repo.close()
     with sqlite3.connect(path) as db:
         for table in (
+            "delegations",
             "sandbox_cleanups",
             "sandbox_artifacts",
             "artifact_manifests",
             "sandbox_executions",
         ):
             db.execute(f"DROP TABLE {table}")
-        db.execute("DELETE FROM schema_migrations WHERE version=5")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (5, 6)")
     path.with_suffix(".v4.bak").write_text("corrupt", encoding="utf-8")
     with pytest.raises(ValueError):
         await SQLiteSessionRepository.open(path)

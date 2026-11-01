@@ -1,0 +1,1 @@
+{"id":"M05","name":"isolated-context","pytest":"tests/integration/test_delegation_run.py::test_parent_delegates_read_only_child"}

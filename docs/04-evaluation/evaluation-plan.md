@@ -174,3 +174,7 @@ A01–A12 属于确定性 L0/L1/L2 门禁。真实模型任务、token 与成本
 ## 11. V0.6 执行沙箱评估 S01–S12
 
 运行 `uv run --locked python -m evals.runners.sandbox --require-docker`。S01–S03 覆盖默认兼容、Fake 生命周期和能力拒绝；S04–S06 在真实 Docker 上检查隔离参数、秘密/Socket 和输出资源边界；S07–S09 检查清理失败、staging 漂移及工件保护；S10 检查 Verification 工件丢弃；S11 检查配置拒绝；S12 检查重启后未知 intent。每例输出 `evals/reports/Sxx.json`。无 Docker 时真实用例标 `NOT_RUN`，专用门禁失败；普通 CI 可运行 Fake/Local 场景，但不能据此宣称真实 Docker 验收通过。候选报告仍须逐项记录未覆盖的故障注入、平台与真实模型结果。
+
+## 12. V0.7 只读委派评估 M01–M12
+
+运行 `uv run --locked python -m evals.runners.multi_agent`。M01–M12 依次覆盖委派幂等、只读子任务、Shell/写工具拒绝、工作区边界、上下文隔离、证据引用、摘要长度、预算预留、并发子任务、父级取消、partial 聚合与崩溃恢复。每例调用确定性 pytest fixture，并输出 `evals/reports/Mxx.json`，报告记录退出码、耗时和测试输出。安全、预算、取消与恢复用例必须全部通过；真实模型效果另作 L3 观察，不能由 M 系列通过推断。

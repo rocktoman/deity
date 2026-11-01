@@ -1,5 +1,6 @@
 """Compose a provider, tool dispatcher and session repository for one run."""
 
+import asyncio
 import hashlib
 import importlib
 import inspect
@@ -23,8 +24,10 @@ from deity.adapters.skills import SkillCatalog, SkillDispatcher
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.adapters.tools import LocalToolDispatcher, auto_shell_allowed
 from deity.adapters.tools.code_intelligence import CodeIntelligenceDispatcher
+from deity.adapters.tools.delegation import DelegationDispatcher
 from deity.adapters.tools.git_guard import GitGuardedDispatcher
 from deity.adapters.tools.planning import PlanningDispatcher
+from deity.adapters.tools.read_only import ReadOnlyToolDispatcher
 from deity.adapters.tools.workspace import workspace_digest
 from deity.application.config import (
     CodeIntelligenceConfig,
@@ -32,6 +35,7 @@ from deity.application.config import (
     Config,
     GitGuardConfig,
     McpServerSettings,
+    MultiAgentConfig,
     PermissionConfig,
     RunConfig,
     SandboxConfig,
@@ -51,6 +55,11 @@ from deity.core.contracts import (
     ToolDispatcher,
     ToolResult,
 )
+from deity.core.contracts.delegation import (
+    DelegationRequest,
+    ReadOnlyAgentProfile,
+    SubAgentResult,
+)
 from deity.core.contracts.execution import (
     ArtifactManifest,
     BackendKind,
@@ -60,8 +69,9 @@ from deity.core.contracts.execution import (
     SandboxHandle,
     SandboxSpec,
 )
+from deity.core.delegation import DelegationPolicy, ResultReducer
 from deity.core.hooks import HookRegistry, RegisteredHook
-from deity.core.runtime import AgentLoop
+from deity.core.runtime import AgentLoop, BudgetExceeded, ModelFailure, PolicyVeto, ProtocolError
 
 
 class RunService:
@@ -91,6 +101,7 @@ class RunService:
         verification: VerificationConfig | None = None,
         coding_fingerprint: str = "",
         sandbox: SandboxConfig | None = None,
+        multi_agent: MultiAgentConfig | None = None,
     ) -> None:
         self.db_path = db_path
         self.workspace = workspace.resolve(strict=True)
@@ -110,6 +121,14 @@ class RunService:
         self.git_guard = git_guard or GitGuardConfig()
         self.verification = verification or VerificationConfig()
         self.sandbox = sandbox or SandboxConfig()
+        self.multi_agent = multi_agent or MultiAgentConfig()
+        self.multi_agent_fingerprint = (
+            hashlib.sha256(
+                json.dumps(asdict(self.multi_agent), sort_keys=True).encode()
+            ).hexdigest()
+            if self.multi_agent.enabled
+            else ""
+        )
         self.coding_fingerprint = (
             hashlib.sha256(
                 (coding_fingerprint + json.dumps(asdict(self.sandbox), sort_keys=True)).encode()
@@ -117,6 +136,10 @@ class RunService:
             if self.sandbox.enabled
             else coding_fingerprint
         )
+        if self.multi_agent.enabled:
+            self.coding_fingerprint = hashlib.sha256(
+                (self.coding_fingerprint + self.multi_agent_fingerprint).encode()
+            ).hexdigest()
         if self.hooks is not None:
             metadata = [
                 (item.name, item.point, item.kind, item.priority) for item in self.hooks.hooks
@@ -148,11 +171,16 @@ class RunService:
                 (self.extension_fingerprint + self.skill_catalog.fingerprint()).encode()
             ).hexdigest()
         self._active_loop: AgentLoop | None = None
+        self._active_children: dict[str, AgentLoop] = {}
         self._sandbox_active_run_id: str | None = None
 
     def cancel(self, run_id: str) -> bool:
         """Signal cancellation to this service's active run."""
-        return self._active_loop.cancel(run_id) if self._active_loop is not None else False
+        cancelled = self._active_loop.cancel(run_id) if self._active_loop is not None else False
+        for child_id, loop in tuple(self._active_children.items()):
+            if cancelled or child_id == run_id:
+                cancelled = loop.cancel(child_id) or cancelled
+        return cancelled
 
     def _authorize(self, name: str, args: dict[str, Any]) -> bool:
         """Apply configured permission before any optional interactive approval."""
@@ -262,7 +290,175 @@ class RunService:
                 else ""
             ),
             sandbox=config.sandbox,
+            multi_agent=config.multi_agent,
         )
+
+    async def _delegate(
+        self, contracts: tuple[DelegationRequest, ...], parent: AgentRequest
+    ) -> str:
+        """Run a bounded child batch with independent contexts and durable lineage."""
+        model = self.model
+        if model is None or not self.multi_agent.enabled:
+            raise ValueError("multi-agent is disabled")
+        DelegationPolicy(
+            ReadOnlyAgentProfile(
+                self.multi_agent.max_depth,
+                self.multi_agent.max_children,
+                self.multi_agent.max_concurrency,
+                self.multi_agent.max_result_chars,
+            )
+        ).validate_batch(contracts, parent)
+        repo = await SQLiteSessionRepository.open(self.db_path)
+        children: list[tuple[DelegationRequest, AgentRequest, str]] = []
+        try:
+            try:
+                for contract in contracts:
+                    budget = contract.budget
+                    child = AgentRequest(
+                        session_id=parent.session_id,
+                        task_id=str(uuid4()),
+                        workspace=str(self.workspace),
+                        user_text=contract.goal,
+                        model=parent.model,
+                        max_turns=budget.max_turns,
+                        max_tool_calls=budget.max_tool_calls,
+                        deadline_seconds=min(budget.deadline_seconds, parent.deadline_seconds),
+                        max_input_tokens_total=budget.max_input_tokens_total,
+                        max_output_tokens_total=budget.max_output_tokens_total,
+                        context_window_tokens=self.context_window_tokens,
+                        provider_name=self.provider_id,
+                        policy_fingerprint=self.multi_agent_fingerprint,
+                    )
+                    child_id = await repo.create_delegation(
+                        contract,
+                        child,
+                        max_depth=self.multi_agent.max_depth,
+                        max_children=self.multi_agent.max_children,
+                        parent_deadline_seconds=parent.deadline_seconds,
+                        parent_input_cap=parent.max_input_tokens_total,
+                        parent_output_cap=parent.max_output_tokens_total,
+                    )
+                    children.append((contract, child, child_id))
+            except BaseException:
+                for contract, _child, child_id in children:
+                    if await repo.status(child_id) == RunStatus.CREATED:
+                        await repo.set_status(child_id, RunStatus.CANCELLED)
+                        await repo.finish_delegation(
+                            SubAgentResult(contract.delegation_id, child_id, "cancelled", "")
+                        )
+                raise
+            semaphore = asyncio.Semaphore(self.multi_agent.max_concurrency)
+            results: list[SubAgentResult | None] = [None] * len(children)
+
+            async def run_one(
+                index: int, item: tuple[DelegationRequest, AgentRequest, str]
+            ) -> None:
+                contract, child, child_id = item
+                try:
+                    async with semaphore:
+                        child_repo = await SQLiteSessionRepository.open(self.db_path)
+                        loop = AgentLoop(
+                            model,
+                            ReadOnlyToolDispatcher(contract.allowed_tools),
+                            repository=child_repo,
+                            context=ContextBuilder(system_instructions=HARNESS_SYSTEM_INSTRUCTIONS),
+                        )
+                        self._active_children[child_id] = loop
+                        try:
+                            result = await loop.run_created(
+                                child,
+                                child_id,
+                                ContextBuilder(
+                                    system_instructions=HARNESS_SYSTEM_INSTRUCTIONS
+                                ).initial(contract.goal),
+                            )
+                            evidence_ids = tuple(
+                                [
+                                    await child_repo.record_evidence(
+                                        child_id, "delegation_read", name, call_id
+                                    )
+                                    for call_id, name in await child_repo.completed_read_calls(
+                                        child_id
+                                    )
+                                ]
+                            )
+                            sub_result = SubAgentResult(
+                                contract.delegation_id,
+                                child_id,
+                                "completed",
+                                (result.final_text or "")[: self.multi_agent.max_result_chars],
+                                evidence_ids,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except (
+                            BudgetExceeded,
+                            ModelFailure,
+                            OSError,
+                            PolicyVeto,
+                            ProtocolError,
+                            TimeoutError,
+                            ValueError,
+                        ):
+                            sub_result = SubAgentResult(
+                                contract.delegation_id, child_id, "failed", ""
+                            )
+                        finally:
+                            self._active_children.pop(child_id, None)
+                            await child_repo.close()
+                        await repo.finish_delegation(sub_result)
+                        results[index] = sub_result
+                finally:
+                    if results[index] is None:
+                        state = await repo.status(child_id)
+                        if state == RunStatus.CREATED:
+                            await repo.set_status(child_id, RunStatus.CANCELLED)
+                            state = RunStatus.CANCELLED
+                        if state in {RunStatus.CANCELLED, RunStatus.FAILED, RunStatus.INTERRUPTED}:
+                            status: Literal["cancelled", "failed", "interrupted"] = (
+                                "cancelled"
+                                if state == RunStatus.CANCELLED
+                                else "failed"
+                                if state == RunStatus.FAILED
+                                else "interrupted"
+                            )
+                            await repo.finish_delegation(
+                                SubAgentResult(
+                                    contract.delegation_id,
+                                    child_id,
+                                    status,
+                                    "",
+                                )
+                            )
+
+            queue: asyncio.Queue[tuple[int, tuple[DelegationRequest, AgentRequest, str]]] = (
+                asyncio.Queue()
+            )
+            for index, item in enumerate(children):
+                queue.put_nowait((index, item))
+
+            async def worker() -> None:
+                while not queue.empty():
+                    index, item = queue.get_nowait()
+                    try:
+                        await run_one(index, item)
+                    finally:
+                        queue.task_done()
+
+            try:
+                async with asyncio.TaskGroup() as group:
+                    for _ in range(min(self.multi_agent.max_concurrency, len(children))):
+                        group.create_task(worker())
+            finally:
+                for contract, _child, child_id in children:
+                    if await repo.status(child_id) == RunStatus.CREATED:
+                        await repo.set_status(child_id, RunStatus.CANCELLED)
+                        await repo.finish_delegation(
+                            SubAgentResult(contract.delegation_id, child_id, "cancelled", "")
+                        )
+            return ResultReducer.reduce(tuple(result for result in results if result is not None))
+        finally:
+            await repo.close()
 
     async def _sandbox_shell(
         self,
@@ -611,6 +807,10 @@ class RunService:
         repo = await SQLiteSessionRepository.open(self.db_path)
         try:
             dispatcher, guarded = await self._compose_dispatcher(repo, execution_mode)
+            if self.multi_agent.enabled and execution_mode == ExecutionMode.BUILD:
+                dispatcher = DelegationDispatcher(
+                    dispatcher, self._delegate, self.multi_agent.max_children
+                )
             active_session = session_id or str(uuid4())
             request = AgentRequest(
                 session_id=active_session,
@@ -742,6 +942,10 @@ class RunService:
                 plan_targets=targets,
                 approved_plan_writes=True,
             )
+            if self.multi_agent.enabled:
+                dispatcher = DelegationDispatcher(
+                    dispatcher, self._delegate, self.multi_agent.max_children
+                )
             request = AgentRequest(
                 session_id=info["session_id"],
                 task_id=info["task_id"],
@@ -814,6 +1018,8 @@ class RunService:
                 reason = "run_not_interrupted"
             elif self.sandbox.enabled or await repo.has_sandbox_execution(run_id):
                 decision, reason = "manual_review", "sandbox_resume_requires_reconciliation"
+            elif await repo.has_delegations(run_id):
+                decision, reason = "manual_review", "delegation_requires_reconciliation"
             elif await repo.has_active_owner(run_id):
                 reason = "owner_may_still_be_active"
             elif unresolved:
@@ -960,4 +1166,5 @@ class RunService:
             max_output_tokens_total=self.limits.max_output_tokens_total,
             provider_name=self.provider_id or info["model_provider"],
             extension_fingerprint=self.extension_fingerprint,
+            policy_fingerprint=self.coding_fingerprint,
         )

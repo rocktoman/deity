@@ -1,0 +1,1 @@
+{"id":"M03","name":"shell-and-write-denied","pytest":"tests/unit/test_read_only_dispatcher.py::test_child_dispatcher_denies_shell_and_write"}

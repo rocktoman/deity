@@ -1,0 +1,1 @@
+{"id":"M01","name":"contract-and-idempotency","pytest":"tests/integration/test_storage_v6.py::test_delegation_is_atomic_idempotent_and_bounded"}

@@ -1,0 +1,1 @@
+{"id":"M06","name":"evidence-linkage","pytest":["tests/integration/test_delegation_run.py::test_parent_delegates_read_only_child","tests/integration/test_storage_v6.py::test_invalid_child_evidence_is_rejected"]}

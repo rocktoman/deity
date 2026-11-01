@@ -9,6 +9,7 @@ import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -17,6 +18,7 @@ import aiosqlite
 
 from deity.core.context.reliable import canonical_json, normalize_unicode
 from deity.core.contracts import AgentRequest, RunLease, RunStatus, ToolCall, ToolResult
+from deity.core.contracts.delegation import DelegationRequest, SubAgentResult
 from deity.core.contracts.execution import (
     ArtifactManifest,
     ExecutionRequest,
@@ -42,6 +44,7 @@ from deity.core.state import transition
 
 from .schema_v4 import backup_v3, migrate_v4
 from .schema_v5 import backup_v4, migrate_v5
+from .schema_v6 import backup_v5, migrate_v6
 
 SCHEMA = """
 PRAGMA foreign_keys=ON;
@@ -181,6 +184,9 @@ class SQLiteSessionRepository:
         if existing:
             backup_v4(path)
         await migrate_v5(db)
+        if existing:
+            backup_v5(path)
+        await migrate_v6(db)
         async with repo._lock:
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -259,6 +265,37 @@ class SQLiteSessionRepository:
                     if row["owner_id"] is not None:
                         await db.execute("DELETE FROM run_leases WHERE run_id=?", (row["id"],))
                     await repo._event(row["id"], "RunInterrupted", {})
+                    await db.execute(
+                        "UPDATE delegations SET status='interrupted', ended_at=datetime('now') "
+                        "WHERE child_run_id=? AND status IN ('created','running')",
+                        (row["id"],),
+                    )
+                async with db.execute(
+                    "SELECT d.id, d.parent_run_id, d.child_run_id FROM delegations d "
+                    "JOIN runs parent ON parent.id=d.parent_run_id "
+                    "JOIN runs child ON child.id=d.child_run_id "
+                    "WHERE d.status='created' AND child.status='created' "
+                    "AND parent.status NOT IN ('running','waiting_approval')"
+                ) as cursor:
+                    orphaned_children = await cursor.fetchall()
+                for orphan in orphaned_children:
+                    await db.execute(
+                        "UPDATE runs SET status='cancelled', ended_at=datetime('now') WHERE id=?",
+                        (orphan["child_run_id"],),
+                    )
+                    await db.execute(
+                        "UPDATE delegations SET status='cancelled', ended_at=datetime('now') "
+                        "WHERE id=?",
+                        (orphan["id"],),
+                    )
+                    await repo._event(
+                        orphan["child_run_id"], "RunStatusChanged", {"status": "cancelled"}
+                    )
+                    await repo._event(
+                        orphan["parent_run_id"],
+                        "DelegationFinished",
+                        {"delegation_id": orphan["id"], "status": "cancelled"},
+                    )
                 await db.commit()
             except Exception:
                 await db.rollback()
@@ -1483,6 +1520,292 @@ class SQLiteSessionRepository:
         await self._publish(run_id, "RunCreated")
         return run_id
 
+    async def create_delegation(
+        self,
+        contract: DelegationRequest,
+        child: AgentRequest,
+        *,
+        max_depth: int,
+        max_children: int,
+        parent_deadline_seconds: float,
+        parent_input_cap: int | None = None,
+        parent_output_cap: int | None = None,
+    ) -> str:
+        """Atomically reserve a bounded child Run and its parent linkage."""
+        if (
+            child.max_turns != contract.budget.max_turns
+            or child.max_tool_calls != contract.budget.max_tool_calls
+            or child.max_input_tokens_total != contract.budget.max_input_tokens_total
+            or child.max_output_tokens_total != contract.budget.max_output_tokens_total
+        ):
+            raise ValueError("child budget differs from contract")
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                async with self.db.execute(
+                    "SELECT child_run_id, contract_hash FROM delegations WHERE id=?",
+                    (contract.delegation_id,),
+                ) as cursor:
+                    duplicate = await cursor.fetchone()
+                if duplicate is not None:
+                    if duplicate["contract_hash"] != contract.digest():
+                        raise ValueError("delegation ID conflicts with existing contract")
+                    await self.db.commit()
+                    return str(duplicate["child_run_id"])
+                async with self.db.execute(
+                    "SELECT runs.status, runs.max_turns, runs.max_tool_calls, "
+                    "runs.started_at, tasks.session_id, sessions.workspace_root "
+                    "FROM runs JOIN tasks ON tasks.id=runs.task_id "
+                    "JOIN sessions ON sessions.id=tasks.session_id WHERE runs.id=?",
+                    (contract.parent_run_id,),
+                ) as cursor:
+                    parent = await cursor.fetchone()
+                if parent is None or parent["status"] != "running":
+                    raise ValueError("parent Run is not running")
+                started_at = datetime.fromisoformat(parent["started_at"]).replace(tzinfo=UTC)
+                elapsed = (datetime.now(UTC) - started_at).total_seconds()
+                if child.deadline_seconds > parent_deadline_seconds - elapsed:
+                    raise ValueError("delegation deadline exceeds parent")
+                if (
+                    child.session_id != parent["session_id"]
+                    or child.workspace != parent["workspace_root"]
+                ):
+                    raise ValueError("child workspace or session differs from parent")
+                async with self.db.execute(
+                    "SELECT root_run_id, depth FROM delegations WHERE child_run_id=?",
+                    (contract.parent_run_id,),
+                ) as cursor:
+                    ancestor = await cursor.fetchone()
+                depth = int(ancestor["depth"]) + 1 if ancestor is not None else 1
+                if depth > max_depth:
+                    raise ValueError("delegation depth exceeded")
+                root = (
+                    str(ancestor["root_run_id"]) if ancestor is not None else contract.parent_run_id
+                )
+                async with self.db.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(COALESCE(json_extract(result_json, '$.spent_turns'), "
+                    "json_extract(contract_json, '$.budget.max_turns'))),0), "
+                    "COALESCE(SUM(COALESCE(json_extract(result_json, '$.spent_tool_calls'), "
+                    "json_extract(contract_json, '$.budget.max_tool_calls'))),0) "
+                    "FROM delegations WHERE parent_run_id=?",
+                    (contract.parent_run_id,),
+                ) as cursor:
+                    reserved = await cursor.fetchone()
+                assert reserved is not None
+                if int(reserved[0]) >= max_children:
+                    raise ValueError("delegation child limit exceeded")
+                async with self.db.execute(
+                    "SELECT COUNT(*) FROM steps WHERE run_id=? AND kind='model'",
+                    (contract.parent_run_id,),
+                ) as cursor:
+                    model_row = await cursor.fetchone()
+                    assert model_row is not None
+                    model_steps = int(model_row[0])
+                async with self.db.execute(
+                    "SELECT COUNT(*) FROM tool_executions WHERE run_id=?",
+                    (contract.parent_run_id,),
+                ) as cursor:
+                    tool_row = await cursor.fetchone()
+                    assert tool_row is not None
+                    tool_calls = int(tool_row[0])
+                if (
+                    model_steps + int(reserved[1]) + contract.budget.max_turns > parent["max_turns"]
+                    or tool_calls + int(reserved[2]) + contract.budget.max_tool_calls
+                    > parent["max_tool_calls"]
+                ):
+                    raise ValueError("delegation budget exceeded")
+                for cap, field, reserved_field in (
+                    (parent_input_cap, "input_tokens", "max_input_tokens_total"),
+                    (parent_output_cap, "output_tokens", "max_output_tokens_total"),
+                ):
+                    if cap is None:
+                        continue
+                    child_cap = getattr(contract.budget, reserved_field)
+                    if child_cap is None:
+                        raise ValueError("child token budget required")
+                    async with self.db.execute(
+                        "SELECT COUNT(*), COALESCE(SUM(json_extract(payload_json, ?)),0), "
+                        "COUNT(json_extract(payload_json, ?)) FROM events "
+                        "WHERE run_id=? AND type='ModelUsage'",
+                        (f"$.{field}", f"$.{field}", contract.parent_run_id),
+                    ) as cursor:
+                        usage = await cursor.fetchone()
+                    assert usage is not None
+                    if int(usage[0]) != model_steps or int(usage[2]) != model_steps:
+                        raise ValueError("parent token usage unknown")
+                    async with self.db.execute(
+                        "SELECT COALESCE(SUM(COALESCE(json_extract(result_json, ?), "
+                        "json_extract(contract_json, ?))),0) "
+                        "FROM delegations WHERE parent_run_id=?",
+                        (
+                            f"$.spent_{field}",
+                            f"$.budget.{reserved_field}",
+                            contract.parent_run_id,
+                        ),
+                    ) as cursor:
+                        token_row = await cursor.fetchone()
+                    assert token_row is not None
+                    if int(usage[1]) + int(token_row[0]) + child_cap > cap:
+                        raise ValueError("delegation token budget exceeded")
+                new_run_id = str(uuid4())
+                await self.db.execute(
+                    "INSERT INTO tasks VALUES (?, ?, ?, datetime('now'))",
+                    (child.task_id, child.session_id, _redact(child.user_text)),
+                )
+                await self.db.execute(
+                    "INSERT INTO runs VALUES (?, ?, 'created', ?, ?, NULL, NULL, NULL, ?, ?)",
+                    (
+                        new_run_id,
+                        child.task_id,
+                        child.provider_name,
+                        child.model,
+                        child.max_turns,
+                        child.max_tool_calls,
+                    ),
+                )
+                await self.db.execute(
+                    "INSERT INTO delegations VALUES (?, ?, ?, ?, ?, ?, ?, 'created', NULL, "
+                    "datetime('now'), NULL)",
+                    (
+                        contract.delegation_id,
+                        contract.parent_run_id,
+                        new_run_id,
+                        root,
+                        depth,
+                        contract.digest(),
+                        json.dumps(asdict(contract), ensure_ascii=False, sort_keys=True),
+                    ),
+                )
+                await self._event(new_run_id, "RunCreated", {})
+                await self._event(
+                    contract.parent_run_id,
+                    "DelegationCreated",
+                    {"delegation_id": contract.delegation_id, "child_run_id": new_run_id},
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(contract.parent_run_id, "DelegationCreated")
+        return new_run_id
+
+    async def finish_delegation(self, result: SubAgentResult) -> None:
+        """Commit a bounded child result and parent-visible audit event."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                async with self.db.execute(
+                    "SELECT parent_run_id, child_run_id, status FROM delegations WHERE id=?",
+                    (result.delegation_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None or row["child_run_id"] != result.child_run_id:
+                    raise ValueError("unknown delegation result")
+                if row["status"] not in {"created", "running"}:
+                    raise ValueError("delegation already finalized")
+                actual_status = await self.status(result.child_run_id)
+                if actual_status.value != result.status:
+                    raise ValueError("child Run status differs from delegation result")
+                for evidence_id in result.evidence_ids:
+                    async with self.db.execute(
+                        "SELECT 1 FROM evidence WHERE id=? AND run_id=?",
+                        (evidence_id, result.child_run_id),
+                    ) as cursor:
+                        if await cursor.fetchone() is None:
+                            raise ValueError("invalid child evidence reference")
+                async with self.db.execute(
+                    "SELECT COUNT(*) FROM steps WHERE run_id=? AND kind='model'",
+                    (result.child_run_id,),
+                ) as cursor:
+                    spent_turns_row = await cursor.fetchone()
+                async with self.db.execute(
+                    "SELECT COUNT(*) FROM tool_executions WHERE run_id=?",
+                    (result.child_run_id,),
+                ) as cursor:
+                    spent_tools_row = await cursor.fetchone()
+                assert spent_turns_row is not None and spent_tools_row is not None
+                settlement: dict[str, Any] = {
+                    **asdict(result),
+                    "spent_turns": int(spent_turns_row[0]),
+                    "spent_tool_calls": int(spent_tools_row[0]),
+                }
+                for field in ("input_tokens", "output_tokens"):
+                    async with self.db.execute(
+                        "SELECT COUNT(*), COUNT(json_extract(payload_json, ?)), "
+                        "COALESCE(SUM(json_extract(payload_json, ?)),0) FROM events "
+                        "WHERE run_id=? AND type='ModelUsage'",
+                        (f"$.{field}", f"$.{field}", result.child_run_id),
+                    ) as cursor:
+                        usage = await cursor.fetchone()
+                    assert usage is not None
+                    if int(usage[0]) == settlement["spent_turns"] == int(usage[1]):
+                        settlement[f"spent_{field}"] = int(usage[2])
+                await self.db.execute(
+                    "UPDATE delegations SET status=?, result_json=?, ended_at=datetime('now') "
+                    "WHERE id=?",
+                    (
+                        result.status,
+                        json.dumps(settlement, ensure_ascii=False),
+                        result.delegation_id,
+                    ),
+                )
+                await self._event(
+                    row["parent_run_id"],
+                    "DelegationFinished",
+                    {"delegation_id": result.delegation_id, "status": result.status},
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(row["parent_run_id"], "DelegationFinished")
+
+    async def delegation_tree(self, root_run_id: str) -> list[dict[str, Any]]:
+        """Read durable child state without loading private child messages."""
+        async with self.db.execute(
+            "SELECT id, parent_run_id, child_run_id, depth, status, result_json "
+            "FROM delegations WHERE root_run_id=? ORDER BY created_at, id",
+            (root_run_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def has_delegations(self, parent_run_id: str) -> bool:
+        """Conservatively block automatic recovery of a delegated parent."""
+        async with self.db.execute(
+            "SELECT 1 FROM delegations WHERE parent_run_id=? LIMIT 1", (parent_run_id,)
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+    async def delegated_budget(self, run_id: str) -> tuple[int, int, int, int]:
+        """Return conservative child reservations for runtime family limits."""
+        async with self.db.execute(
+            "SELECT COALESCE(SUM(COALESCE(json_extract(result_json, '$.spent_turns'), "
+            "json_extract(contract_json, '$.budget.max_turns'))),0), "
+            "COALESCE(SUM(COALESCE(json_extract(result_json, '$.spent_tool_calls'), "
+            "json_extract(contract_json, '$.budget.max_tool_calls'))),0), "
+            "COALESCE(SUM(COALESCE(json_extract(result_json, '$.spent_input_tokens'), "
+            "json_extract(contract_json, '$.budget.max_input_tokens_total'))),0), "
+            "COALESCE(SUM(COALESCE(json_extract(result_json, '$.spent_output_tokens'), "
+            "json_extract(contract_json, '$.budget.max_output_tokens_total'))),0) "
+            "FROM delegations WHERE parent_run_id=?",
+            (run_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        return int(row[0]), int(row[1]), int(row[2]), int(row[3])
+
+    async def completed_read_calls(self, run_id: str) -> tuple[tuple[str, str], ...]:
+        """Return persisted successful read call IDs for evidence linkage."""
+        async with self.db.execute(
+            "SELECT call_id, tool_name FROM tool_executions WHERE run_id=? AND status='ok' "
+            "AND tool_name IN ('read_file','list_files','glob','grep') "
+            "ORDER BY intent_at, call_id",
+            (run_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple((str(row[0]), str(row[1])) for row in rows)
+
     async def status(self, run_id: str) -> RunStatus:
         """Read current persisted run status."""
         async with self.db.execute("SELECT status FROM runs WHERE id=?", (run_id,)) as cursor:
@@ -1513,8 +1836,12 @@ class SQLiteSessionRepository:
                     for row in unknown:
                         await self._event(run_id, "ToolOutcomeUnknown", {"call_id": row[0]})
                 await self.db.execute(
-                    "UPDATE runs SET status=?, ended_at=CASE WHEN ? IN ('completed','failed','cancelled','interrupted') THEN datetime('now') ELSE ended_at END WHERE id=?",
-                    (status.value, status.value, run_id),
+                    "UPDATE runs SET status=?, "
+                    "started_at=CASE WHEN ?='running' AND started_at IS NULL "
+                    "THEN datetime('now') ELSE started_at END, "
+                    "ended_at=CASE WHEN ? IN ('completed','failed','cancelled','interrupted') "
+                    "THEN datetime('now') ELSE ended_at END WHERE id=?",
+                    (status.value, status.value, status.value, run_id),
                 )
                 await self._event(run_id, "RunStatusChanged", {"status": status.value})
                 await self.db.commit()

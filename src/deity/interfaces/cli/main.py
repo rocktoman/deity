@@ -1,6 +1,7 @@
 """Deity CLI entry point."""
 
 import asyncio
+import json
 import shlex
 from pathlib import Path
 from typing import Annotated
@@ -411,6 +412,36 @@ def inspect_run(
         for item in report["unresolved_tools"]:
             console.print(f"{item['call_id']} {item['tool_name']} {item['status']}")
     except (ValueError, OSError, KeyError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+
+
+@runs_app.command("tree")
+def delegation_tree(
+    run_id: str,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Show persisted child Run status and bounded summaries for one root Run."""
+
+    async def read_tree() -> list[dict[str, object]]:
+        repo = await SQLiteSessionRepository.open(db or Path.home() / ".local/share/deity/deity.db")
+        try:
+            return await repo.delegation_tree(run_id)
+        finally:
+            await repo.close()
+
+    try:
+        for item in asyncio.run(read_tree()):
+            console.print(
+                f"{item['id']}  parent={item['parent_run_id']}  "
+                f"child={item['child_run_id']}  {item['status']}"
+            )
+            if isinstance(item["result_json"], str):
+                result = json.loads(item["result_json"])
+                console.print(f"  {result['summary']}")
+                for evidence_id in result["evidence_ids"]:
+                    console.print(f"  evidence: {evidence_id}")
+    except (ValueError, OSError) as exc:
         console.print(str(exc), style="red")
         raise typer.Exit(code=2) from None
 

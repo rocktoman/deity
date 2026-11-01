@@ -96,6 +96,8 @@ uv run --locked python -m evals.runners.extensions
 uv run --locked python -m evals.runners.advanced
 ```
 
+V0.7 只读委派还须运行 `uv run --locked python -m evals.runners.multi_agent`，并重跑既有 E/R/X/A/S 门禁。配置、审计查看与回退见 [V0.7 使用说明](v0.7-usage.md)。
+
 ## 6. 配置与密钥
 
 建议 `~/.config/deity/config.toml`（用户配置）和可选 `.deity/config.toml`（项目配置，不能覆盖安全策略）。密钥从环境变量或 OS keychain 读取，不写入仓库或事件日志。

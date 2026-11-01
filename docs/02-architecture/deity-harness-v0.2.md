@@ -435,3 +435,7 @@ Python 3.12+、`uv`、Typer/Rich、Pydantic、官方模型 SDK、`aiosqlite` 或
 ## 14. V0.6 执行后端扩展
 
 V0.2 的端口方向保持不变。Core 的 `ExecutionBackend` 仅定义能力、预检和 `prepare → execute → collect → cleanup` 契约；Application 负责权限、持久化顺序与失败协调；Local/Fake/Docker adapter 实现外部 I/O。Docker 运行只接收复制的 staging 工作区，Verification 丢弃其变更；Agent Shell 的文本回传需通过权限、Git Guard、preimage 与 ChangeSet。SQLite v5 将 intent、结果、工件与清理分开记录，未知副作用不自动续跑。安全边界、迁移和回退依据 [ADR-012](adr-012-v0.6-execution-sandbox.md)。本节不改变 V0.1 的版本范围。
+
+## 15. V0.7 只读委派扩展
+
+V0.2 的单 Run `AgentLoop`、工具权限链和租约语义保持不变。Application 层协调子 Run、并发上限与取消；子 Run 使用独立上下文和受限工具分发器。SQLite v6 将委派树与 checkpoint 续跑谱系分开，原子保存预算预留和子 Run 创建；模型生成的摘要必须关联实际子 Run 的证据。多 Agent 默认关闭，包含委派的父 Run 只允许人工协调后恢复。安全和兼容决策见 [ADR-013](adr-013-v0.7-readonly-delegation.md)。

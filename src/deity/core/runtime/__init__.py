@@ -250,6 +250,12 @@ class AgentLoop:
         output_total = int((initial_budget or {}).get("output_tokens", 0))
         for turn_index in range(int((initial_budget or {}).get("turns", 0)), limits.max_turns):
             self._cancellation.raise_if_cancelled()
+            reservations = getattr(self._repository, "delegated_budget", None)
+            reserved_turns, reserved_tools, reserved_input, reserved_output = (
+                await reservations(run_id) if callable(reservations) else (0, 0, 0, 0)
+            )
+            if turn_index + reserved_turns >= limits.max_turns:
+                raise BudgetExceeded("delegated_max_turns")
             if time.monotonic() >= deadline:
                 raise BudgetExceeded("deadline_seconds")
             final_turn = turn_index == limits.max_turns - 1
@@ -357,16 +363,16 @@ class AgentLoop:
             output_total += usage[1] or 0
             if (
                 limits.max_input_tokens_total is not None
-                and input_total > limits.max_input_tokens_total
+                and input_total + reserved_input > limits.max_input_tokens_total
             ):
                 raise BudgetExceeded("max_input_tokens_total")
             if (
                 limits.max_output_tokens_total is not None
-                and output_total > limits.max_output_tokens_total
+                and output_total + reserved_output > limits.max_output_tokens_total
             ):
                 raise BudgetExceeded("max_output_tokens_total")
             if calls:
-                if tool_count + len(calls) > limits.max_tool_calls:
+                if tool_count + len(calls) + reserved_tools > limits.max_tool_calls:
                     raise BudgetExceeded("max_tool_calls")
                 for call in calls:
                     if call.call_id in seen:
@@ -375,6 +381,10 @@ class AgentLoop:
                 messages.append(self._context.assistant_calls(text, calls))
                 for call in calls:
                     self._cancellation.raise_if_cancelled()
+                    if callable(reservations):
+                        _, current_reserved_tools, _, _ = await reservations(run_id)
+                        if tool_count + current_reserved_tools + 1 > limits.max_tool_calls:
+                            raise BudgetExceeded("delegated_max_tool_calls")
                     veto = await self._run_hook(
                         run_id,
                         epoch,

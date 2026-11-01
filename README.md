@@ -16,6 +16,8 @@ Deity 是计划以 Python 3.12+ 构建的开源 AI Coding Agent 运行系统。�
 
 **V0.6 执行沙箱已形成本地候选实现。** Docker 后端默认关闭，采用 staging 复制、禁网与资源限制，并按现有权限、Git Guard 和 ChangeSet 审核文本工件回传。本地结果与未运行项见 [V0.6 候选验收记录](docs/04-evaluation/v0.6-candidate-2026-11-01.md)。
 
+**V0.7 只读委派已形成本地候选实现。** 子 Agent 使用独立 Run、上下文、预算和只读工具权限；SQLite v6 记录委派树，父取消级联子任务。功能默认关闭。本地门禁和未运行项见 [V0.7 候选验收记录](docs/04-evaluation/v0.7-candidate-2026-11-01.md)。
+
 ## 核心选择
 
 - Python 3.12+；本地 CLI 优先，未来可扩展 TUI、FastAPI、IDE。
@@ -50,11 +52,15 @@ CLI → Application → Agent Runtime
 | [V0.4 使用说明](docs/03-development/v0.4-usage.md) | 扩展配置、CLI、授权和回退 |
 | [V0.5 实施计划](docs/03-development/v0.5-implementation-plan.md) | Plan/Build、Code Intelligence、Git 保护与 Verification Engine |
 | [V0.6 实施计划](docs/03-development/v0.6-implementation-plan.md) | Execution Backend、Docker 隔离、staging 工件回传与沙箱门禁 |
+| [V0.7 实施计划](docs/03-development/v0.7-implementation-plan.md) | 只读委派、预算、SQLite v6、并发与评估 |
+| [ADR-013](docs/02-architecture/adr-013-v0.7-readonly-delegation.md) | 只读子 Agent 与父子 Run 安全边界 |
+| [V0.7 使用说明](docs/03-development/v0.7-usage.md) | 委派配置、运行树、取消与回退 |
 | [ADR-012](docs/02-architecture/adr-012-v0.6-execution-sandbox.md) | 沙箱威胁模型、隔离边界与恢复决策 |
 | [V0.6 使用说明](docs/03-development/v0.6-usage.md) | Docker 配置、CLI、工件回传与回退 |
 | [V0.5 使用说明](docs/03-development/v0.5-usage.md) | 配置、CLI、安全语义、迁移和回退 |
 | [V0.5 候选验收记录](docs/04-evaluation/v0.5-candidate-2026-11-01.md) | 本地测试、A01–A12 与未运行项 |
 | [V0.6 候选验收记录](docs/04-evaluation/v0.6-candidate-2026-11-01.md) | 本地 Docker、S01–S12 与未运行项 |
+| [V0.7 候选验收记录](docs/04-evaluation/v0.7-candidate-2026-11-01.md) | 本地 M01–M12、回归与未运行项 |
 | [评估计划](docs/04-evaluation/evaluation-plan.md) | 固定测试任务、指标、门禁 |
 | [DeepSeek L3 基线](docs/04-evaluation/l3-deepseek-v4-flash-2026-10-31.md) | 真实模型 E01–E03 验收结果与限制 |
 | [AGENTS.md](AGENTS.md) | 仓库工程架构和 AI 协作规则 |
@@ -68,6 +74,7 @@ deity run                         # 同样可进入交互模式，兼容旧用�
 deity run 分析这个 Python 项目的架构    # 单次任务；可不加引号
 deity sessions
 deity runs inspect <run-id> --workspace /path/to/repo
+deity runs tree <root-run-id> --db /path/to/deity.db
 deity resume <run-id> --workspace /path/to/repo --config ~/.config/deity/config.toml
 deity mcp list --config ~/.config/deity/config.toml
 deity mcp test --config ~/.config/deity/config.toml
@@ -102,6 +109,8 @@ V0.4 扩展评估命令：`uv run --locked python -m evals.runners.extensions`�
 V0.5 高级编码评估命令：`uv run --locked python -m evals.runners.advanced`。A01–A12 覆盖只读 Plan、Plan→Build、漂移、三语言定位、dirty 文件保护、安全补丁、非 Git、验证状态与兼容性。
 
 V0.6 沙箱评估命令：`uv run --locked python -m evals.runners.sandbox --require-docker`。S01–S12 覆盖后端契约、Docker 隔离、staging、工件与恢复；Docker 缺失记为 `NOT_RUN`，专用门禁将其视为失败。
+
+V0.7 只读委派评估命令：`uv run --locked python -m evals.runners.multi_agent`。M01–M12 覆盖合同、权限、预算、并发、取消和恢复，逐例报告写入 `evals/reports/`。
 
 ## 参考与原创边界
 

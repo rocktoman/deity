@@ -89,6 +89,16 @@ class SandboxConfig:
 
 
 @dataclass(frozen=True)
+class MultiAgentConfig:
+    version: int = 1
+    enabled: bool = False
+    max_depth: int = 1
+    max_children: int = 4
+    max_concurrency: int = 2
+    max_result_chars: int = 4000
+
+
+@dataclass(frozen=True)
 class Config:
     run: RunConfig = field(default_factory=RunConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
@@ -101,6 +111,15 @@ class Config:
     git_guard: GitGuardConfig = field(default_factory=GitGuardConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    multi_agent: MultiAgentConfig = field(default_factory=MultiAgentConfig)
+
+    def multi_agent_fingerprint(self) -> str:
+        """Hash delegation settings only when the feature is enabled."""
+        if not self.multi_agent.enabled:
+            return ""
+        return hashlib.sha256(
+            json.dumps(self.multi_agent.__dict__, sort_keys=True).encode()
+        ).hexdigest()
 
     def sandbox_fingerprint(self) -> str:
         """Hash enabled sandbox policy without environment values."""
@@ -185,6 +204,7 @@ def load_config(path: Path) -> Config:
             "git_guard",
             "verification",
             "sandbox",
+            "multi_agent",
         }:
             raise ValueError
         run = data.get("run", {})
@@ -198,6 +218,7 @@ def load_config(path: Path) -> Config:
         git_guard = data.get("git_guard", {})
         verification = data.get("verification", {})
         sandbox = data.get("sandbox", {})
+        multi_agent = data.get("multi_agent", {})
         if not all(
             isinstance(item, dict)
             for item in (
@@ -212,6 +233,7 @@ def load_config(path: Path) -> Config:
                 git_guard,
                 verification,
                 sandbox,
+                multi_agent,
             )
         ):
             raise ValueError
@@ -381,6 +403,28 @@ def load_config(path: Path) -> Config:
                 "exclude": tuple(sandbox_config.exclude),
             }
         )
+        if set(multi_agent) - set(MultiAgentConfig.__dataclass_fields__):
+            raise ValueError
+        multi_agent_config = MultiAgentConfig(**multi_agent)
+        if (
+            type(multi_agent_config.version) is not int
+            or multi_agent_config.version != 1
+            or type(multi_agent_config.enabled) is not bool
+            or any(
+                type(value) is not int or value <= 0
+                for value in (
+                    multi_agent_config.max_depth,
+                    multi_agent_config.max_children,
+                    multi_agent_config.max_concurrency,
+                    multi_agent_config.max_result_chars,
+                )
+            )
+            or multi_agent_config.max_depth > 4
+            or multi_agent_config.max_children > 32
+            or multi_agent_config.max_concurrency > multi_agent_config.max_children
+            or multi_agent_config.max_result_chars > 16000
+        ):
+            raise ValueError
         if set(hooks) - {"registered"} or not isinstance(hooks.get("registered", []), list):
             raise ValueError
         hook_specs: list[HookSpec] = []
@@ -547,6 +591,7 @@ def load_config(path: Path) -> Config:
             git_guard=git_config,
             verification=verification_config,
             sandbox=sandbox_config,
+            multi_agent=multi_agent_config,
         )
     except (OSError, UnicodeError, tomllib.TOMLDecodeError, TypeError, ValueError):
         raise ValueError("配置无效：请检查 TOML 字段和权限设置") from None

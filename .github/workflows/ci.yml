@@ -35,6 +35,7 @@ jobs:
       - run: uv run --locked python -m evals.runners.extensions
       - run: uv run --locked python -m evals.runners.advanced
       - run: uv run --locked python -m evals.runners.sandbox --backend fake
+      - run: uv run --locked python -m evals.runners.multi_agent
 
   sandbox-docker:
     runs-on: ubuntu-latest

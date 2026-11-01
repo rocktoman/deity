@@ -1,0 +1,1 @@
+{"id":"M04","name":"workspace-boundary","pytest":"tests/unit/test_read_only_dispatcher.py::test_child_dispatcher_keeps_workspace_boundary"}

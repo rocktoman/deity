@@ -1,0 +1,1 @@
+{"id":"M08","name":"budget-reservation","pytest":["tests/integration/test_storage_v6.py::test_delegation_is_atomic_idempotent_and_bounded","tests/integration/test_storage_v6.py::test_concurrent_budget_reservations_allow_only_one_child"]}
