@@ -17,6 +17,12 @@ import aiosqlite
 
 from deity.core.context.reliable import canonical_json, normalize_unicode
 from deity.core.contracts import AgentRequest, RunLease, RunStatus, ToolCall, ToolResult
+from deity.core.contracts.execution import (
+    ArtifactManifest,
+    ExecutionRequest,
+    ExecutionResult,
+    SandboxCleanupReport,
+)
 from deity.core.contracts.planning import PlanArtifact
 from deity.core.contracts.verification import (
     FinalReport,
@@ -35,6 +41,7 @@ from deity.core.planning import parse_plan_draft, plan_sha256, requirements_sha2
 from deity.core.state import transition
 
 from .schema_v4 import backup_v3, migrate_v4
+from .schema_v5 import backup_v4, migrate_v5
 
 SCHEMA = """
 PRAGMA foreign_keys=ON;
@@ -171,6 +178,9 @@ class SQLiteSessionRepository:
         if existing:
             backup_v3(path)
         await migrate_v4(db)
+        if existing:
+            backup_v4(path)
+        await migrate_v5(db)
         async with repo._lock:
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -192,6 +202,60 @@ class SQLiteSessionRepository:
                         "WHERE run_id=? AND status='pending'",
                         (row["id"],),
                     )
+                    async with db.execute(
+                        "SELECT id FROM sandbox_executions WHERE run_id=? "
+                        "AND status IN ('prepared','created')",
+                        (row["id"],),
+                    ) as sandbox_cursor:
+                        unknown_executions = await sandbox_cursor.fetchall()
+                    await db.execute(
+                        "UPDATE sandbox_executions SET status='unknown', "
+                        "error_code='process_interrupted', ended_at=datetime('now') "
+                        "WHERE run_id=? AND status IN ('prepared','created')",
+                        (row["id"],),
+                    )
+                    await db.execute(
+                        "UPDATE sandbox_artifacts SET status='unknown' "
+                        "WHERE status IN ('pending','collected') "
+                        "AND manifest_id IN (SELECT m.id FROM artifact_manifests m "
+                        "JOIN sandbox_executions e ON e.id=m.execution_id WHERE e.run_id=?)",
+                        (row["id"],),
+                    )
+                    await db.execute(
+                        "UPDATE artifact_manifests SET status='unknown' WHERE status='collected' "
+                        "AND execution_id IN (SELECT id FROM sandbox_executions WHERE run_id=?)",
+                        (row["id"],),
+                    )
+                    async with db.execute(
+                        "SELECT e.id FROM sandbox_executions e LEFT JOIN sandbox_cleanups c "
+                        "ON c.execution_id=e.id WHERE e.run_id=? AND c.id IS NULL",
+                        (row["id"],),
+                    ) as cleanup_cursor:
+                        missing_cleanups = await cleanup_cursor.fetchall()
+                    for execution in missing_cleanups:
+                        await db.execute(
+                            "INSERT INTO sandbox_cleanups VALUES (?, ?, 'unknown', 0, 0, '[]', datetime('now'))",
+                            (str(uuid4()), execution[0]),
+                        )
+                        await repo._event(
+                            row["id"],
+                            "SandboxCleanupFailed",
+                            {
+                                "schema_version": 1,
+                                "execution_id": execution[0],
+                                "status": "unknown",
+                            },
+                        )
+                    for execution in unknown_executions:
+                        await repo._event(
+                            row["id"],
+                            "SandboxOutcomeUnknown",
+                            {
+                                "schema_version": 1,
+                                "execution_id": execution[0],
+                                "reason": "process_interrupted",
+                            },
+                        )
                     if row["owner_id"] is not None:
                         await db.execute("DELETE FROM run_leases WHERE run_id=?", (row["id"],))
                     await repo._event(row["id"], "RunInterrupted", {})
@@ -988,6 +1052,10 @@ class SQLiteSessionRepository:
                     "output": evidence.output,
                     "truncated": evidence.truncated,
                     "reason": evidence.reason,
+                    "execution_id": evidence.execution_id,
+                    "backend": evidence.backend,
+                    "image_digest": evidence.image_digest,
+                    "cleanup_status": evidence.cleanup_status,
                 }
             )
         )
@@ -1166,6 +1234,10 @@ class SQLiteSessionRepository:
                     payload["output"],
                     payload["truncated"],
                     payload["reason"],
+                    payload.get("execution_id"),
+                    payload.get("backend"),
+                    payload.get("image_digest"),
+                    payload.get("cleanup_status"),
                 )
             )
         async with self.db.execute(
@@ -1774,6 +1846,365 @@ class SQLiteSessionRepository:
             except Exception:
                 await self.db.rollback()
                 raise
+
+    async def prepare_sandbox_execution(self, request: ExecutionRequest) -> None:
+        """Commit one sandbox intent before staging or container creation."""
+        safe_spec = _redact(asdict(request.spec))
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self.db.execute(
+                    "INSERT INTO sandbox_executions "
+                    "(id, run_id, call_id, backend, status, spec_json, capabilities_json, "
+                    "started_at) VALUES (?, ?, ?, ?, 'prepared', ?, '{}', datetime('now'))",
+                    (
+                        request.execution_id,
+                        request.run_id,
+                        request.call_id,
+                        request.spec.backend.value,
+                        canonical_json(safe_spec),
+                    ),
+                )
+                await self._event(
+                    request.run_id,
+                    "SandboxExecutionPrepared",
+                    {
+                        "schema_version": 1,
+                        "execution_id": request.execution_id,
+                        "backend": request.spec.backend.value,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(request.run_id, "SandboxExecutionPrepared")
+
+    async def has_sandbox_execution(self, run_id: str) -> bool:
+        """Keep an interrupted sandbox run in manual review even if the switch is later disabled."""
+        async with self.db.execute(
+            "SELECT 1 FROM sandbox_executions WHERE run_id=? LIMIT 1", (run_id,)
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+    async def record_sandbox_container(
+        self, run_id: str, execution_id: str, container_id: str
+    ) -> None:
+        """Persist the exact container identity before starting it."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await self.db.execute(
+                    "UPDATE sandbox_executions SET container_id=?, status='created' "
+                    "WHERE id=? AND run_id=? AND status='prepared'",
+                    (container_id, execution_id, run_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("sandbox execution not prepared")
+                await self._event(
+                    run_id,
+                    "SandboxStarted",
+                    {
+                        "schema_version": 1,
+                        "execution_id": execution_id,
+                        "container_id": container_id,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "SandboxStarted")
+
+    async def record_sandbox_result(self, run_id: str, result: ExecutionResult) -> None:
+        """Persist a typed outcome without assuming cleanup succeeded."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await self.db.execute(
+                    "UPDATE sandbox_executions SET status=?, ended_at=datetime('now'), "
+                    "exit_code=?, error_code=?, image_digest=?, result_json=? "
+                    "WHERE id=? AND run_id=? AND status IN ('prepared','created')",
+                    (
+                        result.status.value,
+                        result.exit_code,
+                        result.error_code,
+                        result.image_digest,
+                        canonical_json(
+                            _redact(
+                                {
+                                    "status": result.status.value,
+                                    "exit_code": result.exit_code,
+                                    "duration_ms": result.duration_ms,
+                                    "truncated": result.truncated,
+                                    "error_code": result.error_code,
+                                }
+                            )
+                        ),
+                        result.execution_id,
+                        run_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("sandbox execution has outcome")
+                kind = (
+                    "SandboxOutcomeUnknown"
+                    if result.status.value == "unknown"
+                    else "SandboxCompleted"
+                )
+                await self._event(
+                    run_id,
+                    kind,
+                    {
+                        "schema_version": 1,
+                        "execution_id": result.execution_id,
+                        "status": result.status.value,
+                        "exit_code": result.exit_code,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, kind)
+
+    async def record_sandbox_manifest(self, run_id: str, manifest: ArtifactManifest) -> None:
+        """Commit the host-generated artifact manifest and entries together."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                manifest_id = str(uuid4())
+                await self.db.execute(
+                    "INSERT INTO artifact_manifests VALUES (?, ?, ?, ?, datetime('now'))",
+                    (
+                        manifest_id,
+                        manifest.execution_id,
+                        manifest.status,
+                        canonical_json(_redact({"diagnostics": manifest.diagnostics})),
+                    ),
+                )
+                for ordinal, entry in enumerate(manifest.entries, 1):
+                    await self.db.execute(
+                        "INSERT INTO sandbox_artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            str(uuid4()),
+                            manifest_id,
+                            ordinal,
+                            entry.path,
+                            entry.operation,
+                            entry.before_sha256,
+                            entry.after_sha256,
+                            entry.size,
+                            "collected",
+                        ),
+                    )
+                await self._event(
+                    run_id,
+                    "ArtifactManifestCollected",
+                    {
+                        "schema_version": 1,
+                        "execution_id": manifest.execution_id,
+                        "count": len(manifest.entries),
+                        "status": manifest.status,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "ArtifactManifestCollected")
+
+    async def record_sandbox_cleanup(self, run_id: str, report: SandboxCleanupReport) -> None:
+        """Commit cleanup separately from the execution result."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self.db.execute(
+                    "INSERT INTO sandbox_cleanups VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+                    (
+                        str(uuid4()),
+                        report.execution_id,
+                        report.status,
+                        int(report.container_removed),
+                        int(report.staging_removed),
+                        canonical_json(_redact(list(report.diagnostics))),
+                    ),
+                )
+                kind = (
+                    "SandboxCleanupCompleted"
+                    if report.status == "cleaned"
+                    else "SandboxCleanupFailed"
+                )
+                await self._event(
+                    run_id,
+                    kind,
+                    {
+                        "schema_version": 1,
+                        "execution_id": report.execution_id,
+                        "status": report.status,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, kind)
+
+    async def prepare_artifact_apply(self, run_id: str, execution_id: str, ordinal: int) -> None:
+        """Commit one file application intent before touching the host workspace."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await self.db.execute(
+                    "UPDATE sandbox_artifacts SET status='pending' WHERE ordinal=? "
+                    "AND status='collected' AND manifest_id IN "
+                    "(SELECT id FROM artifact_manifests WHERE execution_id=?)",
+                    (ordinal, execution_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("artifact is not collectable")
+                await self._event(
+                    run_id,
+                    "ArtifactApplyPrepared",
+                    {
+                        "schema_version": 1,
+                        "execution_id": execution_id,
+                        "ordinal": ordinal,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "ArtifactApplyPrepared")
+
+    async def complete_artifact_apply(
+        self,
+        run_id: str,
+        execution_id: str,
+        ordinal: int,
+        status: str,
+        change_set_id: str | None = None,
+        change: FileChange | None = None,
+    ) -> None:
+        """Commit the file outcome and ChangeSet fact atomically."""
+        if status not in {"applied", "denied", "unknown"}:
+            raise ValueError("invalid artifact status")
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await self.db.execute(
+                    "UPDATE sandbox_artifacts SET status=? WHERE ordinal=? AND status='pending' "
+                    "AND manifest_id IN (SELECT id FROM artifact_manifests WHERE execution_id=?)",
+                    (status, ordinal, execution_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("artifact is not pending")
+                if change is not None:
+                    if status != "applied" or change_set_id is None:
+                        raise ValueError("change requires applied status and ChangeSet")
+                    async with self.db.execute(
+                        "SELECT COALESCE(MAX(ordinal),0)+1 FROM file_changes WHERE change_set_id=?",
+                        (change_set_id,),
+                    ) as rows:
+                        ordinal_row = await rows.fetchone()
+                        if ordinal_row is None:
+                            raise ValueError("file change ordinal unavailable")
+                        next_ordinal = ordinal_row[0]
+                    await self.db.execute(
+                        "INSERT INTO file_changes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            str(uuid4()),
+                            change_set_id,
+                            next_ordinal,
+                            change.path,
+                            change.operation,
+                            change.before_sha256,
+                            change.after_sha256,
+                            change.source_call_id,
+                            change.status,
+                        ),
+                    )
+                event_kind = (
+                    "ArtifactApplied"
+                    if status == "applied"
+                    else "ArtifactApplyUnknown"
+                    if status == "unknown"
+                    else "ArtifactApplyDenied"
+                )
+                await self._event(
+                    run_id,
+                    event_kind,
+                    {
+                        "schema_version": 1,
+                        "execution_id": execution_id,
+                        "ordinal": ordinal,
+                        "status": status,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, event_kind)
+
+    async def finalize_artifact_manifest(self, run_id: str, execution_id: str, status: str) -> None:
+        """Finalize a manifest only after each file has an outcome."""
+        if status not in {"applied", "partial", "rejected", "unknown"}:
+            raise ValueError("invalid manifest status")
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await self.db.execute(
+                    "UPDATE artifact_manifests SET status=? WHERE execution_id=? "
+                    "AND status='collected'",
+                    (status, execution_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("manifest is not collected")
+                await self._event(
+                    run_id,
+                    "ArtifactManifestFinalized",
+                    {
+                        "schema_version": 1,
+                        "execution_id": execution_id,
+                        "status": status,
+                    },
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(run_id, "ArtifactManifestFinalized")
+
+    async def mark_sandbox_manifest_unknown(self, run_id: str, execution_id: str) -> None:
+        """Leave no pending artifact after an in-process review failure."""
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self.db.execute(
+                    "UPDATE sandbox_artifacts SET status='unknown' "
+                    "WHERE status IN ('collected','pending') AND manifest_id IN "
+                    "(SELECT id FROM artifact_manifests WHERE execution_id=?)",
+                    (execution_id,),
+                )
+                cursor = await self.db.execute(
+                    "UPDATE artifact_manifests SET status='unknown' "
+                    "WHERE execution_id=? AND status='collected'",
+                    (execution_id,),
+                )
+                if cursor.rowcount:
+                    await self._event(
+                        run_id,
+                        "ArtifactManifestFinalized",
+                        {"schema_version": 1, "execution_id": execution_id, "status": "unknown"},
+                    )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        if cursor.rowcount:
+            await self._publish(run_id, "ArtifactManifestFinalized")
 
     async def record_evidence(
         self, run_id: str, kind: str, summary: str, call_id: str | None = None

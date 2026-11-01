@@ -5,13 +5,16 @@ import importlib
 import inspect
 import json
 import os
+import tempfile
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
 from deity.adapters.code_intelligence import LexicalCodeSearch
+from deity.adapters.execution.artifacts import ArtifactApplier
+from deity.adapters.execution.docker import DockerExecutionBackend
 from deity.adapters.git import GitWorkspaceAdapter
 from deity.adapters.mcp import McpCompositeDispatcher, McpServerConfig, McpSessionManager, McpTool
 from deity.adapters.model.anthropic import AnthropicProvider
@@ -31,8 +34,10 @@ from deity.application.config import (
     McpServerSettings,
     PermissionConfig,
     RunConfig,
+    SandboxConfig,
     VerificationConfig,
 )
+from deity.application.sandbox_service import SandboxService, SandboxUnavailable
 from deity.core.context import HARNESS_SYSTEM_INSTRUCTIONS, ContextBuilder
 from deity.core.context.reliable import normalize_unicode
 from deity.core.contracts import (
@@ -41,7 +46,19 @@ from deity.core.contracts import (
     ExecutionMode,
     ModelProvider,
     RecoveryDecision,
+    RunStatus,
+    ToolCall,
     ToolDispatcher,
+    ToolResult,
+)
+from deity.core.contracts.execution import (
+    ArtifactManifest,
+    BackendKind,
+    ExecutionRequest,
+    ExecutionStatus,
+    ResourceBudget,
+    SandboxHandle,
+    SandboxSpec,
 )
 from deity.core.hooks import HookRegistry, RegisteredHook
 from deity.core.runtime import AgentLoop
@@ -73,6 +90,7 @@ class RunService:
         git_guard: GitGuardConfig | None = None,
         verification: VerificationConfig | None = None,
         coding_fingerprint: str = "",
+        sandbox: SandboxConfig | None = None,
     ) -> None:
         self.db_path = db_path
         self.workspace = workspace.resolve(strict=True)
@@ -91,7 +109,14 @@ class RunService:
         self.code_intelligence = code_intelligence or CodeIntelligenceConfig()
         self.git_guard = git_guard or GitGuardConfig()
         self.verification = verification or VerificationConfig()
-        self.coding_fingerprint = coding_fingerprint
+        self.sandbox = sandbox or SandboxConfig()
+        self.coding_fingerprint = (
+            hashlib.sha256(
+                (coding_fingerprint + json.dumps(asdict(self.sandbox), sort_keys=True)).encode()
+            ).hexdigest()
+            if self.sandbox.enabled
+            else coding_fingerprint
+        )
         if self.hooks is not None:
             metadata = [
                 (item.name, item.point, item.kind, item.priority) for item in self.hooks.hooks
@@ -123,6 +148,7 @@ class RunService:
                 (self.extension_fingerprint + self.skill_catalog.fingerprint()).encode()
             ).hexdigest()
         self._active_loop: AgentLoop | None = None
+        self._sandbox_active_run_id: str | None = None
 
     def cancel(self, run_id: str) -> bool:
         """Signal cancellation to this service's active run."""
@@ -235,7 +261,179 @@ class RunService:
                 )
                 else ""
             ),
+            sandbox=config.sandbox,
         )
+
+    async def _sandbox_shell(
+        self,
+        repo: SQLiteSessionRepository,
+        call: ToolCall,
+        context: AgentRequest,
+        guard: GitGuardedDispatcher | None = None,
+    ) -> ToolResult:
+        """Route an approved shell call through the required Docker backend."""
+        if not context.run_id:
+            raise ValueError("sandbox run identity missing")
+        self._sandbox_active_run_id = context.run_id
+        config = self.sandbox
+        backend = DockerExecutionBackend(
+            self.workspace,
+            Path(tempfile.gettempdir()) / "deity-sandbox",
+            excluded_paths=(
+                self.db_path,
+                self.db_path.with_name(self.db_path.name + "-wal"),
+                self.db_path.with_name(self.db_path.name + "-shm"),
+                *(self.db_path.with_suffix(f".v{version}.bak") for version in range(1, 5)),
+            ),
+            excluded_patterns=config.exclude,
+            max_workspace_files=config.max_workspace_files,
+            max_workspace_bytes=config.max_workspace_bytes,
+            max_artifact_files=config.max_artifact_files,
+            max_artifact_bytes=config.max_artifact_bytes,
+            cleanup_timeout_seconds=config.cleanup_timeout_seconds,
+        )
+        budget = ResourceBudget(
+            config.timeout_seconds,
+            config.cpu_count,
+            config.memory_mb * 1024 * 1024,
+            config.pids_limit,
+            config.max_output_chars,
+            config.tmpfs_mb * 1024 * 1024,
+        )
+        network_approved = config.network == "none" or (
+            self.approve is not None
+            and self.approve("sandbox_network", {"network": config.network})
+        )
+        if not network_approved:
+            return ToolResult(call.call_id, "denied", "sandbox_network_approval_required")
+        request = ExecutionRequest(
+            str(uuid4()),
+            context.run_id,
+            call.call_id,
+            tuple(call.arguments["argv"]),
+            ".",
+            SandboxSpec(
+                BackendKind.DOCKER,
+                config.image,
+                budget,
+                network=config.network,
+                network_approved=network_approved,
+                env_names=config.env_names,
+                artifact_policy=config.artifact_policy,
+            ),
+        )
+        reviewer = None
+        if config.artifact_policy == "review":
+            snapshot = await GitWorkspaceAdapter(self.workspace, ignored=(self.db_path,)).capture()
+            await repo.create_workspace_snapshot(snapshot, run_id=context.run_id)
+            dirty = {
+                item.path
+                for item in snapshot.files
+                if snapshot.git_head is not None and item.status not in {"!", "clean", "absent"}
+            }
+            submodules = {
+                item.path for item in snapshot.files if item.status.startswith("submodule")
+            }
+            allow_dirty = set(
+                await repo.plan_build_allowlist(context.run_id) if context.plan_id else ()
+            )
+            plan_targets = None
+            if context.plan_id:
+                plan = await repo.get_plan(context.plan_id)
+                plan_targets = {path for step in plan.draft.steps for path in step.files}
+
+            async def review(handle: SandboxHandle, manifest: ArtifactManifest) -> ArtifactManifest:
+                if handle.staging_root is None:
+                    raise ValueError("staging not available for review")
+                baseline = {
+                    entry.path: (entry.before_sha256, 0)
+                    for entry in manifest.entries
+                    if entry.before_sha256 is not None
+                }
+                applier = ArtifactApplier(self.workspace, Path(handle.staging_root), baseline)
+                change_set_id = await repo.ensure_change_set(context.run_id, snapshot.snapshot_id)
+                statuses: list[str] = []
+                for ordinal, entry in enumerate(manifest.entries, 1):
+                    await repo.prepare_artifact_apply(
+                        context.run_id, manifest.execution_id, ordinal
+                    )
+                    if (
+                        (plan_targets is not None and entry.path not in plan_targets)
+                        or (entry.path in dirty and entry.path not in allow_dirty)
+                        or (entry.operation == "delete" and entry.path in dirty)
+                        or any(
+                            entry.path == path or entry.path.startswith(f"{path}/")
+                            for path in submodules
+                        )
+                        or (
+                            guard is not None
+                            and guard.require_read_before_write
+                            and entry.operation != "create"
+                            and guard.preimages.get((context.run_id, entry.path))
+                            != entry.before_sha256
+                        )
+                        or not self._authorize("apply_patch", {"path": entry.path})
+                    ):
+                        await repo.complete_artifact_apply(
+                            context.run_id, manifest.execution_id, ordinal, "denied"
+                        )
+                        statuses.append("denied")
+                        continue
+                    try:
+                        change = applier.apply(entry, call.call_id)
+                    except ValueError:
+                        await repo.complete_artifact_apply(
+                            context.run_id, manifest.execution_id, ordinal, "denied"
+                        )
+                        statuses.append("denied")
+                    except BaseException:
+                        await repo.complete_artifact_apply(
+                            context.run_id, manifest.execution_id, ordinal, "unknown"
+                        )
+                        raise
+                    else:
+                        await repo.complete_artifact_apply(
+                            context.run_id,
+                            manifest.execution_id,
+                            ordinal,
+                            "applied",
+                            change_set_id,
+                            change,
+                        )
+                        statuses.append("applied")
+                final_status: Literal["applied", "rejected", "partial"] = (
+                    "applied"
+                    if all(status == "applied" for status in statuses)
+                    else "rejected"
+                    if all(status == "denied" for status in statuses)
+                    else "partial"
+                )
+                await repo.finalize_artifact_manifest(
+                    context.run_id, manifest.execution_id, final_status
+                )
+                return replace(manifest, status=final_status)
+
+            reviewer = review
+        try:
+            result, manifest = await SandboxService(backend, repo, reviewer=reviewer).run(request)
+        except SandboxUnavailable as exc:
+            return ToolResult(call.call_id, "denied", str(exc))
+        if result.status == ExecutionStatus.UNKNOWN:
+            raise RuntimeError("sandbox result unknown")
+        if manifest.status == "partial":
+            raise RuntimeError("sandbox artifact apply partial")
+        if manifest.status in {"rejected", "unknown"}:
+            return ToolResult(
+                call.call_id, "error", f"artifact {manifest.status}", result.exit_code
+            )
+        status: Literal["ok", "error", "timeout"] = (
+            "ok"
+            if result.status == ExecutionStatus.SUCCEEDED
+            else "timeout"
+            if result.status == ExecutionStatus.TIMED_OUT
+            else "error"
+        )
+        return ToolResult(call.call_id, status, result.output, result.exit_code, result.truncated)
 
     async def _mcp_dispatcher(
         self,
@@ -353,8 +551,16 @@ class RunService:
                 return True
             return self._authorize(name, args)
 
+        guard_ref: list[GitGuardedDispatcher | None] = [None]
         dispatcher: ToolDispatcher = await self._mcp_dispatcher(
-            LocalToolDispatcher(approve=authorize)
+            LocalToolDispatcher(
+                approve=authorize,
+                sandbox_shell=(
+                    lambda call, context: self._sandbox_shell(repo, call, context, guard_ref[0])
+                )
+                if self.sandbox.enabled and self.sandbox.backend == "docker"
+                else None,
+            )
         )
         if self.skill_catalog is not None:
             dispatcher = SkillDispatcher(dispatcher, self.skill_catalog)
@@ -384,6 +590,7 @@ class RunService:
                 change_set_id=change_set_id,
                 plan_targets=plan_targets,
             )
+            guard_ref[0] = guarded
             return guarded, guarded
         return dispatcher, None
 
@@ -478,11 +685,25 @@ class RunService:
             except BaseException:
                 if guarded is not None and guarded.run_id is not None:
                     await repo.finalize_change_set(guarded.run_id, "unknown")
+                elif (
+                    self.sandbox.enabled
+                    and self.sandbox.artifact_policy == "review"
+                    and self._sandbox_active_run_id is not None
+                ):
+                    await repo.finalize_change_set(self._sandbox_active_run_id, "unknown")
                 raise
             if guarded is not None and guarded.change_set_id is not None:
                 diff = await GitWorkspaceAdapter(self.workspace, ignored=(self.db_path,)).diff()
                 await repo.record_evidence(result.run_id, "git_diff", diff)
-                await repo.finalize_change_set(result.run_id, "completed")
+                await repo.finalize_change_set(
+                    result.run_id,
+                    "completed" if result.status == RunStatus.COMPLETED else "unknown",
+                )
+            elif self.sandbox.enabled and self.sandbox.artifact_policy == "review":
+                await repo.finalize_change_set(
+                    result.run_id,
+                    "completed" if result.status == RunStatus.COMPLETED else "unknown",
+                )
             await repo.append_message(active_session, result.run_id, "user", task)
             await repo.append_message(
                 active_session, result.run_id, "assistant", result.final_text or ""
@@ -490,6 +711,7 @@ class RunService:
             return result
         finally:
             self._active_loop = None
+            self._sandbox_active_run_id = None
             await repo.close()
 
     async def run_build(self, build_run_id: str, plan_id: str) -> AgentResult:
@@ -567,13 +789,16 @@ class RunService:
                 raise
             diff = await GitWorkspaceAdapter(self.workspace, ignored=(self.db_path,)).diff()
             await repo.record_evidence(build_run_id, "git_diff", diff)
-            await repo.finalize_change_set(build_run_id, "completed")
+            await repo.finalize_change_set(
+                build_run_id, "completed" if result.status == RunStatus.COMPLETED else "unknown"
+            )
             await repo.append_message(
                 info["session_id"], build_run_id, "assistant", result.final_text or ""
             )
             return result
         finally:
             self._active_loop = None
+            self._sandbox_active_run_id = None
             await repo.close()
 
     async def inspect(self, run_id: str) -> dict[str, Any]:
@@ -587,6 +812,8 @@ class RunService:
             reason = "no_valid_checkpoint"
             if info["status"] != "interrupted":
                 reason = "run_not_interrupted"
+            elif self.sandbox.enabled or await repo.has_sandbox_execution(run_id):
+                decision, reason = "manual_review", "sandbox_resume_requires_reconciliation"
             elif await repo.has_active_owner(run_id):
                 reason = "owner_may_still_be_active"
             elif unresolved:

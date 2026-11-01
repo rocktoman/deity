@@ -34,3 +34,34 @@ jobs:
       - run: uv run --locked python -m evals.runners.reliability
       - run: uv run --locked python -m evals.runners.extensions
       - run: uv run --locked python -m evals.runners.advanced
+      - run: uv run --locked python -m evals.runners.sandbox --backend fake
+
+  sandbox-docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked --dev
+      - run: docker build --pull -q -f tests/fixtures/sandbox/Dockerfile tests/fixtures/sandbox > /tmp/deity-sandbox-image
+      - name: Real Docker sandbox integration
+        env:
+          DEITY_REQUIRE_DOCKER: "1"
+        run: |
+          export DEITY_SANDBOX_TEST_IMAGE="$(cat /tmp/deity-sandbox-image)"
+          uv run --locked pytest -q tests/integration/test_sandbox_docker.py tests/integration/test_sandbox_run.py tests/integration/test_sandbox_verification.py tests/e2e/test_sandbox_cli.py
+          uv run --locked python -m evals.runners.sandbox --require-docker
+      - name: Check sandbox container cleanup
+        if: always()
+        run: |
+          remaining="$(docker ps -a --filter label=deity.execution --format '{{.ID}}')"
+          test -z "$remaining" || { echo "sandbox containers remain"; exit 1; }
+      - name: Upload sandbox reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-reports
+          path: evals/reports/S*.json
+          if-no-files-found: warn

@@ -170,3 +170,7 @@ V0.5 增加 `uv run --locked python -m evals.runners.advanced`，固定覆盖：
 | A12 | 兼容性 | V0.5 开关关闭时旧路径保持通过 |
 
 A01–A12 属于确定性 L0/L1/L2 门禁。真实模型任务、token 与成本仍属于 L3；未运行时必须记为 `NOT_RUN/UNKNOWN`。
+
+## 11. V0.6 执行沙箱评估 S01–S12
+
+运行 `uv run --locked python -m evals.runners.sandbox --require-docker`。S01–S03 覆盖默认兼容、Fake 生命周期和能力拒绝；S04–S06 在真实 Docker 上检查隔离参数、秘密/Socket 和输出资源边界；S07–S09 检查清理失败、staging 漂移及工件保护；S10 检查 Verification 工件丢弃；S11 检查配置拒绝；S12 检查重启后未知 intent。每例输出 `evals/reports/Sxx.json`。无 Docker 时真实用例标 `NOT_RUN`，专用门禁失败；普通 CI 可运行 Fake/Local 场景，但不能据此宣称真实 Docker 验收通过。候选报告仍须逐项记录未覆盖的故障注入、平台与真实模型结果。

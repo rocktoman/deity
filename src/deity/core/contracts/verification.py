@@ -35,6 +35,10 @@ class VerificationEvidence:
     output: str
     truncated: bool = False
     reason: str | None = None
+    execution_id: str | None = None
+    backend: str | None = None
+    image_digest: str | None = None
+    cleanup_status: str | None = None
 
 
 @dataclass(frozen=True)

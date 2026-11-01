@@ -155,6 +155,7 @@ class GitWorkspaceAdapter:
                     resolved.with_suffix(".v1.bak"),
                     resolved.with_suffix(".v2.bak"),
                     resolved.with_suffix(".v3.bak"),
+                    resolved.with_suffix(".v4.bak"),
                 }
             )
         self.ignored = expanded

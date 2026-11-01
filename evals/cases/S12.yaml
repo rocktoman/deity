@@ -1,0 +1,1 @@
+{"id":"S12","pytest":["tests/integration/test_storage_v5.py::test_orphaned_sandbox_intent_becomes_unknown","tests/integration/test_storage_v5.py::test_orphaned_artifact_apply_becomes_unknown","tests/unit/test_sandbox_fake.py::test_collect_and_review_failures_leave_unknown_manifest"],"backend":"fake"}

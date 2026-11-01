@@ -1,0 +1,1 @@
+{"id":"S03","pytest":["tests/unit/test_sandbox_fake.py::test_fake_capability_rejection_has_no_intent","tests/unit/test_sandbox_fake.py::test_fake_preflight_failure_has_no_intent","tests/integration/test_sandbox_run.py::test_required_sandbox_unavailable_never_uses_local"],"backend":"fake"}

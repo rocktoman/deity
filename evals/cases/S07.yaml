@@ -1,0 +1,1 @@
+{"id":"S07","pytest":["tests/unit/test_sandbox_fake.py::test_cleanup_failure_is_durable","tests/unit/test_sandbox_fake.py::test_cancelled_execution_records_unknown_and_cleanup","tests/unit/test_sandbox_fake.py::test_uncertain_result_never_scans_live_staging"],"backend":"fake"}

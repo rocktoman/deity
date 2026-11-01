@@ -1,0 +1,1 @@
+{"id":"S09","pytest":["tests/unit/test_sandbox_artifacts.py","tests/integration/test_sandbox_run.py::test_review_cannot_overwrite_initial_dirty_file","tests/integration/test_sandbox_run.py::test_partial_artifact_apply_fails_run_and_preserves_dirty_file","tests/integration/test_sandbox_run.py::test_git_guard_requires_read_before_sandbox_apply"],"backend":"docker"}

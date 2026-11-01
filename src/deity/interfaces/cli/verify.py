@@ -60,6 +60,7 @@ def verify_command(
                     )
                 ),
             ),
+            sandbox=settings.sandbox,
         )
 
         async def execute() -> FinalReport | None:

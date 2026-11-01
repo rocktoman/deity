@@ -26,7 +26,7 @@ async def test_v3_is_backed_up_and_migrated_to_v4(tmp_path: Path) -> None:
     try:
         async with repo.db.execute("SELECT MAX(version) FROM schema_migrations") as cursor:
             row = await cursor.fetchone()
-            assert row is not None and row[0] == 4
+            assert row is not None and row[0] == 5
         async with repo.db.execute("SELECT name FROM sqlite_master WHERE type='table'") as cursor:
             tables = {row[0] for row in await cursor.fetchall()}
         assert {

@@ -1,0 +1,1 @@
+{"id":"S01","pytest":["tests/unit/test_sandbox_contract.py::test_sandbox_defaults_and_required_policy","tests/integration/test_sandbox_run.py::test_disabled_sandbox_uses_local_without_execution_row"],"backend":"fake"}

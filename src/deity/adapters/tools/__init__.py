@@ -2,14 +2,13 @@
 
 import asyncio
 import json
-import os
-import signal
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from deity.adapters.execution.local import run_local_process
 from deity.core.contracts import AgentRequest, ToolCall, ToolResult
 
 
@@ -123,10 +122,12 @@ class LocalToolDispatcher:
         approve: Callable[[str, dict[str, Any]], bool] | None = None,
         timeout_seconds: float = 30,
         max_output_chars: int = 16_000,
+        sandbox_shell: Callable[[ToolCall, AgentRequest], Awaitable[ToolResult]] | None = None,
     ) -> None:
         self.approve = approve
         self.timeout_seconds = timeout_seconds
         self.max_output_chars = max_output_chars
+        self.sandbox_shell = sandbox_shell
         self.audit: list[tuple[str, str, str]] = []
         self.seen: set[tuple[str, str]] = set()
         self._prepared: dict[tuple[str, str], tuple[dict[str, Any], Path, Path]] = {}
@@ -203,6 +204,10 @@ class LocalToolDispatcher:
             if early is not None:
                 return early
         args, root, path = self._prepared.pop(key)
+        if call.name == "shell" and self.sandbox_shell is not None:
+            result = await self.sandbox_shell(call, context)
+            self.audit.append((call.call_id, call.name, result.status))
+            return result
         try:
             output, exit_code, stream_truncated = await self._execute(call.name, args, root, path)
         except TimeoutError:
@@ -285,55 +290,6 @@ class LocalToolDispatcher:
         raise ValueError("unknown tool")
 
     async def _process(self, argv: list[str], root: Path) -> tuple[str, int, bool]:
-        env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ}
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=root,
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-
-        async def read_limited(stream: asyncio.StreamReader) -> tuple[bytes, bool]:
-            chunks: list[bytes] = []
-            kept = 0
-            clipped = False
-            while chunk := await stream.read(4096):
-                remaining = max(0, self.max_output_chars - kept)
-                if remaining:
-                    chunks.append(chunk[:remaining])
-                    kept += min(len(chunk), remaining)
-                if len(chunk) > remaining:
-                    clipped = True
-            return b"".join(chunks), clipped
-
-        try:
-            assert process.stdout is not None and process.stderr is not None
-            stdout_result, stderr_result, _ = await asyncio.wait_for(
-                asyncio.gather(
-                    read_limited(process.stdout), read_limited(process.stderr), process.wait()
-                ),
-                self.timeout_seconds,
-            )
-        except (TimeoutError, asyncio.CancelledError):
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(process.wait(), 2.0)
-            except TimeoutError:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-            raise
-        stdout, stdout_clipped = stdout_result
-        stderr, stderr_clipped = stderr_result
-        return (
-            (stdout + stderr).decode("utf-8", errors="replace"),
-            process.returncode or 0,
-            stdout_clipped or stderr_clipped,
+        return await run_local_process(
+            tuple(argv), root, self.timeout_seconds, self.max_output_chars
         )

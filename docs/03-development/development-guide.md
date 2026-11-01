@@ -153,6 +153,8 @@ repeat = 1
 
 V0.5 所有开关默认关闭；Plan 模式由 Tool Runtime 强制只读，Build 不自动 stash/commit/reset，Verification 只执行探测或显式配置得到的 argv。详细命令、状态语义、SQLite v4 迁移和回退见 [V0.5 使用说明](v0.5-usage.md)。
 
+V0.6 沙箱默认关闭。Docker 模式要求本机 daemon 与固定镜像；工作区复制、资源上限、工件审核和 SQLite v5 事实见 [V0.6 使用说明](v0.6-usage.md)。新增门禁：`uv run --locked python -m evals.runners.sandbox --require-docker`；Linux Docker CI 必须实际执行，不能以普通 CI 中的 skip 代替。
+
 ## 7. 开发与评审规范
 
 - Python 类型标注，边界优先 Protocol，避免循环依赖。

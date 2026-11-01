@@ -431,3 +431,7 @@ Python 3.12+、`uv`、Typer/Rich、Pydantic、官方模型 SDK、`aiosqlite` 或
 - [ ] 不以模型自评替代评估断言
 
 **关联文档**：`../01-project/deity-v0.1-plan.md`、`../03-development/development-guide.md`、`../04-evaluation/evaluation-plan.md`、`../../AGENTS.md`。
+
+## 14. V0.6 执行后端扩展
+
+V0.2 的端口方向保持不变。Core 的 `ExecutionBackend` 仅定义能力、预检和 `prepare → execute → collect → cleanup` 契约；Application 负责权限、持久化顺序与失败协调；Local/Fake/Docker adapter 实现外部 I/O。Docker 运行只接收复制的 staging 工作区，Verification 丢弃其变更；Agent Shell 的文本回传需通过权限、Git Guard、preimage 与 ChangeSet。SQLite v5 将 intent、结果、工件与清理分开记录，未知副作用不自动续跑。安全边界、迁移和回退依据 [ADR-012](adr-012-v0.6-execution-sandbox.md)。本节不改变 V0.1 的版本范围。

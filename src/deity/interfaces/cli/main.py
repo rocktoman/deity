@@ -25,6 +25,7 @@ from deity.interfaces.cli.plan import (
     plan_command,
     plans_app,
 )
+from deity.interfaces.cli.sandbox import sandbox_app
 from deity.interfaces.cli.verify import verify_command
 
 app = typer.Typer(help="Deity AI Coding Agent Harness")
@@ -36,6 +37,7 @@ skills_app = typer.Typer(help="Inspect configured Skills")
 app.add_typer(skills_app, name="skills")
 app.add_typer(plans_app, name="plans")
 app.add_typer(code_app, name="code")
+app.add_typer(sandbox_app, name="sandbox")
 app.command("plan")(plan_command)
 app.command("build")(build_command)
 app.command("verify")(verify_command)

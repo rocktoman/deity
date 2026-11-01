@@ -3,14 +3,14 @@
 import asyncio
 import json
 import os
-import signal
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from deity.adapters.execution.local import run_local_process
 from deity.core.contracts.verification import (
     VerificationCommand,
     VerificationEvidence,
@@ -133,7 +133,11 @@ class VerificationExecutor:
         self.repeat = repeat
         self.allowed_commands = set(allowed_commands)
 
-    async def run(self, plan: VerificationPlan) -> tuple[VerificationEvidence, ...]:
+    async def run(
+        self,
+        plan: VerificationPlan,
+        runner: Callable[[VerificationCommand], Awaitable[VerificationEvidence]] | None = None,
+    ) -> tuple[VerificationEvidence, ...]:
         results: list[VerificationEvidence] = []
         for command in plan.commands:
             invalid = self._invalid_reason(command.argv)
@@ -148,7 +152,10 @@ class VerificationExecutor:
             ):
                 results.append(self._not_run(command, "approval_required"))
                 continue
-            attempts = [await self._execute_once(command) for _ in range(self.repeat)]
+            attempts = [
+                await (runner(command) if runner is not None else self._execute_once(command))
+                for _ in range(self.repeat)
+            ]
             if (
                 len({item.status for item in attempts}) > 1
                 or len({item.exit_code for item in attempts}) > 1
@@ -180,15 +187,9 @@ class VerificationExecutor:
 
     async def _execute_once(self, command: VerificationCommand) -> VerificationEvidence:
         started = time.monotonic()
-        env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ}
         try:
-            process = await asyncio.create_subprocess_exec(
-                *command.argv,
-                cwd=self.workspace,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
+            output, code, truncated = await run_local_process(
+                command.argv, self.workspace, self.timeout_seconds, self.max_output_chars
             )
         except FileNotFoundError:
             return VerificationEvidence(
@@ -200,25 +201,7 @@ class VerificationExecutor:
                 "",
                 reason="dependency_missing",
             )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=self.timeout_seconds
-            )
-        except (TimeoutError, asyncio.CancelledError) as exc:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(process.wait(), timeout=2)
-            except TimeoutError:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-            if isinstance(exc, asyncio.CancelledError):
-                raise
+        except TimeoutError:
             return VerificationEvidence(
                 str(uuid4()),
                 command,
@@ -228,15 +211,14 @@ class VerificationExecutor:
                 "",
                 reason="timeout",
             )
-        output = (stdout + stderr).decode("utf-8", errors="replace")
         return VerificationEvidence(
             str(uuid4()),
             command,
-            VerificationStatus.PASSED if process.returncode == 0 else VerificationStatus.FAILED,
-            process.returncode,
+            VerificationStatus.PASSED if code == 0 else VerificationStatus.FAILED,
+            code,
             int((time.monotonic() - started) * 1000),
-            output[: self.max_output_chars],
-            len(output) > self.max_output_chars,
+            output,
+            truncated,
         )
 
     @staticmethod

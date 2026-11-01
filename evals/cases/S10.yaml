@@ -1,0 +1,1 @@
+{"id":"S10","pytest":"tests/integration/test_sandbox_verification.py::test_verification_uses_docker_and_discards_generated_files","backend":"docker"}

@@ -14,6 +14,8 @@ Deity 是计划以 Python 3.12+ 构建的开源 AI Coding Agent 运行系统。�
 
 **V0.5 高级编码工作流已形成本地候选实现。** 新增只读 Plan 与显式 Build、三语言 lexical Code Intelligence、Git/补丁保护、确定性 Verification 和 SQLite v4 审计事实；所有能力默认关闭。当前本地门禁见 [V0.5 候选验收记录](docs/04-evaluation/v0.5-candidate-2026-11-01.md)，使用与回退见 [V0.5 使用说明](docs/03-development/v0.5-usage.md)。远程 CI 与真实模型 L3 结果单独记录，不由本地结果替代。
 
+**V0.6 执行沙箱已形成本地候选实现。** Docker 后端默认关闭，采用 staging 复制、禁网与资源限制，并按现有权限、Git Guard 和 ChangeSet 审核文本工件回传。本地结果与未运行项见 [V0.6 候选验收记录](docs/04-evaluation/v0.6-candidate-2026-11-01.md)。
+
 ## 核心选择
 
 - Python 3.12+；本地 CLI 优先，未来可扩展 TUI、FastAPI、IDE。
@@ -47,8 +49,12 @@ CLI → Application → Agent Runtime
 | [V0.4 扩展实施文档](docs/03-development/v0.4-extensible-harness-implementation.md) | MCP、Skills、Hooks 与 X01–X06 门禁 |
 | [V0.4 使用说明](docs/03-development/v0.4-usage.md) | 扩展配置、CLI、授权和回退 |
 | [V0.5 实施计划](docs/03-development/v0.5-implementation-plan.md) | Plan/Build、Code Intelligence、Git 保护与 Verification Engine |
+| [V0.6 实施计划](docs/03-development/v0.6-implementation-plan.md) | Execution Backend、Docker 隔离、staging 工件回传与沙箱门禁 |
+| [ADR-012](docs/02-architecture/adr-012-v0.6-execution-sandbox.md) | 沙箱威胁模型、隔离边界与恢复决策 |
+| [V0.6 使用说明](docs/03-development/v0.6-usage.md) | Docker 配置、CLI、工件回传与回退 |
 | [V0.5 使用说明](docs/03-development/v0.5-usage.md) | 配置、CLI、安全语义、迁移和回退 |
 | [V0.5 候选验收记录](docs/04-evaluation/v0.5-candidate-2026-11-01.md) | 本地测试、A01–A12 与未运行项 |
+| [V0.6 候选验收记录](docs/04-evaluation/v0.6-candidate-2026-11-01.md) | 本地 Docker、S01–S12 与未运行项 |
 | [评估计划](docs/04-evaluation/evaluation-plan.md) | 固定测试任务、指标、门禁 |
 | [DeepSeek L3 基线](docs/04-evaluation/l3-deepseek-v4-flash-2026-10-31.md) | 真实模型 E01–E03 验收结果与限制 |
 | [AGENTS.md](AGENTS.md) | 仓库工程架构和 AI 协作规则 |
@@ -75,6 +81,8 @@ deity code symbol <name> --workspace /path/to/repo
 deity code references <name> --workspace /path/to/repo
 deity verify --show-plan --workspace /path/to/repo
 deity verify --run <run-id> --workspace /path/to/repo
+deity sandbox doctor --workspace /path/to/repo --config /path/to/config.toml
+deity sandbox run --workspace /path/to/repo --config /path/to/config.toml -- cat README.md
 ```
 
 进入 `deity` 的 `Deity> ` 提示符后，可输入 `/help` 查看交互命令。启用 Skills 后，`/skill` 显示当前工作区的用户与项目 Skill；用 ↑↓ 和回车选择后，**下一条任务**会提示模型加载该 Skill，实际是否加载以工具调用为准。`/skill <name>` 可直接选择。`/mcp` 先选择已配置的 server，再选择其工具；发现阶段不调用业务工具。配置中显式启用的 MCP server 会直接启动，其工具调用不再逐次审批。选中工具只会向模型附加下一条任务的使用提示，不限制运行时可用的其他已配置工具。Esc 返回，非终端输入可用编号选择。斜杠命令不会发给模型；任务运行失败后，选择也不会自动沿用。
@@ -92,6 +100,8 @@ deity verify --run <run-id> --workspace /path/to/repo
 V0.4 扩展评估命令：`uv run --locked python -m evals.runners.extensions`。X01–X06 使用本地 fixture、临时 SQLite 和独立子进程，输出写入 `evals/reports/`。
 
 V0.5 高级编码评估命令：`uv run --locked python -m evals.runners.advanced`。A01–A12 覆盖只读 Plan、Plan→Build、漂移、三语言定位、dirty 文件保护、安全补丁、非 Git、验证状态与兼容性。
+
+V0.6 沙箱评估命令：`uv run --locked python -m evals.runners.sandbox --require-docker`。S01–S12 覆盖后端契约、Docker 隔离、staging、工件与恢复；Docker 缺失记为 `NOT_RUN`，专用门禁将其视为失败。
 
 ## 参考与原创边界
 

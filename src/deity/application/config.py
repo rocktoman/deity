@@ -61,6 +61,34 @@ class VerificationConfig:
 
 
 @dataclass(frozen=True)
+class SandboxConfig:
+    version: int = 1
+    enabled: bool = False
+    backend: Literal["local", "docker"] = "local"
+    required: bool = False
+    image: str = ""
+    workspace_mode: Literal["copy"] = "copy"
+    read_only_rootfs: bool = True
+    non_root: bool = True
+    network: str = "none"
+    allowed_networks: tuple[str, ...] = ()
+    env_names: tuple[str, ...] = ()
+    artifact_policy: Literal["discard", "review"] = "discard"
+    cpu_count: float = 1.0
+    memory_mb: int = 1024
+    pids_limit: int = 128
+    tmpfs_mb: int = 256
+    timeout_seconds: int = 300
+    cleanup_timeout_seconds: int = 15
+    max_output_chars: int = 16000
+    max_workspace_files: int = 50_000
+    max_workspace_bytes: int = 1_073_741_824
+    max_artifact_files: int = 200
+    max_artifact_bytes: int = 52_428_800
+    exclude: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Config:
     run: RunConfig = field(default_factory=RunConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
@@ -72,6 +100,15 @@ class Config:
     code_intelligence: CodeIntelligenceConfig = field(default_factory=CodeIntelligenceConfig)
     git_guard: GitGuardConfig = field(default_factory=GitGuardConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+
+    def sandbox_fingerprint(self) -> str:
+        """Hash enabled sandbox policy without environment values."""
+        if not self.sandbox.enabled:
+            return ""
+        return hashlib.sha256(
+            json.dumps(self.sandbox.__dict__, sort_keys=True).encode()
+        ).hexdigest()
 
     def coding_fingerprint(self) -> str:
         """Hash V0.5 recovery-relevant policy without paths or secrets."""
@@ -147,6 +184,7 @@ def load_config(path: Path) -> Config:
             "code_intelligence",
             "git_guard",
             "verification",
+            "sandbox",
         }:
             raise ValueError
         run = data.get("run", {})
@@ -159,6 +197,7 @@ def load_config(path: Path) -> Config:
         code_intelligence = data.get("code_intelligence", {})
         git_guard = data.get("git_guard", {})
         verification = data.get("verification", {})
+        sandbox = data.get("sandbox", {})
         if not all(
             isinstance(item, dict)
             for item in (
@@ -172,6 +211,7 @@ def load_config(path: Path) -> Config:
                 code_intelligence,
                 git_guard,
                 verification,
+                sandbox,
             )
         ):
             raise ValueError
@@ -265,6 +305,82 @@ def load_config(path: Path) -> Config:
             or not 1 <= verification_config.repeat <= 3
         ):
             raise ValueError
+        if set(sandbox) - set(SandboxConfig.__dataclass_fields__):
+            raise ValueError
+        sandbox_config = SandboxConfig(**sandbox)
+        if (
+            type(sandbox_config.version) is not int
+            or sandbox_config.version != 1
+            or type(sandbox_config.enabled) is not bool
+            or type(sandbox_config.required) is not bool
+            or sandbox_config.backend not in {"local", "docker"}
+            or sandbox_config.workspace_mode != "copy"
+            or type(sandbox_config.read_only_rootfs) is not bool
+            or not sandbox_config.read_only_rootfs
+            or type(sandbox_config.non_root) is not bool
+            or not sandbox_config.non_root
+            or sandbox_config.artifact_policy not in {"discard", "review"}
+            or (sandbox_config.required and sandbox_config.backend != "docker")
+            or (
+                sandbox_config.enabled
+                and sandbox_config.backend == "docker"
+                and re.fullmatch(r"(?:[\w./-]+@)?sha256:[a-f0-9]{64}", sandbox_config.image) is None
+            )
+            or not isinstance(sandbox_config.allowed_networks, (list, tuple))
+            or not isinstance(sandbox_config.env_names, (list, tuple))
+            or not isinstance(sandbox_config.exclude, (list, tuple))
+            or len(sandbox_config.exclude) > 100
+            or any(
+                not isinstance(pattern, str)
+                or re.fullmatch(r"[A-Za-z0-9._/*-]{1,128}", pattern) is None
+                or pattern.startswith("/")
+                or ".." in Path(pattern).parts
+                for pattern in sandbox_config.exclude
+            )
+            or any(
+                re.fullmatch(r"[A-Z][A-Z0-9_]*", name) is None for name in sandbox_config.env_names
+            )
+            or any(
+                re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}", name) is None
+                or name in {"host", "bridge", "default"}
+                for name in sandbox_config.allowed_networks
+            )
+            or (
+                sandbox_config.network != "none"
+                and sandbox_config.network not in sandbox_config.allowed_networks
+            )
+            or type(sandbox_config.cpu_count) not in (float, int)
+            or not 0.1 <= sandbox_config.cpu_count <= 16
+            or any(
+                type(value) is not int or value <= 0
+                for value in (
+                    sandbox_config.memory_mb,
+                    sandbox_config.pids_limit,
+                    sandbox_config.tmpfs_mb,
+                    sandbox_config.timeout_seconds,
+                    sandbox_config.cleanup_timeout_seconds,
+                    sandbox_config.max_output_chars,
+                    sandbox_config.max_workspace_files,
+                    sandbox_config.max_workspace_bytes,
+                    sandbox_config.max_artifact_files,
+                    sandbox_config.max_artifact_bytes,
+                )
+            )
+            or sandbox_config.cleanup_timeout_seconds > 60
+            or sandbox_config.max_workspace_files > 100_000
+            or sandbox_config.max_workspace_bytes > 4 * 1024**3
+            or sandbox_config.max_artifact_files > 1_000
+            or sandbox_config.max_artifact_bytes > 100 * 1024**2
+        ):
+            raise ValueError
+        sandbox_config = SandboxConfig(
+            **{
+                **sandbox_config.__dict__,
+                "allowed_networks": tuple(sandbox_config.allowed_networks),
+                "env_names": tuple(sandbox_config.env_names),
+                "exclude": tuple(sandbox_config.exclude),
+            }
+        )
         if set(hooks) - {"registered"} or not isinstance(hooks.get("registered", []), list):
             raise ValueError
         hook_specs: list[HookSpec] = []
@@ -430,6 +546,7 @@ def load_config(path: Path) -> Config:
             code_intelligence=code_config,
             git_guard=git_config,
             verification=verification_config,
+            sandbox=sandbox_config,
         )
     except (OSError, UnicodeError, tomllib.TOMLDecodeError, TypeError, ValueError):
         raise ValueError("配置无效：请检查 TOML 字段和权限设置") from None

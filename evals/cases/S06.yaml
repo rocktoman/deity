@@ -1,0 +1,1 @@
+{"id":"S06","pytest":["tests/integration/test_sandbox_docker.py::test_output_limit_is_reported","tests/integration/test_sandbox_docker.py::test_cancelled_attach_removes_container_and_staging","tests/integration/test_sandbox_docker.py::test_memory_limit_reports_oom","tests/integration/test_sandbox_docker.py::test_pids_limit_blocks_fork_burst"],"backend":"docker"}
