@@ -345,9 +345,16 @@ class RunService:
         baseline: Any | None = None,
         allow_dirty_paths: tuple[str, ...] = (),
         change_set_id: str | None = None,
+        plan_targets: tuple[str, ...] | None = None,
+        approved_plan_writes: bool = False,
     ) -> tuple[ToolDispatcher, GitGuardedDispatcher | None]:
+        def authorize(name: str, args: dict[str, Any]) -> bool:
+            if approved_plan_writes and name in {"write_file", "apply_patch", "delete_file"}:
+                return True
+            return self._authorize(name, args)
+
         dispatcher: ToolDispatcher = await self._mcp_dispatcher(
-            LocalToolDispatcher(approve=self._authorize)
+            LocalToolDispatcher(approve=authorize)
         )
         if self.skill_catalog is not None:
             dispatcher = SkillDispatcher(dispatcher, self.skill_catalog)
@@ -375,6 +382,7 @@ class RunService:
                 allow_dirty_paths=allow_dirty_paths,
                 require_read_before_write=self.git_guard.require_read_before_write,
                 change_set_id=change_set_id,
+                plan_targets=plan_targets,
             )
             return guarded, guarded
         return dispatcher, None
@@ -496,6 +504,8 @@ class RunService:
                 baseline=baseline,
                 allow_dirty_paths=allow_dirty,
                 change_set_id=change_set.change_set_id,
+                plan_targets=targets,
+                approved_plan_writes=True,
             )
             request = AgentRequest(
                 session_id=info["session_id"],

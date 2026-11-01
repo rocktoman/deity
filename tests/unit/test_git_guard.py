@@ -100,3 +100,22 @@ async def test_git_guard_rejects_submodule_descendants(tmp_path: Path) -> None:
         request,
     )
     assert denied is not None and denied.output == "submodule_boundary"
+
+
+@pytest.mark.asyncio
+async def test_approved_plan_limits_write_paths(tmp_path: Path) -> None:
+    snapshot = WorkspaceSnapshot(
+        "snapshot", str(tmp_path), None, (), "digest", "test", "2026-01-01T00:00:00+00:00"
+    )
+    guard = GitGuardedDispatcher(
+        LocalToolDispatcher(approve=lambda _name, _args: True),
+        object(),
+        snapshot,
+        plan_targets=("approved.py",),
+    )
+    request = AgentRequest("s", "t", str(tmp_path), "task", "fake", run_id="run")
+    denied = await guard.prepare(
+        ToolCall("write", "write_file", {"path": "unplanned.py", "content": "x"}), request
+    )
+    assert denied is not None and denied.output == "outside_approved_plan"
+    assert not (tmp_path / "unplanned.py").exists()

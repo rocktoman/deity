@@ -24,6 +24,7 @@ class GitGuardedDispatcher:
         allow_dirty_paths: tuple[str, ...] = (),
         require_read_before_write: bool = True,
         change_set_id: str | None = None,
+        plan_targets: tuple[str, ...] | None = None,
     ) -> None:
         self.delegate = delegate
         self.repository = repository
@@ -31,6 +32,7 @@ class GitGuardedDispatcher:
         self.allow_dirty_paths = set(allow_dirty_paths)
         self.require_read_before_write = require_read_before_write
         self.change_set_id = change_set_id
+        self.plan_targets = set(plan_targets) if plan_targets is not None else None
         self.run_id: str | None = None
         self.preimages: dict[tuple[str, str], str] = {}
         self._prepared: dict[tuple[str, str], dict[str, Any]] = {}
@@ -58,6 +60,8 @@ class GitGuardedDispatcher:
             except ValueError:
                 return ToolResult(call.call_id, "denied", "workspace_boundary")
             relative = path.relative_to(Path(context.workspace).resolve()).as_posix()
+            if self.plan_targets is not None and relative not in self.plan_targets:
+                return ToolResult(call.call_id, "denied", "outside_approved_plan")
             if any(
                 relative == submodule or relative.startswith(f"{submodule}/")
                 for submodule in self._submodules
