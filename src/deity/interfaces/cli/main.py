@@ -1,6 +1,7 @@
 """Deity CLI entry point."""
 
 import asyncio
+import shlex
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
@@ -11,11 +12,18 @@ from rich.console import Console
 from deity import __version__
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.application.config import load_config
+from deity.application.plan_service import PlanService
 from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
 from deity.interfaces.cli.code import code_app
 from deity.interfaces.cli.menu import choose
-from deity.interfaces.cli.plan import build_command, plan_command, plans_app
+from deity.interfaces.cli.plan import (
+    build_approved,
+    build_command,
+    confirm_build,
+    plan_command,
+    plans_app,
+)
 from deity.interfaces.cli.verify import verify_command
 
 app = typer.Typer(help="Deity AI Coding Agent Harness")
@@ -192,10 +200,11 @@ async def _interactive(service: RunService, model_name: str, session_id: str | N
     active_session = session_id or str(uuid4())
     pending_skill: str | None = None
     pending_mcp_tool: str | None = None
+    plan_mode = False
     console.print("欢迎来到 Deity，我是你的编程助手。")
     while True:
         try:
-            prompt = input("Deity> ").strip()
+            prompt = input("Deity[plan]> " if plan_mode else "Deity> ").strip()
         except EOFError:
             console.print()
             return
@@ -205,9 +214,78 @@ async def _interactive(service: RunService, model_name: str, session_id: str | N
             continue
         if prompt == "/help":
             console.print(
-                "/skill 选择 Skill；/mcp 查看并选择 MCP 工具；"
+                "/plan 进入持续计划模式；/build [计划ID] [--allow-dirty 路径] 执行已有计划；"
+                "/normal 返回普通模式；/skill 选择 Skill；/mcp 查看并选择 MCP 工具；"
                 "选择会提示模型在下一条任务中使用；/exit 或 /quit 退出"
             )
+            continue
+        if prompt == "/plan":
+            if not service.coding.plan_build_enabled or not service.coding.git_guard_enabled:
+                console.print(
+                    "Plan/Build 未启用，请在配置中开启 plan_build_enabled 和 git_guard_enabled。"
+                )
+                continue
+            plan_mode = True
+            console.print("已进入计划模式。输入任务后将展示计划并询问是否构建。")
+            continue
+        if prompt == "/normal":
+            plan_mode = False
+            console.print("已返回普通模式。")
+            continue
+        if prompt == "/build" or prompt.startswith("/build "):
+            if not service.coding.plan_build_enabled or not service.coding.git_guard_enabled:
+                console.print(
+                    "Plan/Build 未启用，请在配置中开启 plan_build_enabled 和 git_guard_enabled。"
+                )
+                continue
+            try:
+                parts = shlex.split(prompt)[1:]
+                dirty_paths: list[str] = []
+                plan_id: str | None = None
+                index = 0
+                while index < len(parts):
+                    if parts[index] == "--allow-dirty":
+                        if index + 1 >= len(parts):
+                            raise ValueError("--allow-dirty 需要文件路径")
+                        dirty_paths.append(parts[index + 1])
+                        index += 2
+                    elif plan_id is None:
+                        plan_id = parts[index]
+                        index += 1
+                    else:
+                        raise ValueError("/build 只接受一个计划 ID")
+                planner = PlanService(service)
+                if plan_id is None:
+                    candidates = await planner.buildable(active_session)
+                    selected = choose(
+                        "当前会话待执行计划",
+                        [f"{item.plan_id} {item.draft.goal}" for item in candidates],
+                    )
+                    if selected is None:
+                        continue
+                    artifact = candidates[selected]
+                else:
+                    artifact = await planner.get_buildable(plan_id, active_session)
+                if dirty_paths and any(
+                    path not in {name for step in artifact.draft.steps for name in step.files}
+                    for path in dirty_paths
+                ):
+                    raise ValueError("--allow-dirty 路径必须属于计划目标")
+                if confirm_build(artifact, tuple(dirty_paths)):
+                    result = await build_approved(service, artifact.plan_id, tuple(dirty_paths))
+                    console.print(result.final_text or "无最终回答")
+                    plan_mode = True
+                else:
+                    console.print("已取消 Build，计划仍可再次查看和批准。")
+            except (
+                ValueError,
+                OSError,
+                KeyError,
+                ModelFailure,
+                ProtocolError,
+                BudgetExceeded,
+            ) as exc:
+                console.print(f"Build 失败：{_run_error_message(exc)}", style="red")
             continue
         if prompt == "/skill" or prompt.startswith("/skill "):
             skills = service.skills_list()
@@ -267,7 +345,18 @@ async def _interactive(service: RunService, model_name: str, session_id: str | N
             task = f"{''.join(instructions)}任务：{prompt}" if instructions else prompt
             pending_skill = None
             pending_mcp_tool = None
-            result = await service.run(task, model_name=model_name, session_id=active_session)
+            if plan_mode:
+                artifact = await PlanService(service).create(
+                    task, model_name=model_name, session_id=active_session
+                )
+                console.print(f"计划 ID：{artifact.plan_id}")
+                if confirm_build(artifact):
+                    result = await build_approved(service, artifact.plan_id)
+                else:
+                    console.print("已保留计划；输入 /build 可稍后执行。")
+                    continue
+            else:
+                result = await service.run(task, model_name=model_name, session_id=active_session)
         except (ModelFailure, ProtocolError, BudgetExceeded, ValueError, OSError) as exc:
             console.print(f"运行失败：{_run_error_message(exc)}", style="red")
             continue

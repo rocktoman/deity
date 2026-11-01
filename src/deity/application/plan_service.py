@@ -1,5 +1,7 @@
 """Application entry point for immutable read-only Plan Runs."""
 
+from datetime import UTC, datetime
+
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.application.run_service import RunService
 from deity.core.contracts.planning import ExecutionMode, PlanArtifact
@@ -40,5 +42,40 @@ class PlanService:
         repo = await SQLiteSessionRepository.open(self.runs.db_path)
         try:
             return await repo.list_plans(session_id)
+        finally:
+            await repo.close()
+
+    async def buildable(self, session_id: str) -> tuple[PlanArtifact, ...]:
+        """List draft plans belonging to this session and workspace."""
+        repo = await SQLiteSessionRepository.open(self.runs.db_path)
+        try:
+            candidates = await repo.list_plans(session_id)
+            buildable: list[PlanArtifact] = []
+            for item in candidates:
+                if item.status != "draft":
+                    continue
+                age = (datetime.now(UTC) - datetime.fromisoformat(item.created_at)).total_seconds()
+                if age > self.runs.coding.plan_ttl_seconds:
+                    continue
+                snapshot = await repo.get_workspace_snapshot(item.workspace_snapshot_id)
+                if snapshot.workspace_root == str(self.runs.workspace):
+                    buildable.append(item)
+            return tuple(buildable)
+        finally:
+            await repo.close()
+
+    async def get_buildable(self, plan_id: str, session_id: str) -> PlanArtifact:
+        """Reject another session/workspace or a non-draft plan."""
+        repo = await SQLiteSessionRepository.open(self.runs.db_path)
+        try:
+            artifact = await repo.get_plan(plan_id)
+            snapshot = await repo.get_workspace_snapshot(artifact.workspace_snapshot_id)
+            if (
+                artifact.session_id != session_id
+                or artifact.status != "draft"
+                or snapshot.workspace_root != str(self.runs.workspace)
+            ):
+                raise ValueError("计划不属于当前会话或工作区，或不可执行")
+            return artifact
         finally:
             await repo.close()

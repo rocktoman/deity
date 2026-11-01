@@ -46,8 +46,7 @@ def plan_command(
             )
         )
         console.print(f"{artifact.plan_id} [{artifact.status}] {artifact.draft.goal}")
-        _show_plan(artifact)
-        if typer.confirm("批准此计划并立即执行 Build？", default=False):
+        if confirm_build(artifact):
             result = _execute_build(
                 settings,
                 workdir,
@@ -114,8 +113,9 @@ def plans_show(
         raise typer.Exit(code=2) from None
 
 
-def _show_plan(artifact: PlanArtifact, allow_dirty: tuple[str, ...] = ()) -> None:
-    console.print(f"计划：{artifact.draft.goal}")
+def show_plan(artifact: PlanArtifact, allow_dirty: tuple[str, ...] = ()) -> None:
+    """Display the plan and its write scope."""
+    console.print(f"计划 {artifact.plan_id}：{artifact.draft.goal}")
     for step in artifact.draft.steps:
         console.print(f"{step.ordinal}. {step.title}：{step.description}")
         console.print(f"   目标文件：{', '.join(step.files) or '无'}")
@@ -123,6 +123,22 @@ def _show_plan(artifact: PlanArtifact, allow_dirty: tuple[str, ...] = ()) -> Non
         console.print(f"风险：{'；'.join(artifact.draft.risks)}")
     if allow_dirty:
         console.print(f"允许修改已有改动：{', '.join(allow_dirty)}")
+
+
+def confirm_build(artifact: PlanArtifact, allow_dirty: tuple[str, ...] = ()) -> bool:
+    """Ask once for approval of the displayed plan."""
+    show_plan(artifact, allow_dirty)
+    return typer.confirm("批准此计划并执行 Build？", default=False)
+
+
+async def build_approved(
+    runner: RunService, plan_id: str, allow_dirty: tuple[str, ...] = ()
+) -> AgentResult:
+    """Start and execute a new Build Run after user confirmation."""
+    started = await BuildService(
+        runner.db_path, runner.workspace, plan_ttl_seconds=runner.coding.plan_ttl_seconds
+    ).start(plan_id, allow_dirty_paths=allow_dirty)
+    return await runner.run_build(started.build_run_id, plan_id)
 
 
 def _execute_build(
@@ -139,13 +155,7 @@ def _execute_build(
 
     runner = RunService.from_config(settings, db_path=db_path, workspace=workdir, approve=approve)
 
-    async def execute() -> AgentResult:
-        started = await BuildService(
-            db_path, workdir, plan_ttl_seconds=settings.coding.plan_ttl_seconds
-        ).start(plan_id, allow_dirty_paths=allow_dirty)
-        return await runner.run_build(started.build_run_id, plan_id)
-
-    return asyncio.run(execute())
+    return asyncio.run(build_approved(runner, plan_id, allow_dirty))
 
 
 def build_command(
@@ -173,8 +183,7 @@ def build_command(
         artifact = asyncio.run(load_plan())
         if artifact.status != "draft":
             raise ValueError("plan is not buildable")
-        _show_plan(artifact, tuple(allow_dirty or ()))
-        if not typer.confirm("批准此计划并执行 Build？", default=False):
+        if not confirm_build(artifact, tuple(allow_dirty or ())):
             console.print("已取消 Build，计划仍可再次查看和批准。")
             return
 

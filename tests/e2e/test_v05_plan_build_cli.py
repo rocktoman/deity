@@ -129,8 +129,28 @@ def test_plan_show_and_build_cli(tmp_path: Path) -> None:
         (tmp_path / "feature.py").write_text('VALUE = "old"\n')
         automatic = cli("plan", "再次更新示例", *common, answer="y\n")
         assert "V0.5 CLI 完成" in automatic
-        assert automatic.count("批准此计划并立即执行 Build？") == 1
+        assert automatic.count("批准此计划并执行 Build？") == 1
         assert "允许本次调用" not in automatic
+        assert (tmp_path / "feature.py").read_text() == 'VALUE = "new"\n'
+        (tmp_path / "feature.py").write_text('VALUE = "old"\n')
+        interactive = cli(
+            "run",
+            *common,
+            answer=f"/plan\n/build {plan_id}\n更新示例\nn\n/build\n1\ny\n/normal\n/exit\n",
+        )
+        assert "已进入计划模式" in interactive
+        assert "计划不属于当前会话" in interactive
+        assert "已保留计划" in interactive
+        assert "当前会话待执行计划" in interactive
+        assert "V0.5 CLI 完成" in interactive
+        assert "已返回普通模式" in interactive
+        assert "允许本次调用" not in interactive
+        assert (tmp_path / "feature.py").read_text() == 'VALUE = "new"\n'
+        (tmp_path / "feature.py").write_text('VALUE = "old"\n')
+        immediate = cli("run", *common, answer="/plan\n更新示例\ny\n/exit\n")
+        assert "V0.5 CLI 完成" in immediate
+        assert immediate.count("Deity[plan]>") >= 2
+        assert "允许本次调用" not in immediate
         assert (tmp_path / "feature.py").read_text() == 'VALUE = "new"\n'
     finally:
         server.shutdown()

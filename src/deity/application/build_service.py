@@ -45,7 +45,7 @@ class BuildService:
             dirty = {
                 item.path
                 for item in baseline.files
-                if baseline.git_head is not None and item.status not in {"!"}
+                if baseline.git_head is not None and item.status not in {"!", "clean", "absent"}
             }
             blocked = sorted((dirty & set(targets)) - allowed)
             if blocked:

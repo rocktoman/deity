@@ -119,3 +119,28 @@ async def test_approved_plan_limits_write_paths(tmp_path: Path) -> None:
     )
     assert denied is not None and denied.output == "outside_approved_plan"
     assert not (tmp_path / "unplanned.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_approved_plan_can_create_target_absent_at_snapshot(tmp_path: Path) -> None:
+    snapshot = WorkspaceSnapshot(
+        "snapshot",
+        str(tmp_path),
+        "head",
+        (WorkspaceFileState("new.py", "absent"),),
+        "digest",
+        "test",
+        "2026-01-01T00:00:00+00:00",
+    )
+    guard = GitGuardedDispatcher(
+        LocalToolDispatcher(approve=lambda _name, _args: True),
+        object(),
+        snapshot,
+        plan_targets=("new.py",),
+    )
+    request = AgentRequest("s", "t", str(tmp_path), "task", "fake", run_id="run")
+    prepared = await guard.prepare(
+        ToolCall("write", "write_file", {"path": "new.py", "content": "value = 1\n"}),
+        request,
+    )
+    assert prepared is None

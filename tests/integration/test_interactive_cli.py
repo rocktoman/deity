@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from deity.application.config import Config, ModelConfig
+from deity.application.config import CodingConfig, Config, ModelConfig
 from deity.application.run_service import RunService
 from deity.core.contracts import AgentResult, ModelEvent, ModelRequest, RunStatus
 
@@ -99,6 +99,26 @@ def test_bare_deity_enters_interactive_prompt(monkeypatch: pytest.MonkeyPatch) -
     assert "Deity> reply" in result.output
     assert "Deity 交互模式" not in result.output
     assert "你>" not in result.output
+
+
+def test_plan_commands_stay_disabled_without_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    cli = importlib.import_module("deity.interfaces.cli.main")
+    calls: list[str] = []
+
+    class FakeService:
+        coding = CodingConfig()
+
+        async def run(self, task: str, **kwargs: Any) -> AgentResult:
+            calls.append(task)
+            return AgentResult("run-1", RunStatus.COMPLETED, "ok")
+
+    config = Config(model=ModelConfig("openai_compatible", "fake", "FAKE_KEY"))
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli.RunService, "from_config", lambda *args, **kwargs: FakeService())
+    result = CliRunner().invoke(cli.app, [], input="/plan\n/build\n普通任务\n/normal\n/exit\n")
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Plan/Build 未启用") == 2
+    assert calls == ["普通任务"]
 
 
 def test_run_accepts_unquoted_chinese_words(monkeypatch: pytest.MonkeyPatch) -> None:

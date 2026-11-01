@@ -42,7 +42,7 @@ class GitGuardedDispatcher:
             for item in baseline.files
             if baseline.git_head is not None and item.status not in {"!", "clean", "absent"}
         }
-        self._baseline_paths = {item.path for item in baseline.files}
+        self._baseline_paths = {item.path for item in baseline.files if item.status != "absent"}
         self._submodules = {
             item.path for item in baseline.files if item.status.startswith("submodule")
         }
