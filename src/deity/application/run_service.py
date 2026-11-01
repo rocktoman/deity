@@ -450,6 +450,19 @@ class RunService:
                 if message["role"] in {"user", "assistant"} and isinstance(message["content"], str)
             ]
             initial_messages = context.initial(task)
+            if execution_mode == ExecutionMode.PLAN:
+                initial_messages.insert(
+                    1,
+                    {
+                        "role": "system",
+                        "content": (
+                            "当前运行是只读 Plan。先按需读取工作区，完成分析后必须调用 "
+                            "submit_plan 提交结构化计划；最终文字回答不能代替计划提交。"
+                            "步骤编号从 1 连续递增，字段严格使用 ordinal/title/description/"
+                            "files/verification。工具返回 invalid_plan 时，修正参数并重新提交。"
+                        ),
+                    },
+                )
             if self.skill_catalog is not None:
                 initial_messages[-1:-1] = [
                     {

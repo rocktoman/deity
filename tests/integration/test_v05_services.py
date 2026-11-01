@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -73,6 +74,42 @@ class BuildModel:
         else:
             yield ModelEvent("text_delta", text="构建完成")
         yield ModelEvent("message_completed")
+
+
+@pytest.mark.asyncio
+async def test_invalid_model_plan_reports_rejected_submission(tmp_path: Path) -> None:
+    class InvalidPlanModel:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def stream(self, request: ModelRequest):
+            self.turn += 1
+            if self.turn == 1:
+                assert any(
+                    item["name"] == "submit_plan"
+                    and "ordinal" in item["parameters"]["properties"]["steps"]["items"]["required"]
+                    for item in request.tools
+                )
+                yield ModelEvent("tool_call_started", call_id="bad-plan", name="submit_plan")
+                malformed = {
+                    **PLAN,
+                    "steps": [{"id": 1, "action": "修改", "files": ["feature.py"]}],
+                }
+                yield ModelEvent(
+                    "tool_call_arguments_delta", call_id="bad-plan", text=json.dumps(malformed)
+                )
+            else:
+                yield ModelEvent("text_delta", text="计划完成")
+            yield ModelEvent("message_completed")
+
+    service = RunService(
+        db_path=tmp_path / "deity.db",
+        workspace=tmp_path,
+        model=InvalidPlanModel(),
+        coding=CodingConfig(plan_build_enabled=True),
+    )
+    with pytest.raises(ValueError, match="计划提交被拒绝"):
+        await PlanService(service).create("规划修改", model_name="fake")
 
 
 @pytest.mark.asyncio

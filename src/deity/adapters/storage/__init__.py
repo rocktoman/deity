@@ -617,6 +617,15 @@ class SQLiteSessionRepository:
             raise KeyError(run_id)
         return await self.get_plan(rows[0][0])
 
+    async def rejected_plan_submission(self, run_id: str) -> bool:
+        """Distinguish a rejected submit_plan from a run that never submitted one."""
+        async with self.db.execute(
+            "SELECT 1 FROM tool_executions WHERE run_id=? AND tool_name='submit_plan' "
+            "AND status='error' LIMIT 1",
+            (run_id,),
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
     async def list_plans(self, session_id: str | None = None) -> tuple[PlanArtifact, ...]:
         """List plans without exposing raw SQLite rows."""
         query = "SELECT id FROM plans"

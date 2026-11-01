@@ -16,11 +16,47 @@ _SUBMIT_PLAN_SCHEMA = {
     "required": ["schema_version", "goal", "assumptions", "steps", "risks", "verification"],
     "properties": {
         "schema_version": {"type": "integer", "const": 1},
-        "goal": {"type": "string"},
-        "assumptions": {"type": "array", "items": {"type": "string"}},
-        "steps": {"type": "array", "items": {"type": "object"}},
-        "risks": {"type": "array", "items": {"type": "string"}},
-        "verification": {"type": "array", "items": {"type": "string"}},
+        "goal": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "assumptions": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+        },
+        "steps": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["ordinal", "title", "description", "files", "verification"],
+                "properties": {
+                    "ordinal": {"type": "integer", "minimum": 1},
+                    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "description": {"type": "string", "minLength": 1, "maxLength": 4000},
+                    "files": {
+                        "type": "array",
+                        "maxItems": 100,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+                    },
+                    "verification": {
+                        "type": "array",
+                        "maxItems": 30,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+                    },
+                },
+            },
+        },
+        "risks": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+        },
+        "verification": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+        },
     },
 }
 
@@ -45,7 +81,10 @@ class PlanningDispatcher:
         return allowed + (
             {
                 "name": "submit_plan",
-                "description": "Submit the complete structured plan; this does not modify workspace files",
+                "description": (
+                    "提交完整只读计划。每个步骤必须有连续的 ordinal(从1开始)、title、"
+                    "description、files 和 verification；不要使用 id/action 等替代字段。"
+                ),
                 "parameters": _SUBMIT_PLAN_SCHEMA,
             },
         )
@@ -60,8 +99,8 @@ class PlanningDispatcher:
                 if len(encoded) > 64_000:
                     raise ValueError("plan too large")
                 draft = parse_plan_draft(call.arguments)
-            except (TypeError, ValueError, UnicodeError):
-                return ToolResult(call.call_id, "error", "invalid_plan")
+            except (TypeError, ValueError, UnicodeError) as exc:
+                return ToolResult(call.call_id, "error", f"invalid_plan: {exc}")
             self._drafts[(context.run_id, call.call_id)] = draft
             return None
         prepare = getattr(self.delegate, "prepare", None)

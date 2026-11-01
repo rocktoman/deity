@@ -3,6 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from deity.adapters.git import GitWorkspaceAdapter
 from deity.adapters.storage import SQLiteSessionRepository
@@ -61,6 +62,13 @@ async def test_plan_dispatcher_denies_effects_and_persists_artifact(tmp_path: Pa
         names = {item["name"] for item in dispatcher.definitions()}
         assert "submit_plan" in names and "read_file" in names
         assert not {"write_file", "apply_patch", "delete_file", "shell"} & names
+        schema = next(
+            item["parameters"] for item in dispatcher.definitions() if item["name"] == "submit_plan"
+        )
+        assert Draft202012Validator(schema).is_valid(_payload())
+        malformed = _payload()
+        malformed["steps"] = [{"id": 1, "action": "修改", "files": ["feature.py"]}]
+        assert not Draft202012Validator(schema).is_valid(malformed)
 
         denied = await dispatcher.prepare(
             ToolCall("write-1", "write_file", {"path": "blocked.txt", "content": "x"}),

@@ -27,7 +27,11 @@ class PlanService:
         try:
             return await repo.plan_for_run(result.run_id)
         except KeyError:
-            raise ValueError("plan run completed without submit_plan") from None
+            if await repo.rejected_plan_submission(result.run_id):
+                raise ValueError(
+                    "计划提交被拒绝：模型生成的步骤不符合结构要求；请重试 Plan。"
+                ) from None
+            raise ValueError("模型未提交结构化计划；请重试 Plan。") from None
         finally:
             await repo.close()
 
