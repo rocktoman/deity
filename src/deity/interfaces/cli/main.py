@@ -476,9 +476,16 @@ def doctor(
 def tui(
     config: Annotated[Path | None, typer.Option("--config", help="TOML 配置路径")] = None,
     workspace: Annotated[Path | None, typer.Option("--workspace", help="工作区路径")] = None,
+    task: Annotated[str | None, typer.Option("--task", help="启动新 Run 的任务")] = None,
+    run_id: Annotated[str | None, typer.Option("--run-id", help="接入已有 Run")] = None,
 ) -> None:
-    """启动 Textual TUI；未安装 Textual 时提示安装方式并退出码 2。"""
+    """启动 Textual TUI；未安装 Textual 时提示安装方式并退出码 2。
+
+    经 ClientService 订阅事件喂给 TuiApp：a/d 批准/拒绝首个待决审批，
+    c 取消当前 Run，r 恢复当前/指定 Run。
+    """
     try:
+        from deity.application.client_service import ClientService
         from deity.interfaces.tui.app import run_tui
     except ImportError:
         console.print(
@@ -486,15 +493,26 @@ def tui(
             style="red",
         )
         raise typer.Exit(code=2) from None
-    workdir = (workspace or Path.cwd()).resolve(strict=True)
-    settings = _resolve_config(config, workdir)
-    if not settings.tui.enabled:
-        console.print(
-            "TUI 未启用：请在配置中设置 [tui] enabled = true，或用纯 CLI 运行。",
-            style="red",
+    try:
+        workdir = (workspace or Path.cwd()).resolve(strict=True)
+        settings = _resolve_config(config, workdir)
+        if not settings.tui.enabled:
+            console.print(
+                "TUI 未启用：请在配置中设置 [tui] enabled = true，或用纯 CLI 运行。",
+                style="red",
+            )
+            raise typer.Exit(code=2) from None
+        model_name = settings.model.name if settings.model is not None else "fake"
+        service = RunService.from_config(
+            settings,
+            db_path=Path.home() / ".local/share/deity/deity.db",
+            workspace=workdir,
         )
+        client = ClientService(service)
+        run_tui(client_service=client, run_id=run_id, task=task, model_name=model_name)
+    except (ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
         raise typer.Exit(code=2) from None
-    run_tui()
 
 
 @app.command("resume")
