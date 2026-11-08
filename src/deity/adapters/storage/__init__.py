@@ -216,11 +216,22 @@ class SQLiteSessionRepository:
                         "UPDATE runs SET status='interrupted', ended_at=datetime('now') WHERE id=?",
                         (row["id"],),
                     )
+                    async with db.execute(
+                        "SELECT call_id FROM tool_executions WHERE run_id=? AND status='pending'",
+                        (row["id"],),
+                    ) as pending_cursor:
+                        pending_tools = await pending_cursor.fetchall()
                     await db.execute(
                         "UPDATE tool_executions SET status='unknown' "
                         "WHERE run_id=? AND status='pending'",
                         (row["id"],),
                     )
+                    for pending in pending_tools:
+                        await repo._event(
+                            row["id"],
+                            "ToolOutcomeUnknown",
+                            {"call_id": pending[0], "reason": "process_interrupted"},
+                        )
                     async with db.execute(
                         "SELECT id FROM sandbox_executions WHERE run_id=? "
                         "AND status IN ('prepared','created')",
