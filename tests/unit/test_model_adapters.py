@@ -16,6 +16,22 @@ async def chunks(*items):
         yield item
 
 
+def test_anthropic_provider_survives_bracketed_ipv6_no_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NO_PROXY 含方括号 IPv6（如 [::1]）时构造不得崩溃。
+
+    回归：anthropic 2.3.0 自带的 get_environment_proxies 是旧版 httpx 逻辑复刻，
+    [::1] 会落入通配分支拼出 all://*[::1]，httpx2 解析报 Invalid port: ':1]'。
+    """
+    monkeypatch.setenv(
+        "NO_PROXY", "localhost,127.0.0.1,::1,[::1],198.19.0.1,[fd8b:4f84:7d32:99::1]"
+    )
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1,::1,[::1]")
+    provider = AnthropicProvider(api_key="<redacted>", model="test")
+    assert provider.model == "test"
+
+
 @pytest.mark.asyncio
 async def test_openai_fragmented_tool_call() -> None:
     provider = OpenAICompatibleProvider(api_key="test", model="test-model")

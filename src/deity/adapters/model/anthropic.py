@@ -3,10 +3,27 @@
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
+import httpx2
 from anthropic import APIConnectionError, APIStatusError, APITimeoutError, AsyncAnthropic
 
 from deity.core.contracts import ModelCapabilities, ModelEvent, ModelRequest
 from deity.core.runtime import ModelFailure
+
+
+def _default_http_client() -> httpx2.AsyncClient:
+    """用 httpx2 自身的代理解析构造传输层。
+
+    anthropic 2.3.0 自带的 get_environment_proxies（anthropic/_utils/_httpx.py）
+    是旧版 httpx 逻辑的复刻：缺少方括号 IPv6 分支，NO_PROXY 里的 [::1] 会落入
+    通配分支，拼出 all://*[::1]，httpx2 解析时报 Invalid port: ':1]'，
+    导致 AsyncAnthropic() 构造即崩溃。httpx2 自身的解析会丢弃不可解析的条目，
+    因此直接传 http_client 绕过 SDK 的解析；超时/连接限制沿用 SDK 默认值。
+    """
+    return httpx2.AsyncClient(
+        timeout=httpx2.Timeout(10 * 60, connect=5.0),
+        limits=httpx2.Limits(max_connections=1000, max_keepalive_connections=100),
+        follow_redirects=True,
+    )
 
 
 class AnthropicProvider:
@@ -14,7 +31,9 @@ class AnthropicProvider:
 
     def __init__(self, *, api_key: str, model: str) -> None:
         self.model = model
-        self.client = AsyncAnthropic(api_key=api_key, max_retries=0)
+        self.client = AsyncAnthropic(
+            api_key=api_key, max_retries=0, http_client=_default_http_client()
+        )
 
     def capabilities(self) -> ModelCapabilities:
         """Declare the supported baseline features."""
