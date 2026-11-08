@@ -274,10 +274,16 @@ def create_chat_input(
 ) -> PlainInput | PromptToolkitInput:
     """创建输入层：TTY + 已装 prompt_toolkit + 非 dumb 终端时用增强输入。
 
+    [chat] enabled=false 时强制回落 PlainInput（旧 input() 循环）。
     否则回落 PlainInput（现有 input() 行为）。tty=None 时自动检测。
     """
     use_tty = tty if tty is not None else _detect_tty()
-    if not _HAS_PROMPT_TOOLKIT or not use_tty or os.environ.get("TERM") == "dumb":
+    if (
+        not config.enabled
+        or not _HAS_PROMPT_TOOLKIT
+        or not use_tty
+        or os.environ.get("TERM") == "dumb"
+    ):
         return PlainInput()
     return PromptToolkitInput(
         config,

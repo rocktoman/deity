@@ -115,7 +115,10 @@ class ChatSession:
         return f"模型 {self.model_name} · {mode} · 会话 {self.state.session_id[:8]}"
 
     def _use_streaming(self) -> bool:
-        """是否走流式渲染：配置开启 + 终端输出 + 非 dumb + 服务有 run_stream。"""
+        """是否走流式渲染：[chat] 开启 + streaming 开启 + 终端输出 + 非 dumb
+        + 服务有 run_stream；任一不满足即回落整段打印。"""
+        if not self.config.enabled:
+            return False
         if not self.config.streaming:
             return False
         if os.environ.get("TERM") == "dumb":
