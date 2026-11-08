@@ -1,0 +1,1 @@
+{"dataset_version":"v1","name":"compaction-ab","repetitions":3,"variants":[{"harness_patch":{"compaction_enabled":false},"name":"off"},{"harness_patch":{"compaction_enabled":true},"name":"on"}]}
