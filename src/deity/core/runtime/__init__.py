@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import itertools
 import json
 import os
 import random
@@ -9,6 +10,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -33,6 +35,7 @@ from deity.core.contracts import (
     ToolDispatcher,
     ToolResult,
 )
+from deity.core.contracts.client import ClientEvent
 from deity.core.hooks import HookPoint, HookRegistry
 from deity.core.state import transition
 from deity.core.storage import InMemorySessionRepository
@@ -103,6 +106,28 @@ class RetryPolicy:
         )
 
 
+def _emit_model_event(event: ModelEvent, emit: Callable[[str, dict[str, Any]], None]) -> None:
+    """把一条 ModelEvent 翻译为 live ClientEvent 的 kind/payload（ADR-016）。"""
+    if event.kind == "text_delta":
+        emit("text_delta", {"text": event.text})
+    elif event.kind == "tool_call_started":
+        emit("tool_call_started", {"call_id": event.call_id, "name": event.name})
+    elif event.kind == "tool_call_arguments_delta":
+        emit("tool_call_arguments_delta", {"call_id": event.call_id, "text": event.text})
+    elif event.kind == "message_completed":
+        payload: dict[str, Any] = {}
+        if event.finish_reason is not None:
+            payload["finish_reason"] = event.finish_reason
+        emit("message_completed", payload)
+    elif event.kind == "usage":
+        emit(
+            "usage",
+            {"input_tokens": event.input_tokens, "output_tokens": event.output_tokens},
+        )
+    elif event.kind == "error":
+        emit("error", {})
+
+
 class AgentLoop:
     """Collect complete model turns, then execute tool calls serially."""
 
@@ -136,16 +161,27 @@ class AgentLoop:
         return True
 
     async def run(
-        self, request: AgentRequest, initial_messages: list[dict[str, Any]] | None = None
+        self,
+        request: AgentRequest,
+        initial_messages: list[dict[str, Any]] | None = None,
+        *,
+        live_event_sink: Callable[[ClientEvent], None] | None = None,
     ) -> AgentResult:
-        """Run a task with a single owner and bounded model/tool turns."""
+        """Run a task with a single owner and bounded model/tool turns.
+
+        live_event_sink 是可选的同步观测回调（ADR-016）：收到每条模型事件
+        与工具完成事件的翻译版 ClientEvent；为 None 时行为与现状一致，
+        回调抛错也不影响 Run。
+        """
         request = replace(request, user_text=normalize_unicode(request.user_text))
         if min(request.max_turns, request.max_tool_calls, request.deadline_seconds) <= 0:
             raise ValueError("运行预算必须大于零")
         if self._owner.locked():
             raise RuntimeError("AgentLoop already has an active run")
         async with self._owner:
-            return await self._run_owned(request, initial_messages=initial_messages)
+            return await self._run_owned(
+                request, initial_messages=initial_messages, live_event_sink=live_event_sink
+            )
 
     async def run_existing(
         self,
@@ -153,24 +189,32 @@ class AgentLoop:
         run_id: str,
         messages: list[dict[str, Any]],
         budget: dict[str, Any],
+        *,
+        live_event_sink: Callable[[ClientEvent], None] | None = None,
     ) -> AgentResult:
         """Execute a newly created successor run from a verified checkpoint."""
         if self._owner.locked():
             raise RuntimeError("AgentLoop already has an active run")
         async with self._owner:
-            return await self._run_owned(request, run_id, messages, budget)
+            return await self._run_owned(
+                request, run_id, messages, budget, live_event_sink=live_event_sink
+            )
 
     async def run_created(
         self,
         request: AgentRequest,
         run_id: str,
         messages: list[dict[str, Any]],
+        *,
+        live_event_sink: Callable[[ClientEvent], None] | None = None,
     ) -> AgentResult:
         """Execute a pre-created Run with a fresh budget, such as Plan to Build."""
         if self._owner.locked():
             raise RuntimeError("AgentLoop already has an active run")
         async with self._owner:
-            return await self._run_owned(request, run_id, messages, None)
+            return await self._run_owned(
+                request, run_id, messages, None, live_event_sink=live_event_sink
+            )
 
     async def _run_owned(
         self,
@@ -178,6 +222,8 @@ class AgentLoop:
         existing_run_id: str | None = None,
         initial_messages: list[dict[str, Any]] | None = None,
         initial_budget: dict[str, Any] | None = None,
+        *,
+        live_event_sink: Callable[[ClientEvent], None] | None = None,
     ) -> AgentResult:
         run_id = existing_run_id or await self._repository.create_run(request)
         self._active_run_id = run_id
@@ -185,11 +231,32 @@ class AgentLoop:
         lease = await self._repository.acquire_lease(run_id, f"{os.getpid()}:{uuid4()}")
         current = asyncio.current_task()
         heartbeat = asyncio.create_task(self._heartbeat(lease, current))
+        seq_counter = itertools.count(1)
+
+        def emit(kind: str, payload: dict[str, Any]) -> None:
+            """把一条 live 事件交给观测回调；回调抛错时丢弃，不影响 Run。
+
+            seq 只在本次 live 流内单调（自 1 起），不是 SQLite 的 sequence，
+            不得与持久化订阅按 seq 合并（ADR-016）。
+            """
+            if live_event_sink is None:
+                return
+            event = ClientEvent(
+                seq=next(seq_counter),
+                run_id=run_id,
+                kind=kind,
+                payload=payload,
+                created_at=datetime.now(UTC).isoformat(),
+            )
+            # 观测端失败不影响 Run 结果。
+            with suppress(Exception):
+                live_event_sink(event)
+
         try:
             status = transition(RunStatus.CREATED, RunStatus.RUNNING)
             await self._repository.set_status(run_id, status, epoch=lease.epoch)
             result = await self._execute(
-                request, run_id, lease.epoch, initial_messages, initial_budget
+                request, run_id, lease.epoch, initial_messages, initial_budget, emit=emit
             )
         except asyncio.CancelledError:
             await asyncio.wait_for(
@@ -228,6 +295,8 @@ class AgentLoop:
         epoch: int,
         initial_messages: list[dict[str, Any]] | None = None,
         initial_budget: dict[str, Any] | None = None,
+        *,
+        emit: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> AgentResult:
         request = replace(request, run_id=run_id)
         self._config_fingerprint = request.config_fingerprint()
@@ -322,7 +391,9 @@ class AgentLoop:
                 )
                 try:
                     text, calls, usage = await asyncio.wait_for(
-                        self._collect(self._tracked_stream(self._model.stream(model_request))),
+                        self._collect(
+                            self._tracked_stream(self._model.stream(model_request), emit=emit)
+                        ),
                         timeout=max(0.001, deadline - time.monotonic()),
                     )
                     calls = [
@@ -429,6 +500,15 @@ class AgentLoop:
                         result = prepared_result
                     tool_count += 1
                     await self._repository.record_tool(run_id, result, epoch=epoch)
+                    if emit is not None:
+                        emit(
+                            "tool_call_completed",
+                            {
+                                "call_id": call.call_id,
+                                "name": call.name,
+                                "status": result.status,
+                            },
+                        )
                     after_persist = getattr(self._tools, "after_persist", None)
                     if callable(after_persist):
                         await after_persist(call, result, request)
@@ -498,7 +578,15 @@ class AgentLoop:
         return veto
 
     @staticmethod
-    async def _tracked_stream(stream: AsyncIterator[ModelEvent]) -> AsyncIterator[ModelEvent]:
+    async def _tracked_stream(
+        stream: AsyncIterator[ModelEvent],
+        *,
+        emit: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> AsyncIterator[ModelEvent]:
+        """透传模型流；有 emit 时把每个 ModelEvent 翻译为 live ClientEvent。
+
+        翻译只做观测，不改流内容与顺序；_collect 仍是唯一的协议校验点。
+        """
         semantic_output = False
         try:
             async for event in stream:
@@ -509,6 +597,8 @@ class AgentLoop:
                     "message_completed",
                 }:
                     semantic_output = True
+                if emit is not None:
+                    _emit_model_event(event, emit)
                 yield event
         except ModelFailure as exc:
             if semantic_output:

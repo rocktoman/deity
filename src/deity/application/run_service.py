@@ -7,9 +7,10 @@ import inspect
 import json
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -61,6 +62,7 @@ from deity.core.contracts import (
     approval_args_summary,
     approval_id_for,
 )
+from deity.core.contracts.client import ClientEvent
 from deity.core.contracts.delegation import (
     DelegationRequest,
     ReadOnlyAgentProfile,
@@ -828,8 +830,13 @@ class RunService:
         run_id: str | None = None,
         event_sink: EventPublisher | None = None,
         on_run_created: Callable[[str], None] | None = None,
+        live_event_sink: Callable[[ClientEvent], None] | None = None,
     ) -> AgentResult:
-        """Execute and persist a task within the selected workspace."""
+        """Execute and persist a task within the selected workspace.
+
+        live_event_sink 是可选的 live 观测回调（ADR-016），透传给 AgentLoop；
+        为 None 时与现状完全一致。
+        """
         if self.model is None:
             raise ValueError("model is required to run")
         if execution_mode == ExecutionMode.PLAN and not self.coding.plan_build_enabled:
@@ -918,9 +925,15 @@ class RunService:
                     await repo.create_run(request, run_id=run_id)
                     if on_run_created is not None:
                         on_run_created(run_id)
-                    result = await loop.run_created(request, run_id, initial_messages)
+                    result = await loop.run_created(
+                        request, run_id, initial_messages, live_event_sink=live_event_sink
+                    )
                 else:
-                    result = await loop.run(request, initial_messages=initial_messages)
+                    result = await loop.run(
+                        request,
+                        initial_messages=initial_messages,
+                        live_event_sink=live_event_sink,
+                    )
             except BaseException:
                 if guarded is not None and guarded.run_id is not None:
                     await repo.finalize_change_set(guarded.run_id, "unknown")
@@ -962,6 +975,72 @@ class RunService:
             self._loop = None
             self._current_run_id = ""
             await repo.close()
+
+    async def run_stream(
+        self,
+        task: str,
+        *,
+        model_name: str,
+        session_id: str | None = None,
+        execution_mode: ExecutionMode = ExecutionMode.BUILD,
+    ) -> AsyncIterator[ClientEvent]:
+        """执行一次任务并以 live ClientEvent 流产出模型增量与工具完成事件。
+
+        复用 run() 的全部装配逻辑（分发器、上下文、审批链），只多接一条
+        live 事件流（ADR-016）。live 事件不写 SQLite、不参与重放；
+        结束时补一条终态 run_status 事件（payload 含 status / final_text）。
+        Run 被 cancel() 时以 status=cancelled 的终态事件正常结束；
+        其它异常在排空已发事件后原样向上传播，与 run() 的异常语义一致。
+        """
+        queue: asyncio.Queue[ClientEvent] = asyncio.Queue()
+        run_id = str(uuid4())
+        active_session = session_id or str(uuid4())
+        forwarded = 0
+        runner = asyncio.create_task(
+            self.run(
+                task,
+                model_name=model_name,
+                session_id=active_session,
+                execution_mode=execution_mode,
+                run_id=run_id,
+                live_event_sink=queue.put_nowait,
+            )
+        )
+        try:
+            while not runner.done():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.05)
+                except TimeoutError:
+                    continue
+                forwarded += 1
+                yield event
+            while not queue.empty():
+                forwarded += 1
+                yield queue.get_nowait()
+        except asyncio.CancelledError:
+            runner.cancel()
+            raise
+        finally:
+            if not runner.done():
+                runner.cancel()
+        try:
+            result = runner.result()
+        except asyncio.CancelledError:
+            yield ClientEvent(
+                seq=forwarded + 1,
+                run_id=run_id,
+                kind="run_status",
+                payload={"status": RunStatus.CANCELLED.value, "final_text": None},
+                created_at=datetime.now(UTC).isoformat(),
+            )
+            return
+        yield ClientEvent(
+            seq=forwarded + 1,
+            run_id=run_id,
+            kind="run_status",
+            payload={"status": result.status.value, "final_text": result.final_text},
+            created_at=datetime.now(UTC).isoformat(),
+        )
 
     async def run_build(self, build_run_id: str, plan_id: str) -> AgentResult:
         """Execute a pre-created Build Run without accepting requirement changes."""
