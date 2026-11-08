@@ -90,6 +90,15 @@ CLI → Application → Agent Runtime
 | [V0.7 实施计划](docs/03-development/v0.7-implementation-plan.md) | 只读委派、预算、SQLite v6、并发与评估 |
 | [ADR-013](docs/02-architecture/adr-013-v0.7-readonly-delegation.md) | 只读子 Agent 与父子 Run 安全边界 |
 | [ADR-014](docs/02-architecture/adr-014-v0.8-client-protocol.md) | V0.8 统一客户端协议：SQLite 轮询与 schema_version 演进 |
+| [ADR-015](docs/02-architecture/adr-015-v1.0-compat.md) | V1.0 冻结公开 API 与兼容承诺：semver 与弃用窗口 |
+| [兼容政策](docs/03-development/compatibility-policy.md) | 兼容矩阵（OS/Python/provider）与 0.1.0 → 1.0.0 迁移指南 |
+| [发布清单](docs/03-development/release-checklist.md) | V1.0 发布清单：版本、CHANGELOG、校验和、回滚 |
+| [升级/回滚指南](docs/03-development/upgrade-rollback-guide.md) | 备份 deity.db、前向迁移、回滚步骤 |
+| [威胁模型](docs/02-architecture/threat-model.md) | V1.0 威胁建模：注入、恶意 repo、权限提升、路径穿越、密钥外泄、MCP、容器 |
+| [SECURITY.md](SECURITY.md) | 默认安全配置、披露流程、支持版本 |
+| [V1.0 Release Gate](docs/04-evaluation/v1.0-release-gate.md) | 本版门禁总表与 Known Limitations |
+| [V1.0 候选验收记录](docs/04-evaluation/v1.0-candidate-2026-11-09.md) | 本地测试、eval 运行器与未运行项 |
+| [V1.0 演示](docs/04-evaluation/v1.0-demo.sh) | 安装→配置→分析→修改→验证→恢复端到端（FakeModel 离线） |
 | [V0.8 使用说明](docs/03-development/v0.8-usage.md) | 统一客户端协议、TUI、配置优先级与 doctor |
 | [V0.7 使用说明](docs/03-development/v0.7-usage.md) | 委派配置、运行树、取消与回退 |
 | [ADR-012](docs/02-architecture/adr-012-v0.6-execution-sandbox.md) | 沙箱威胁模型、隔离边界与恢复决策 |
