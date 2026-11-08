@@ -1479,9 +1479,9 @@ class SQLiteSessionRepository:
                 raise
         await self._publish(run_id, "ModelTurnCompleted")
 
-    async def create_run(self, request: AgentRequest) -> str:
+    async def create_run(self, request: AgentRequest, run_id: str | None = None) -> str:
         """Create session/task if needed and persist a new run atomically."""
-        run_id = str(uuid4())
+        run_id = run_id or str(uuid4())
         async with self._lock:
             await self.db.execute("BEGIN IMMEDIATE")
             try:

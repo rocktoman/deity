@@ -22,9 +22,9 @@ class InMemorySessionRepository:
         self.compactions: dict[str, list[tuple[int, int, str]]] = {}
         self.model_attempts: dict[str, list[dict[str, Any]]] = {}
 
-    async def create_run(self, request: AgentRequest) -> str:
+    async def create_run(self, request: AgentRequest, run_id: str | None = None) -> str:
         """Create a run in CREATED state."""
-        run_id = str(uuid4())
+        run_id = run_id or str(uuid4())
         self.statuses[run_id] = RunStatus.CREATED
         self.messages[run_id] = [{"role": "user", "content": request.user_text}]
         return run_id

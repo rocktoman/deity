@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -47,6 +48,9 @@ from deity.core.context.reliable import normalize_unicode
 from deity.core.contracts import (
     AgentRequest,
     AgentResult,
+    ApprovalPort,
+    ApprovalRequest,
+    EventPublisher,
     ExecutionMode,
     ModelProvider,
     RecoveryDecision,
@@ -54,6 +58,8 @@ from deity.core.contracts import (
     ToolCall,
     ToolDispatcher,
     ToolResult,
+    approval_args_summary,
+    approval_id_for,
 )
 from deity.core.contracts.delegation import (
     DelegationRequest,
@@ -102,11 +108,15 @@ class RunService:
         coding_fingerprint: str = "",
         sandbox: SandboxConfig | None = None,
         multi_agent: MultiAgentConfig | None = None,
+        approval_port: ApprovalPort | None = None,
     ) -> None:
         self.db_path = db_path
         self.workspace = workspace.resolve(strict=True)
         self.model = model
         self.approve = approve
+        self.approval_port = approval_port
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._current_run_id: str = ""
         self.limits = limits or RunConfig()
         self.permission = permission or PermissionConfig()
         self.context_window_tokens = context_window_tokens
@@ -189,6 +199,24 @@ class RunService:
             return False
         if policy == "auto":
             return auto_shell_allowed(args, self.workspace) if name == "shell" else True
+        if self.approval_port is not None and self._loop is not None:
+            # 同步审批回调经 to_thread 调用：把可等待端口的请求发回事件循环，
+            # 在工作线程阻塞等决定，循环线程本身不阻塞。
+            request = ApprovalRequest(
+                approval_id=approval_id_for(name, args),
+                run_id=self._current_run_id,
+                call_id="",
+                tool_name=name,
+                args=approval_args_summary(args),
+            )
+            future = asyncio.run_coroutine_threadsafe(
+                self.approval_port.request_approval(request), self._loop
+            )
+            try:
+                decided = future.result(timeout=300)
+            except TimeoutError:
+                return False
+            return decided.status == "approved"
         return self.approve(name, args) if self.approve is not None else False
 
     @classmethod
@@ -797,6 +825,8 @@ class RunService:
         model_name: str,
         session_id: str | None = None,
         execution_mode: ExecutionMode = ExecutionMode.BUILD,
+        run_id: str | None = None,
+        event_sink: EventPublisher | None = None,
     ) -> AgentResult:
         """Execute and persist a task within the selected workspace."""
         if self.model is None:
@@ -804,6 +834,8 @@ class RunService:
         if execution_mode == ExecutionMode.PLAN and not self.coding.plan_build_enabled:
             raise ValueError("Plan/Build is disabled")
         task = normalize_unicode(task)
+        self._loop = asyncio.get_running_loop()
+        self._current_run_id = run_id or ""
         repo = await SQLiteSessionRepository.open(self.db_path)
         try:
             dispatcher, guarded = await self._compose_dispatcher(repo, execution_mode)
@@ -881,7 +913,11 @@ class RunService:
             initial_messages[-1:-1] = prior
             self._active_loop = loop
             try:
-                result = await loop.run(request, initial_messages=initial_messages)
+                if run_id is not None:
+                    await repo.create_run(request, run_id=run_id)
+                    result = await loop.run_created(request, run_id, initial_messages)
+                else:
+                    result = await loop.run(request, initial_messages=initial_messages)
             except BaseException:
                 if guarded is not None and guarded.run_id is not None:
                     await repo.finalize_change_set(guarded.run_id, "unknown")
@@ -908,10 +944,20 @@ class RunService:
             await repo.append_message(
                 active_session, result.run_id, "assistant", result.final_text or ""
             )
+            if event_sink is not None:
+                # 观测端失败不影响 Run 结果。
+                with suppress(Exception):
+                    await event_sink.publish(
+                        result.run_id,
+                        "RunStatusChanged",
+                        {"status": result.status.value},
+                    )
             return result
         finally:
             self._active_loop = None
             self._sandbox_active_run_id = None
+            self._loop = None
+            self._current_run_id = ""
             await repo.close()
 
     async def run_build(self, build_run_id: str, plan_id: str) -> AgentResult:

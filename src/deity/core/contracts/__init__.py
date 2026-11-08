@@ -7,6 +7,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Protocol
 
+from deity.core.contracts.client import (
+    ApprovalPort,
+    ApprovalRequest,
+    ClientError,
+    ClientEvent,
+    EventSubscription,
+    RunHandle,
+    approval_args_summary,
+    approval_id_for,
+)
 from deity.core.contracts.code_intelligence import (
     CodeSearchPort,
     CodeSearchResult,
@@ -46,11 +56,16 @@ from deity.core.contracts.workspace import (
 __all__ = (
     "AgentRequest",
     "AgentResult",
+    "ApprovalPort",
+    "ApprovalRequest",
     "ChangeSet",
     "ChangeSetRepository",
+    "ClientError",
+    "ClientEvent",
     "CodeSearchPort",
     "CodeSearchResult",
     "EventPublisher",
+    "EventSubscription",
     "ExecutionMode",
     "FileChange",
     "FinalReport",
@@ -70,6 +85,7 @@ __all__ = (
     "RecoveryDecision",
     "ReferenceQuery",
     "RunBudget",
+    "RunHandle",
     "RunLease",
     "RunStatus",
     "SessionRepository",
@@ -86,6 +102,8 @@ __all__ = (
     "WorkspaceFileState",
     "WorkspaceSnapshot",
     "WorkspaceSnapshotPort",
+    "approval_args_summary",
+    "approval_id_for",
 )
 
 
@@ -261,7 +279,7 @@ class ToolDispatcher(Protocol):
 
 
 class SessionRepository(Protocol):
-    async def create_run(self, request: AgentRequest) -> str: ...
+    async def create_run(self, request: AgentRequest, run_id: str | None = None) -> str: ...
     async def set_status(
         self, run_id: str, status: RunStatus, epoch: int | None = None
     ) -> None: ...
