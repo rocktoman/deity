@@ -12,7 +12,8 @@ from rich.console import Console
 
 from deity import __version__
 from deity.adapters.storage import SQLiteSessionRepository
-from deity.application.config import load_config
+from deity.application.config import Config, ConfigResolver, load_config
+from deity.application.doctor import run_doctor
 from deity.application.plan_service import PlanService
 from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
@@ -168,8 +169,8 @@ def run(
 ) -> None:
     """Run a coding task with an explicitly configured model."""
     try:
-        settings = load_config(config or Path.home() / ".config/deity/config.toml")
         workdir = (workspace or Path.cwd()).resolve(strict=True)
+        settings = _resolve_config(config, workdir)
         db_path = db or Path.home() / ".local/share/deity/deity.db"
 
         def approve(name: str, args: dict[str, object]) -> bool:
@@ -446,14 +447,49 @@ def delegation_tree(
         raise typer.Exit(code=2) from None
 
 
+def _resolve_config(config: Path | None, workspace: Path) -> Config:
+    """按 CLI > project > user > default 解析配置。"""
+    settings, _sources = ConfigResolver.resolve(
+        {},
+        workspace / ".deity" / "config.toml",
+        config or Path.home() / ".config/deity/config.toml",
+    )
+    return settings
+
+
 @app.command()
-def tui() -> None:
+def doctor(
+    config: Annotated[Path | None, typer.Option("--config", help="TOML 配置路径")] = None,
+    workspace: Annotated[Path | None, typer.Option("--workspace", help="工作区路径")] = None,
+) -> None:
+    """检查 Python/依赖/SQLite/Git/rg/模型凭据/Docker 与配置；有 fail 时退出码 1。"""
+    workdir = (workspace or Path.cwd()).resolve(strict=True)
+    report = run_doctor(config or Path.home() / ".config/deity/config.toml", workdir)
+    for check in report.checks:
+        console.print(f"{check.name}: {check.status} {check.detail}")
+    if report.failed:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def tui(
+    config: Annotated[Path | None, typer.Option("--config", help="TOML 配置路径")] = None,
+    workspace: Annotated[Path | None, typer.Option("--workspace", help="工作区路径")] = None,
+) -> None:
     """启动 Textual TUI；未安装 Textual 时提示安装方式并退出码 2。"""
     try:
         from deity.interfaces.tui.app import run_tui
     except ImportError:
         console.print(
             'TUI 需要安装 Textual：uv sync --extra tui 或 pip install "deity[tui]"',
+            style="red",
+        )
+        raise typer.Exit(code=2) from None
+    workdir = (workspace or Path.cwd()).resolve(strict=True)
+    settings = _resolve_config(config, workdir)
+    if not settings.tui.enabled:
+        console.print(
+            "TUI 未启用：请在配置中设置 [tui] enabled = true，或用纯 CLI 运行。",
             style="red",
         )
         raise typer.Exit(code=2) from None

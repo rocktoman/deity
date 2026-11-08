@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -89,6 +89,17 @@ class SandboxConfig:
 
 
 @dataclass(frozen=True)
+class TuiConfig:
+    enabled: bool = False
+    max_events_buffer: int = 1000
+
+
+@dataclass(frozen=True)
+class DoctorConfig:
+    check_docker: bool = False
+
+
+@dataclass(frozen=True)
 class MultiAgentConfig:
     version: int = 1
     enabled: bool = False
@@ -100,6 +111,7 @@ class MultiAgentConfig:
 
 @dataclass(frozen=True)
 class Config:
+    version: int = 1
     run: RunConfig = field(default_factory=RunConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     model: "ModelConfig | None" = None
@@ -112,6 +124,8 @@ class Config:
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     multi_agent: MultiAgentConfig = field(default_factory=MultiAgentConfig)
+    tui: TuiConfig = field(default_factory=TuiConfig)
+    doctor: DoctorConfig = field(default_factory=DoctorConfig)
 
     def multi_agent_fingerprint(self) -> str:
         """Hash delegation settings only when the feature is enabled."""
@@ -193,6 +207,7 @@ def load_config(path: Path) -> Config:
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or set(data) - {
+            "version",
             "run",
             "permission",
             "model",
@@ -205,7 +220,12 @@ def load_config(path: Path) -> Config:
             "verification",
             "sandbox",
             "multi_agent",
+            "tui",
+            "doctor",
         }:
+            raise ValueError
+        version = data.get("version", 1)
+        if type(version) is not int or version != 1:
             raise ValueError
         run = data.get("run", {})
         permission = data.get("permission", {})
@@ -219,6 +239,8 @@ def load_config(path: Path) -> Config:
         verification = data.get("verification", {})
         sandbox = data.get("sandbox", {})
         multi_agent = data.get("multi_agent", {})
+        tui = data.get("tui", {})
+        doctor = data.get("doctor", {})
         if not all(
             isinstance(item, dict)
             for item in (
@@ -234,6 +256,8 @@ def load_config(path: Path) -> Config:
                 verification,
                 sandbox,
                 multi_agent,
+                tui,
+                doctor,
             )
         ):
             raise ValueError
@@ -425,6 +449,19 @@ def load_config(path: Path) -> Config:
             or multi_agent_config.max_result_chars > 16000
         ):
             raise ValueError
+        if set(tui) - {"enabled", "max_events_buffer"}:
+            raise ValueError
+        if set(doctor) - {"check_docker"}:
+            raise ValueError
+        tui_config = TuiConfig(**tui)
+        doctor_config = DoctorConfig(**doctor)
+        if (
+            type(tui_config.enabled) is not bool
+            or type(tui_config.max_events_buffer) is not int
+            or not 10 <= tui_config.max_events_buffer <= 100_000
+            or type(doctor_config.check_docker) is not bool
+        ):
+            raise ValueError
         if set(hooks) - {"registered"} or not isinstance(hooks.get("registered", []), list):
             raise ValueError
         hook_specs: list[HookSpec] = []
@@ -580,6 +617,7 @@ def load_config(path: Path) -> Config:
         ):
             raise ValueError
         return Config(
+            version=version,
             run=RunConfig(**values, max_output_tokens=max_output_tokens, **flags, **token_limits),
             permission=policy,
             model=model_config,
@@ -592,6 +630,72 @@ def load_config(path: Path) -> Config:
             verification=verification_config,
             sandbox=sandbox_config,
             multi_agent=multi_agent_config,
+            tui=tui_config,
+            doctor=doctor_config,
         )
     except (OSError, UnicodeError, tomllib.TOMLDecodeError, TypeError, ValueError):
         raise ValueError("配置无效：请检查 TOML 字段和权限设置") from None
+
+
+_CONFIG_SECTIONS = (
+    "run",
+    "permission",
+    "model",
+    "extensions",
+    "mcp_servers",
+    "hook_specs",
+    "coding",
+    "code_intelligence",
+    "git_guard",
+    "verification",
+    "sandbox",
+    "multi_agent",
+    "tui",
+    "doctor",
+)
+
+
+def _validate_tui_doctor(config: Config) -> None:
+    """校验 CLI 覆盖后的 tui/doctor 段；无效值报不泄露密钥的错误。"""
+    if (
+        type(config.tui.enabled) is not bool
+        or type(config.tui.max_events_buffer) is not int
+        or not 10 <= config.tui.max_events_buffer <= 100_000
+        or type(config.doctor.check_docker) is not bool
+    ):
+        raise ValueError("配置无效：请检查 TOML 字段和权限设置")
+
+
+class ConfigResolver:
+    """按 CLI > project > user > default 合并配置，整段高优先级胜出。"""
+
+    @staticmethod
+    def resolve(
+        cli_overrides: dict[str, dict[str, object]],
+        project_path: Path,
+        user_path: Path,
+    ) -> tuple[Config, dict[str, str]]:
+        """返回合并后的配置与每段的来源标注。"""
+        config = Config()
+        defaults = Config()
+        sources = {section: "default" for section in _CONFIG_SECTIONS}
+        sources["version"] = "default"
+        for layer_name, path in (("user", user_path), ("project", project_path)):
+            layer = load_config(path)
+            if layer.version != 1:
+                raise ValueError("配置无效：请检查 TOML 字段和权限设置")
+            for section in _CONFIG_SECTIONS:
+                if getattr(layer, section) != getattr(defaults, section):
+                    config = replace(config, **{section: getattr(layer, section)})
+                    sources[section] = layer_name
+        for section, values in cli_overrides.items():
+            if section not in _CONFIG_SECTIONS or not isinstance(values, dict):
+                raise ValueError("配置无效：请检查 TOML 字段和权限设置")
+            current = getattr(config, section)
+            for key in values:
+                if key not in type(current).__dataclass_fields__:
+                    raise ValueError("配置无效：请检查 TOML 字段和权限设置")
+            config = replace(config, **{section: replace(current, **values)})
+            sources[section] = "cli"
+        _validate_tui_doctor(config)
+        return config, sources
