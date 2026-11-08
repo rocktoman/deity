@@ -1,5 +1,8 @@
 """Stable core DTOs and ports."""
 
+COMPAT_VERSION = 1
+"""事件与公开 API 的兼容版本；v1.0 冻结为 1，见 ADR-015。"""
+
 import hashlib
 import json
 from collections.abc import AsyncIterator
@@ -78,6 +81,7 @@ __all__ = (
     "ClientEvent",
     "CodeSearchPort",
     "CodeSearchResult",
+    "COMPAT_VERSION",
     "ComparisonReport",
     "DatasetVersion",
     "EvalCase",
