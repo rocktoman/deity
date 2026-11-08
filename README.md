@@ -56,6 +56,8 @@ CLI → Application → Agent Runtime
 | [V0.6 实施计划](docs/03-development/v0.6-implementation-plan.md) | Execution Backend、Docker 隔离、staging 工件回传与沙箱门禁 |
 | [V0.7 实施计划](docs/03-development/v0.7-implementation-plan.md) | 只读委派、预算、SQLite v6、并发与评估 |
 | [ADR-013](docs/02-architecture/adr-013-v0.7-readonly-delegation.md) | 只读子 Agent 与父子 Run 安全边界 |
+| [ADR-014](docs/02-architecture/adr-014-v0.8-client-protocol.md) | V0.8 统一客户端协议：SQLite 轮询与 schema_version 演进 |
+| [V0.8 使用说明](docs/03-development/v0.8-usage.md) | 统一客户端协议、TUI、配置优先级与 doctor |
 | [V0.7 使用说明](docs/03-development/v0.7-usage.md) | 委派配置、运行树、取消与回退 |
 | [ADR-012](docs/02-architecture/adr-012-v0.6-execution-sandbox.md) | 沙箱威胁模型、隔离边界与恢复决策 |
 | [V0.6 使用说明](docs/03-development/v0.6-usage.md) | Docker 配置、CLI、工件回传与回退 |
