@@ -59,15 +59,19 @@ async def test_legacy_db_opens_and_events_readable(tmp_path: Path) -> None:
 async def test_legacy_db_open_does_not_rewrite_old_events(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy-v07.db"
     shutil.copy(FIXTURE, db_path)
-    before = sqlite3.connect(db_path).execute(
-        "SELECT payload_json FROM events ORDER BY sequence"
-    ).fetchall()
+    before = (
+        sqlite3.connect(db_path)
+        .execute("SELECT payload_json FROM events ORDER BY sequence")
+        .fetchall()
+    )
     repo = await SQLiteSessionRepository.open(db_path)
     try:
         await repo.events(RUN_ID)
     finally:
         await repo.close()
-    after = sqlite3.connect(db_path).execute(
-        "SELECT payload_json FROM events ORDER BY sequence"
-    ).fetchall()
+    after = (
+        sqlite3.connect(db_path)
+        .execute("SELECT payload_json FROM events ORDER BY sequence")
+        .fetchall()
+    )
     assert before == after

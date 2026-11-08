@@ -71,6 +71,7 @@ from deity.core.contracts.workspace import (
 )
 
 __all__ = (
+    "COMPAT_VERSION",
     "AgentRequest",
     "AgentResult",
     "ApprovalPort",
@@ -81,7 +82,6 @@ __all__ = (
     "ClientEvent",
     "CodeSearchPort",
     "CodeSearchResult",
-    "COMPAT_VERSION",
     "ComparisonReport",
     "DatasetVersion",
     "EvalCase",

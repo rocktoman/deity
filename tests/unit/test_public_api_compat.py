@@ -11,6 +11,7 @@ import pytest
 
 import deity
 from deity.application.client_service import ClientService
+from deity.core import contracts
 from deity.core.contracts import (
     COMPAT_VERSION,
     ClientEvent,
@@ -19,7 +20,6 @@ from deity.core.contracts import (
     SessionRepository,
     ToolDispatcher,
 )
-from deity.core import contracts
 
 # 公开 API 快照：__all__ 即公开 API 清单，增删改先改 ADR。
 EXPECTED_PUBLIC_API = (

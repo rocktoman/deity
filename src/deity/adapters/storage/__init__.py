@@ -61,6 +61,15 @@ CREATE INDEX IF NOT EXISTS idx_events_run_seq ON events(run_id, sequence);
 """
 
 
+_TOKEN_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9]{8,}"),
+    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
+    re.compile(r"gho_[A-Za-z0-9]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+)
+
+
 def _redact(value: Any) -> Any:
     """Remove credential-shaped fields before storing model-visible facts."""
     if isinstance(value, dict):
@@ -78,11 +87,14 @@ def _redact(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact(item) for item in value]
     if isinstance(value, str):
-        return re.sub(
+        redacted = re.sub(
             r"(?i)\b(api_key|token|secret|password)\s*[:=]\s*[^\s,;]+",
             r"\1=[redacted]",
             normalize_unicode(value),
         )
+        for pattern in _TOKEN_PATTERNS:
+            redacted = pattern.sub("[redacted]", redacted)
+        return redacted
     return value
 
 

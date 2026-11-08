@@ -42,7 +42,9 @@ def _env() -> dict[str, str]:
 
 
 def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:  # type: ignore[type-arg]
-    return subprocess.run(args, cwd=ROOT, env=_env(), capture_output=True, text=True, **kwargs)
+    return subprocess.run(
+        args, cwd=ROOT, env=_env(), capture_output=True, text=True, check=False, **kwargs
+    )
 
 
 def test_lockfile_matches_pyproject() -> None:
