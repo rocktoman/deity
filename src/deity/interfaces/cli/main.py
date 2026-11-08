@@ -40,6 +40,8 @@ app.add_typer(skills_app, name="skills")
 app.add_typer(plans_app, name="plans")
 app.add_typer(code_app, name="code")
 app.add_typer(sandbox_app, name="sandbox")
+eval_app = typer.Typer(help="Replay eval reports and check the regression gate")
+app.add_typer(eval_app, name="eval")
 app.command("plan")(plan_command)
 app.command("build")(build_command)
 app.command("verify")(verify_command)
@@ -456,6 +458,52 @@ def _resolve_config(config: Path | None, workspace: Path) -> Config:
         loader=load_config,
     )
     return settings
+
+
+@eval_app.command("replay")
+def eval_replay(
+    target: str,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite 路径")] = None,
+    reports_dir: Annotated[Path | None, typer.Option("--reports-dir")] = None,
+) -> None:
+    """只读回放一份评估报告或一个 Run 的事件，不执行真实写入或网络副作用。"""
+    from deity.application.replay import TraceReplayer
+
+    _ = reports_dir
+    try:
+        replayer = TraceReplayer()
+        path = Path(target)
+        if path.is_file():
+            result = replayer.replay_report(path)
+        else:
+            result = replayer.replay_sqlite(
+                db or Path.home() / ".local/share/deity/deity.db", target
+            )
+        console.print(f"{result.case_id}: {result.status} 事件 {result.events_seen} 条")
+        if result.schema_mismatch:
+            console.print("schema_mismatch：旧 schema 事件只读，未迁移", style="yellow")
+        if result.blocked:
+            console.print(f"replay_blocked：{', '.join(result.blocked)}", style="yellow")
+    except (ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+
+
+@eval_app.command("gate")
+def eval_gate(
+    reports_dir: Annotated[Path | None, typer.Option("--reports-dir")] = None,
+) -> None:
+    """检查关键安全/协议门禁；任一失败即 gate 失败，退出码 1。"""
+    from deity.application.regression_gate import RegressionGate
+
+    reports = reports_dir or Path.cwd() / "evals" / "reports"
+    result = RegressionGate.check(reports)
+    console.print(
+        f"regression gate：{'通过' if result.passed else '失败'} 已查 {', '.join(result.checked)}"
+    )
+    if result.failures:
+        console.print(f"失败：{', '.join(result.failures)}", style="red")
+        raise typer.Exit(code=1)
 
 
 @app.command()
