@@ -2,6 +2,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import deity
+
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -16,7 +18,7 @@ def test_help_and_version() -> None:
     assert run_cli("--help").returncode == 0
     version = run_cli("--version")
     assert version.returncode == 0
-    assert "0.1.0" in version.stdout
+    assert deity.__version__ in version.stdout
 
 
 def test_run_requires_model_config(tmp_path: Path) -> None:
