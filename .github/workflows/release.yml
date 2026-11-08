@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+      - name: Record build environment
+        run: |
+          uv --version
+          python --version
+          uname -a
+          git rev-parse HEAD
+      - run: uv sync --locked --dev
+      - run: uv lock --check
+      - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked mypy src
+      - run: uv run --locked pytest -q
+      - name: Build wheel and sdist
+        run: uv build --out-dir dist
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist
+          sha256sum deity-*.whl deity-*.tar.gz > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Generate SBOM
+        run: uv export --locked --format cyclonedx1.5 --output-file sbom.json
+      - name: Vulnerability scan
+        run: |
+          uv export --locked --format requirements.txt --output-file requirements-locked.txt
+          uvx --from pip-audit pip-audit -r requirements-locked.txt --strict
+      - name: Upload GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/deity-*.whl
+            dist/deity-*.tar.gz
+            dist/SHA256SUMS
+            sbom.json
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+      # 注意：不自动发布到 PyPI。PyPI 发布为手动步骤，见
+      # docs/03-development/release-checklist.md（需维护者在本地核对
+      # SHA256SUMS 后手动执行 twine upload）。

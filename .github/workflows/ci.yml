@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -25,6 +25,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - if: runner.os == 'macOS'
         run: command -v rg || brew install ripgrep
+      - if: runner.os == 'Windows'
+        run: choco install ripgrep -y
       - run: uv sync --locked --dev
       - run: uv run --locked ruff check .
       - run: uv run --locked ruff format --check .
@@ -36,6 +38,29 @@ jobs:
       - run: uv run --locked python -m evals.runners.advanced
       - run: uv run --locked python -m evals.runners.sandbox --backend fake
       - run: uv run --locked python -m evals.runners.multi_agent
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+      - name: Verify lockfile matches pyproject
+        run: uv lock --check
+      - name: Generate SBOM (CycloneDX, no new runtime dependency)
+        run: uv export --locked --format cyclonedx1.5 --output-file sbom.json
+      - name: Vulnerability scan (any known vulnerability blocks)
+        run: |
+          uv export --locked --format requirements.txt --output-file requirements-locked.txt
+          uvx --from pip-audit pip-audit -r requirements-locked.txt --strict
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+          if-no-files-found: error
 
   sandbox-docker:
     runs-on: ubuntu-latest

@@ -20,6 +20,39 @@ Deity 是计划以 Python 3.12+ 构建的开源 AI Coding Agent 运行系统。�
 
 **V0.8 开发者体验/TUI 已形成本地候选实现。** CLI 与 TUI 共用统一客户端协议（`ClientService`）与同一 Run 状态和证据；Textual TUI 为可选 extra，默认关闭。本地门禁和未运行项见 [V0.8 候选验收记录](docs/04-evaluation/v0.8-candidate-2026-11-09.md)，用法见 [V0.8 使用说明](docs/03-development/v0.8-usage.md)。
 
+**V1.0 稳定发布已形成本地候选实现。** 公开 API 与事件协议冻结（`COMPAT_VERSION = 1`）、发布与供应链（SBOM/漏洞扫描/跨平台 CI）、威胁模型与安全审查、soak 与崩溃恢复门禁。本地门禁和未运行项见 [V1.0 候选验收记录](docs/04-evaluation/v1.0-candidate-2026-11-09.md)，兼容政策见 [兼容政策](docs/03-development/compatibility-policy.md)，发布清单见 [发布清单](docs/03-development/release-checklist.md)。
+
+## 安装
+
+要求 Python 3.12 或 3.13。推荐用隔离工具安装（不污染系统 Python）：
+
+```bash
+pipx install deity          # 发布到 PyPI 后可用
+uv tool install deity       # 同上
+```
+
+从源码安装（开发）：
+
+```bash
+git clone <repo> && cd deity
+uv sync --locked --dev       # 开发依赖
+uv tool install --editable . # 以 deity 命令安装当前检出
+```
+
+可选 extras 分组（`pyproject.toml` 的 `[project.optional-dependencies]`）：
+
+| extra | 内容 | 说明 |
+|---|---|---|
+| `tui` | `textual>=0.86` | Textual TUI；未安装时 CLI 正常使用 |
+| `dev`（dependency-group） | pytest、pytest-asyncio、ruff、mypy | 仅开发/CI 用，不进运行时依赖 |
+
+```bash
+pip install "deity[tui]"     # 带 TUI 的安装
+uv sync --extra tui          # 源码检出时启用 TUI
+```
+
+校验安装：`deity --version`（应为 `1.0.0`）、`deity doctor`（环境检查，输出已脱敏）。
+
 ## 核心选择
 
 - Python 3.12+；本地 CLI 优先，未来可扩展 TUI、FastAPI、IDE。
