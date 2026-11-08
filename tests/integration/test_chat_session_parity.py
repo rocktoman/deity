@@ -35,7 +35,11 @@ def test_parity_help_empty_unknown_exit(monkeypatch: pytest.MonkeyPatch) -> None
         "欢迎来到 Deity，我是你的编程助手。\n"
         "Deity> /plan 进入持续计划模式；/build [计划ID] [--allow-dirty 路径] \n"
         "执行已有计划；/normal 返回普通模式；/skill 选择 Skill；/mcp 查看并选择 MCP \n"
-        "工具；选择会提示模型在下一条任务中使用；/exit 或 /quit 退出\n"
+        "工具；选择会提示模型在下一条任务中使用；/resume [运行ID] \n"
+        "恢复中断的运行；/sessions 列出并切换会话；/compact 查看上下文压缩状态；/clear \n"
+        "清屏；/cost 查看本会话 token 与轮次；/model [名称] 查看或切换模型；/status \n"
+        "查看会话状态；/auto 进入/退出自动接受模式；/doctor 运行环境检查；/exit 或 /quit \n"
+        "退出\n"
         "Deity> Deity> 未知命令。输入 /help 查看可用命令。\n"
         "Deity> "
     )

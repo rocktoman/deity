@@ -14,6 +14,7 @@ from deity.application.config import Config, ConfigResolver, load_config
 from deity.application.doctor import run_doctor
 from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
+from deity.interfaces.cli.chat_approval import ApprovalController, make_approve
 from deity.interfaces.cli.chat_commands import run_error_message
 from deity.interfaces.cli.chat_session import run_chat_session
 from deity.interfaces.cli.code import _search, code_app
@@ -159,13 +160,9 @@ def run(
         settings = _resolve_config(config, workdir)
         db_path = db or Path.home() / ".local/share/deity/deity.db"
 
-        def approve(name: str, args: dict[str, object]) -> bool:
-            displayed = {key: value for key, value in args.items() if key != "content"}
-            console.print(f"工具 {name} 请求执行：{displayed}")
-            return typer.confirm("允许本次调用？", default=False)
-
+        approval = ApprovalController(workspace=workdir, console=console)
         service = RunService.from_config(
-            settings, db_path=db_path, workspace=workdir, approve=approve
+            settings, db_path=db_path, workspace=workdir, approve=make_approve(approval)
         )
         model_name = settings.model.name  # type: ignore[union-attr]
         if task is None:
@@ -183,6 +180,8 @@ def run(
                     config=settings.chat,
                     output=console,
                     symbol_search=symbol_search,
+                    approval=approval,
+                    config_path=config,
                 )
             )
         else:

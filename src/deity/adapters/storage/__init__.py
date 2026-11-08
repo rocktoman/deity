@@ -2587,6 +2587,20 @@ class SQLiteSessionRepository:
             rows = await cursor.fetchall()
         return [{"id": row[0], "workspace": row[1]} for row in rows]
 
+    async def recent_runs(self, session_id: str, *, limit: int = 5) -> list[dict[str, str]]:
+        """List recent runs of one session newest first (id, status, started_at).
+
+        只读查询，供 /resume 无参数时列出候选；恢复决策仍走 RunService.inspect()。
+        """
+        async with self.db.execute(
+            "SELECT runs.id, runs.status, runs.started_at FROM runs "
+            "JOIN tasks ON runs.task_id=tasks.id WHERE tasks.session_id=? "
+            "ORDER BY runs.started_at DESC LIMIT ?",
+            (session_id, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [{"id": row[0], "status": row[1], "started_at": row[2] or ""} for row in rows]
+
     async def run_info(self, run_id: str) -> dict[str, Any]:
         """Read task and workspace metadata needed for recovery decisions."""
         async with self.db.execute(
