@@ -827,6 +827,7 @@ class RunService:
         execution_mode: ExecutionMode = ExecutionMode.BUILD,
         run_id: str | None = None,
         event_sink: EventPublisher | None = None,
+        on_run_created: Callable[[str], None] | None = None,
     ) -> AgentResult:
         """Execute and persist a task within the selected workspace."""
         if self.model is None:
@@ -915,6 +916,8 @@ class RunService:
             try:
                 if run_id is not None:
                     await repo.create_run(request, run_id=run_id)
+                    if on_run_created is not None:
+                        on_run_created(run_id)
                     result = await loop.run_created(request, run_id, initial_messages)
                 else:
                     result = await loop.run(request, initial_messages=initial_messages)

@@ -5,7 +5,8 @@
 """
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import AsyncIterator, Coroutine
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 from uuid import uuid4
 
@@ -186,16 +187,29 @@ class ClientService(ApprovalPort):
         active_session = session_id or str(uuid4())
         run_id = str(uuid4())
         self._run_service.approval_port = self
+        created = asyncio.Event()
         run_task = asyncio.create_task(
             self._guarded_run(
                 self._run_service.run(
-                    task, model_name=model_name, session_id=active_session, run_id=run_id
+                    task,
+                    model_name=model_name,
+                    session_id=active_session,
+                    run_id=run_id,
+                    on_run_created=lambda _run_id: created.set(),
                 ),
                 run_id,
             )
         )
         self._tasks[run_id] = run_task
-        status = await self._wait_for_run_row(run_id, run_task)
+        try:
+            await asyncio.wait_for(created.wait(), timeout=10.0)
+        except TimeoutError:
+            if run_task.done():
+                error = run_task.exception()
+                if error is not None:
+                    raise error
+            raise ClientError("run_not_found", f"Run 未创建：{run_id}")
+        status = run_task.result().status if run_task.done() else RunStatus.RUNNING
         handle = RunHandle(run_id=run_id, session_id=active_session, status=status.value)
         self._handles[run_id] = handle
         return handle
@@ -208,29 +222,6 @@ class ClientService(ApprovalPort):
             return await coro
         except asyncio.CancelledError:
             return AgentResult(run_id, RunStatus.CANCELLED, None)
-
-    async def _wait_for_run_row(
-        self, run_id: str, run_task: asyncio.Task[AgentResult]
-    ) -> RunStatus:
-        """等 Run 行落库后返回其状态；Run 快速失败时透传原异常。"""
-        repo = await SQLiteSessionRepository.open(self._run_service.db_path)
-        try:
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + 10.0
-            while True:
-                try:
-                    return await repo.status(run_id)
-                except KeyError:
-                    if run_task.done():
-                        error = run_task.exception()
-                        if error is not None:
-                            raise error
-                        return run_task.result().status
-                    if loop.time() > deadline:
-                        raise ClientError("run_not_found", f"Run 未创建：{run_id}")
-                    await asyncio.sleep(0.02)
-        finally:
-            await repo.close()
 
     async def wait(self, run_id: str) -> AgentResult:
         """等待一次已启动 Run 的终态结果。"""
@@ -294,25 +285,8 @@ class ClientService(ApprovalPort):
         """快照投递后轮询增量；乱序（seq 不递增）事件跳过不应用。"""
         last_seq = after_seq
         try:
-            for event in snapshot:
-                if event.seq <= last_seq:
-                    continue
-                last_seq = event.seq
-                if not subscription._offer(event):
-                    subscription._fail(ClientError("slow_consumer", "消费者过慢，订阅已断开"))
-                    return
-                if _is_terminal(event):
-                    subscription._finish()
-                    return
-            while not subscription.closed:
-                await asyncio.sleep(self._poll_interval_seconds)
-                if subscription.closed:
-                    return
-                try:
-                    fresh = await self._subscriber.read(run_id, last_seq)
-                except (OSError, ValueError, KeyError):
-                    continue
-                for event in fresh:
+            async with self._subscriber_context():
+                for event in snapshot:
                     if event.seq <= last_seq:
                         continue
                     last_seq = event.seq
@@ -322,10 +296,41 @@ class ClientService(ApprovalPort):
                     if _is_terminal(event):
                         subscription._finish()
                         return
+                while not subscription.closed:
+                    await asyncio.sleep(self._poll_interval_seconds)
+                    if subscription.closed:
+                        return
+                    try:
+                        fresh = await self._subscriber.read(run_id, last_seq)
+                    except (OSError, ValueError, KeyError):
+                        continue
+                    for event in fresh:
+                        if event.seq <= last_seq:
+                            continue
+                        last_seq = event.seq
+                        if not subscription._offer(event):
+                            subscription._fail(
+                                ClientError("slow_consumer", "消费者过慢，订阅已断开")
+                            )
+                            return
+                        if _is_terminal(event):
+                            subscription._finish()
+                            return
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - 生产者失败不断开 Run，只结束订阅
             subscription._finish()
+
+    @asynccontextmanager
+    async def _subscriber_context(self) -> AsyncIterator[None]:
+        """订阅期间持有事件源的持久连接；Fake 源无上下文时直接放行。"""
+        stack = AsyncExitStack()
+        if hasattr(self._subscriber, "__aenter__"):
+            await stack.enter_async_context(self._subscriber)
+        try:
+            yield
+        finally:
+            await stack.aclose()
 
 
 def _is_terminal(event: ClientEvent) -> bool:

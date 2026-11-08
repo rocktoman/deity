@@ -453,6 +453,7 @@ def _resolve_config(config: Path | None, workspace: Path) -> Config:
         {},
         workspace / ".deity" / "config.toml",
         config or Path.home() / ".config/deity/config.toml",
+        loader=load_config,
     )
     return settings
 

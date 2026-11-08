@@ -168,8 +168,9 @@ class SQLiteSessionRepository:
         _backup_v1(path)
         db = await aiosqlite.connect(path)
         db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL")
+        # busy_timeout 必须先于 journal_mode：并发打开时 journal_mode 改写需要等锁。
         await db.execute("PRAGMA busy_timeout=5000")
+        await db.execute("PRAGMA journal_mode=WAL")
         await db.executescript(SCHEMA)
         await db.execute("INSERT OR IGNORE INTO schema_migrations VALUES (1, datetime('now'))")
         await db.commit()

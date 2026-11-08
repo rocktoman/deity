@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
@@ -674,14 +675,16 @@ class ConfigResolver:
         cli_overrides: dict[str, dict[str, object]],
         project_path: Path,
         user_path: Path,
+        loader: Callable[[Path], Config] | None = None,
     ) -> tuple[Config, dict[str, str]]:
         """返回合并后的配置与每段的来源标注。"""
+        load = loader or load_config
         config = Config()
         defaults = Config()
         sources = {section: "default" for section in _CONFIG_SECTIONS}
         sources["version"] = "default"
         for layer_name, path in (("user", user_path), ("project", project_path)):
-            layer = load_config(path)
+            layer = load(path)
             if layer.version != 1:
                 raise ValueError("配置无效：请检查 TOML 字段和权限设置")
             for section in _CONFIG_SECTIONS:
