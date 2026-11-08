@@ -13,7 +13,7 @@ from rich.console import Console
 from deity.application.plan_service import PlanService
 from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
-from deity.interfaces.cli.menu import choose
+from deity.interfaces.cli.chat_input import PlainInput, PromptToolkitInput
 from deity.interfaces.cli.plan import (
     authorize_dirty_targets,
     build_approved,
@@ -53,6 +53,7 @@ class ChatContext:
     model_name: str
     state: ChatState
     console: Console = field(default_factory=Console)
+    input: PlainInput | PromptToolkitInput = field(default_factory=PlainInput)
 
 
 @dataclass(frozen=True)
@@ -142,7 +143,7 @@ async def _handle_build(prompt: str, ctx: ChatContext) -> None:
         planner = PlanService(ctx.service)
         if plan_id is None:
             candidates = await planner.buildable(ctx.state.session_id)
-            selected = choose(
+            selected = ctx.input.select(
                 "当前会话待执行计划",
                 [f"{item.plan_id} {item.draft.goal}" for item in candidates],
             )
@@ -185,7 +186,9 @@ def _handle_skill(prompt: str, ctx: ChatContext) -> None:
     selected = (
         names.index(requested)
         if requested in names
-        else choose("可用 Skills", [f"{item['name']} [{item['source']}]" for item in skills])
+        else ctx.input.select(
+            "可用 Skills", [f"{item['name']} [{item['source']}]" for item in skills]
+        )
         if not requested
         else None
     )
@@ -204,7 +207,7 @@ def _handle_skill(prompt: str, ctx: ChatContext) -> None:
 async def _handle_mcp(ctx: ChatContext) -> None:
     """执行 /mcp：只做发现，不调用业务工具；选中结果只影响下一条任务。"""
     servers = ctx.service.mcp_list()
-    selected = choose("已配置的 MCP servers", servers)
+    selected = ctx.input.select("已配置的 MCP servers", servers)
     if selected is None:
         return
     server_name = servers[selected].split()[0]
@@ -219,7 +222,7 @@ async def _handle_mcp(ctx: ChatContext) -> None:
     except Exception as exc:  # noqa: BLE001 - keep an external server failure in this menu
         ctx.console.print(f"MCP 检查失败：{type(exc).__name__}", style="red")
         return
-    tool_index = choose(f"{server_name} 的工具（仅发现，未调用）", tools)
+    tool_index = ctx.input.select(f"{server_name} 的工具（仅发现，未调用）", tools)
     if tool_index is not None:
         ctx.state.pending_mcp_tool = tools[tool_index]
         ctx.console.print(f"已选择 {ctx.state.pending_mcp_tool}。下一条任务将提示模型使用此工具。")

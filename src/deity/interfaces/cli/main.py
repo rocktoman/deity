@@ -16,7 +16,7 @@ from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
 from deity.interfaces.cli.chat_commands import run_error_message
 from deity.interfaces.cli.chat_session import run_chat_session
-from deity.interfaces.cli.code import code_app
+from deity.interfaces.cli.code import _search, code_app
 from deity.interfaces.cli.plan import build_command, plan_command, plans_app
 from deity.interfaces.cli.sandbox import sandbox_app
 from deity.interfaces.cli.verify import verify_command
@@ -169,8 +169,21 @@ def run(
         )
         model_name = settings.model.name  # type: ignore[union-attr]
         if task is None:
+            symbol_search = None
+            if settings.coding.code_intelligence_enabled:
+                try:
+                    symbol_search = _search(workdir, config)
+                except (ValueError, OSError):
+                    symbol_search = None
             asyncio.run(
-                run_chat_session(service, model_name, session, config=settings.chat, output=console)
+                run_chat_session(
+                    service,
+                    model_name,
+                    session,
+                    config=settings.chat,
+                    output=console,
+                    symbol_search=symbol_search,
+                )
             )
         else:
             result = asyncio.run(
