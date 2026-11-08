@@ -7,6 +7,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.application.build_service import BuildService
@@ -114,16 +115,22 @@ def plans_show(
         raise typer.Exit(code=2) from None
 
 
-def show_plan(artifact: PlanArtifact, allow_dirty: tuple[str, ...] = ()) -> None:
-    """Display the plan and its write scope."""
-    console.print(f"计划 {artifact.plan_id}：{artifact.draft.goal}")
+def plan_lines(artifact: PlanArtifact, allow_dirty: tuple[str, ...] = ()) -> list[str]:
+    """计划的文本行（卡片正文与纯文本展示共用同一内容）。"""
+    lines = [f"计划 {artifact.plan_id}：{artifact.draft.goal}"]
     for step in artifact.draft.steps:
-        console.print(f"{step.ordinal}. {step.title}：{step.description}")
-        console.print(f"   目标文件：{', '.join(step.files) or '无'}")
+        lines.append(f"{step.ordinal}. {step.title}：{step.description}")
+        lines.append(f"   目标文件：{', '.join(step.files) or '无'}")
     if artifact.draft.risks:
-        console.print(f"风险：{'；'.join(artifact.draft.risks)}")
+        lines.append(f"风险：{'；'.join(artifact.draft.risks)}")
     if allow_dirty:
-        console.print(f"允许修改已有改动：{', '.join(allow_dirty)}")
+        lines.append(f"允许修改已有改动：{', '.join(allow_dirty)}")
+    return lines
+
+
+def show_plan(artifact: PlanArtifact, allow_dirty: tuple[str, ...] = ()) -> None:
+    """Display the plan and its write scope as an approval card."""
+    console.print(Panel("\n".join(plan_lines(artifact, allow_dirty)), title="计划审批"))
 
 
 def confirm_build(artifact: PlanArtifact, allow_dirty: tuple[str, ...] = ()) -> bool:
@@ -135,18 +142,34 @@ def confirm_build(artifact: PlanArtifact, allow_dirty: tuple[str, ...] = ()) -> 
 async def authorize_dirty_targets(
     runner: RunService, plan_id: str, allow_dirty: tuple[str, ...] = ()
 ) -> tuple[str, ...] | None:
-    """Request explicit path consent for dirty targets before starting Build."""
+    """Request explicit path consent for dirty targets before starting Build.
+
+    一张卡片集中确认全部待授权路径（一次确认），语义与逐路径确认一致：
+    全部同意才返回，否则返回 None 保留计划（旧行为也是首个拒绝即返回 None）。
+    """
     service = BuildService(
         runner.db_path, runner.workspace, plan_ttl_seconds=runner.coding.plan_ttl_seconds
     )
     permitted = set(allow_dirty)
-    for path in await service.initial_dirty_targets(plan_id):
-        if path in permitted:
-            continue
-        if not typer.confirm(f"{path} 已有本地改动。允许本次 Build 修改此文件？", default=False):
-            console.print(f"已保留计划；可用 /build {plan_id} --allow-dirty {path} 稍后授权。")
-            return None
-        permitted.add(path)
+    pending = [
+        path for path in await service.initial_dirty_targets(plan_id) if path not in permitted
+    ]
+    if not pending:
+        return tuple(sorted(permitted))
+    console.print(
+        Panel(
+            "\n".join(f"{path} 已有本地改动。" for path in pending),
+            title="脏文件授权",
+        )
+    )
+    if not typer.confirm("允许本次 Build 修改以上全部文件？", default=False):
+        console.print(
+            "已保留计划；可用 "
+            f"/build {plan_id} --allow-dirty {' --allow-dirty '.join(pending)}"
+            " 稍后授权。"
+        )
+        return None
+    permitted.update(pending)
     return tuple(sorted(permitted))
 
 
