@@ -18,6 +18,8 @@ Deity 是计划以 Python 3.12+ 构建的开源 AI Coding Agent 运行系统。�
 
 **V0.7 只读委派已形成本地候选实现。** 子 Agent 使用独立 Run、上下文、预算和只读工具权限；SQLite v6 记录委派树，父取消级联子任务。功能默认关闭。本地门禁和未运行项见 [V0.7 候选验收记录](docs/04-evaluation/v0.7-candidate-2026-11-01.md)。
 
+**V0.8 开发者体验/TUI 已形成本地候选实现。** CLI 与 TUI 共用统一客户端协议（`ClientService`）与同一 Run 状态和证据；Textual TUI 为可选 extra，默认关闭。本地门禁和未运行项见 [V0.8 候选验收记录](docs/04-evaluation/v0.8-candidate-2026-11-09.md)，用法见 [V0.8 使用说明](docs/03-development/v0.8-usage.md)。
+
 ## 核心选择
 
 - Python 3.12+；本地 CLI 优先，未来可扩展 TUI、FastAPI、IDE。
@@ -90,7 +92,19 @@ deity verify --show-plan --workspace /path/to/repo
 deity verify --run <run-id> --workspace /path/to/repo
 deity sandbox doctor --workspace /path/to/repo --config /path/to/config.toml
 deity sandbox run --workspace /path/to/repo --config /path/to/config.toml -- cat README.md
+deity doctor --workspace /path/to/repo
 ```
+
+## TUI
+
+TUI 是可选功能，默认关闭；未安装 Textual 时 CLI 其余命令正常使用。
+
+```bash
+uv sync --extra tui        # 安装 Textual（可选 extra，不进主依赖）
+deity tui                  # 启动 Textual TUI
+```
+
+键位：`q` 退出、`a` 批准首个待决审批、`d` 拒绝、`c` 取消当前 Run。TUI 与 CLI 共用同一 `ClientService` 与同一 Run 状态和证据；关闭 TUI（或配置 `[tui] enabled = false`）即回纯 CLI。详见 [V0.8 使用说明](docs/03-development/v0.8-usage.md)。
 
 进入 `deity` 的 `Deity> ` 提示符后，可输入 `/help` 查看交互命令。启用 Skills 后，`/skill` 显示当前工作区的用户与项目 Skill；用 ↑↓ 和回车选择后，**下一条任务**会提示模型加载该 Skill，实际是否加载以工具调用为准。`/skill <name>` 可直接选择。`/mcp` 先选择已配置的 server，再选择其工具；发现阶段不调用业务工具。配置中显式启用的 MCP server 会直接启动，其工具调用不再逐次审批。选中工具只会向模型附加下一条任务的使用提示，不限制运行时可用的其他已配置工具。Esc 返回，非终端输入可用编号选择。斜杠命令不会发给模型；任务运行失败后，选择也不会自动沿用。
 

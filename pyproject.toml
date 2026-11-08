@@ -21,6 +21,9 @@ dependencies = [
     "jsonschema==4.26.0",
 ]
 
+[project.optional-dependencies]
+tui = ["textual>=0.86"]
+
 [project.scripts]
 deity = "deity.interfaces.cli.main:app"
 

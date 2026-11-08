@@ -446,6 +446,20 @@ def delegation_tree(
         raise typer.Exit(code=2) from None
 
 
+@app.command()
+def tui() -> None:
+    """启动 Textual TUI；未安装 Textual 时提示安装方式并退出码 2。"""
+    try:
+        from deity.interfaces.tui.app import run_tui
+    except ImportError:
+        console.print(
+            'TUI 需要安装 Textual：uv sync --extra tui 或 pip install "deity[tui]"',
+            style="red",
+        )
+        raise typer.Exit(code=2) from None
+    run_tui()
+
+
 @app.command("resume")
 def resume_run(
     run_id: str,
