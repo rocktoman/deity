@@ -104,6 +104,17 @@ async def test_cli_and_client_service_see_same_run(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_delegates_to_run_service(tmp_path: Path) -> None:
+    model = FakeModel([[ModelEvent("text_delta", text="hi"), ModelEvent("message_completed")]])
+    client = ClientService(_service(tmp_path, model))
+    handle = await client.start_run("打招呼", "fake")
+    result = await asyncio.wait_for(client.wait(handle.run_id), timeout=30)
+    assert result.status == RunStatus.COMPLETED
+    with pytest.raises(ValueError, match="cannot resume"):
+        await client.resume(handle.run_id)
+
+
+@pytest.mark.asyncio
 async def test_cancel_propagates_to_running_run(tmp_path: Path) -> None:
     model = FakeModel(
         [[ModelEvent("text_delta", text="slow"), ModelEvent("message_completed")]],
