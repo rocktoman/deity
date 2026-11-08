@@ -7,12 +7,12 @@ import pytest
 
 from deity.application.config import McpServerSettings
 from deity.application.run_service import RunService
-from deity.interfaces.cli.menu import _move
+from deity.interfaces.cli.chat_input import wrap_menu_index
 
 
 def test_arrow_navigation_wraps() -> None:
-    assert _move(0, "up", 2) == 1
-    assert _move(1, "down", 2) == 0
+    assert wrap_menu_index(0, "up", 2) == 1
+    assert wrap_menu_index(1, "down", 2) == 0
 
 
 @pytest.mark.asyncio

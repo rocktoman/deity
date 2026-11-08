@@ -44,6 +44,7 @@ uv tool install --editable . # 以 deity 命令安装当前检出
 | extra | 内容 | 说明 |
 |---|---|---|
 | `tui` | `textual>=0.86` | Textual TUI；未安装时 CLI 正常使用 |
+| `chat` | `prompt_toolkit>=3.0.5,<4`（已锁定 3.0.53，BSD 许可证） | 交互输入增强（历史/多行/补全）；未安装时 CLI 回落到 `input()`，功能一致 |
 | `dev`（dependency-group） | pytest、pytest-asyncio、ruff、mypy | 仅开发/CI 用，不进运行时依赖 |
 
 ```bash
@@ -151,6 +152,8 @@ deity tui                  # 启动 Textual TUI
 键位：`q` 退出、`a` 批准首个待决审批、`d` 拒绝、`c` 取消当前 Run。TUI 与 CLI 共用同一 `ClientService` 与同一 Run 状态和证据；关闭 TUI（或配置 `[tui] enabled = false`）即回纯 CLI。详见 [V0.8 使用说明](docs/03-development/v0.8-usage.md)。
 
 进入 `deity` 的 `Deity> ` 提示符后，可输入 `/help` 查看交互命令。启用 Skills 后，`/skill` 显示当前工作区的用户与项目 Skill；用 ↑↓ 和回车选择后，**下一条任务**会提示模型加载该 Skill，实际是否加载以工具调用为准。`/skill <name>` 可直接选择。`/mcp` 先选择已配置的 server，再选择其工具；发现阶段不调用业务工具。配置中显式启用的 MCP server 会直接启动，其工具调用不再逐次审批。选中工具只会向模型附加下一条任务的使用提示，不限制运行时可用的其他已配置工具。Esc 返回，非终端输入可用编号选择。斜杠命令不会发给模型；任务运行失败后，选择也不会自动沿用。
+
+交互输入与渲染（CLI 聊天重构 Phase 2）：已安装 `deity[chat]`（prompt_toolkit 3.0.53，可选 extra）且在终端内运行时，输入支持历史回溯（上下键）、多行输入（Enter 提交、Alt+Enter 换行）、`/` 命令补全与 `@文件` 补全；未安装或非终端（管道/CI、`TERM=dumb`）时自动回落到 `input()` 与编号选择，行为与此前一致。模型回答流式显示，工具调用以开始行 + 完成行（工具名、参数摘要、状态、耗时）呈现，每轮结束打印一行状态摘要（模型、模式、轮次、工具数、token、耗时；无 usage 事件时 token 显示 `—`，不编造数字）。`@路径` 把工作区内文件内容带进任务（越界、超大、不存在都直接报错不发送），`@符号名` 复用代码智能的符号定位。运行中第一次 Ctrl-C 取消本轮并回到提示符，取消过程中再按一次退出（退出码 130）；输入时按 Esc 清空当前行。`[chat]` 配置段可调历史、多行、流式与状态栏等开关，`[chat] enabled = false` 时恢复旧 `input()` 循环。
 
 独立命令可在仓库目录用 `uv tool install --editable .` 安装。交互模式在一次启动内复用会话，并将最近四轮问答作为后续模型上下文；单次命令执行后退出。模型配置默认从 `~/.config/deity/config.toml` 读取，密钥只从配置指定的环境变量读取。工具权限可显式配置为 `shell = "auto"`、`workspace_write = "auto"`，免去逐次确认；Shell 自动模式仅运行受限的测试和检查命令。删除文件时可以说 `删除 bubble_sort.py`，也可以在同一会话创建文件后说 `删除刚才新建的文件`；模型负责解析目标，受限的 `delete_file` 工具执行删除。
 
