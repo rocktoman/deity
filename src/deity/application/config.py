@@ -101,6 +101,26 @@ class DoctorConfig:
 
 
 @dataclass(frozen=True)
+class ChatConfig:
+    """交互式聊天配置；默认值全部等于重构前的现状行为（ADR-016 配套）。
+
+    enabled=false 时关闭重构后的交互增强，恢复旧 input() 循环；
+    history_file 为空时用 ~/.local/share/deity/chat_history。
+    """
+
+    enabled: bool = True
+    history_file: str = ""
+    max_history: int = 500
+    multiline: bool = True
+    status_line: bool = True
+    streaming: bool = True
+    approval_default: str = "ask"
+    mention_max_bytes: int = 2_000_000
+    shell_timeout_seconds: int = 30
+    shell_max_output_chars: int = 16_000
+
+
+@dataclass(frozen=True)
 class MultiAgentConfig:
     version: int = 1
     enabled: bool = False
@@ -127,6 +147,7 @@ class Config:
     multi_agent: MultiAgentConfig = field(default_factory=MultiAgentConfig)
     tui: TuiConfig = field(default_factory=TuiConfig)
     doctor: DoctorConfig = field(default_factory=DoctorConfig)
+    chat: ChatConfig = field(default_factory=ChatConfig)
 
     def multi_agent_fingerprint(self) -> str:
         """Hash delegation settings only when the feature is enabled."""
@@ -223,6 +244,7 @@ def load_config(path: Path) -> Config:
             "multi_agent",
             "tui",
             "doctor",
+            "chat",
         }:
             raise ValueError
         version = data.get("version", 1)
@@ -242,6 +264,7 @@ def load_config(path: Path) -> Config:
         multi_agent = data.get("multi_agent", {})
         tui = data.get("tui", {})
         doctor = data.get("doctor", {})
+        chat = data.get("chat", {})
         if not all(
             isinstance(item, dict)
             for item in (
@@ -259,6 +282,7 @@ def load_config(path: Path) -> Config:
                 multi_agent,
                 tui,
                 doctor,
+                chat,
             )
         ):
             raise ValueError
@@ -454,8 +478,40 @@ def load_config(path: Path) -> Config:
             raise ValueError
         if set(doctor) - {"check_docker"}:
             raise ValueError
+        if set(chat) - {
+            "enabled",
+            "history_file",
+            "max_history",
+            "multiline",
+            "status_line",
+            "streaming",
+            "approval_default",
+            "mention_max_bytes",
+            "shell_timeout_seconds",
+            "shell_max_output_chars",
+        }:
+            raise ValueError
         tui_config = TuiConfig(**tui)
         doctor_config = DoctorConfig(**doctor)
+        chat_config = ChatConfig(**chat)
+        if (
+            type(chat_config.enabled) is not bool
+            or type(chat_config.history_file) is not str
+            or len(chat_config.history_file) > 4096
+            or type(chat_config.max_history) is not int
+            or not 1 <= chat_config.max_history <= 10_000
+            or type(chat_config.multiline) is not bool
+            or type(chat_config.status_line) is not bool
+            or type(chat_config.streaming) is not bool
+            or chat_config.approval_default not in {"ask", "auto", "deny"}
+            or type(chat_config.mention_max_bytes) is not int
+            or not 1_024 <= chat_config.mention_max_bytes <= 8 * 1024 * 1024
+            or type(chat_config.shell_timeout_seconds) is not int
+            or not 1 <= chat_config.shell_timeout_seconds <= 1_800
+            or type(chat_config.shell_max_output_chars) is not int
+            or not 1_000 <= chat_config.shell_max_output_chars <= 1_000_000
+        ):
+            raise ValueError
         if (
             type(tui_config.enabled) is not bool
             or type(tui_config.max_events_buffer) is not int
@@ -633,6 +689,7 @@ def load_config(path: Path) -> Config:
             multi_agent=multi_agent_config,
             tui=tui_config,
             doctor=doctor_config,
+            chat=chat_config,
         )
     except (OSError, UnicodeError, tomllib.TOMLDecodeError, TypeError, ValueError):
         raise ValueError("配置无效：请检查 TOML 字段和权限设置") from None
@@ -653,7 +710,31 @@ _CONFIG_SECTIONS = (
     "multi_agent",
     "tui",
     "doctor",
+    "chat",
 )
+
+
+def _validate_chat(config: Config) -> None:
+    """校验 CLI 覆盖后的 chat 段；无效值报不泄露密钥的错误。"""
+    chat = config.chat
+    if (
+        type(chat.enabled) is not bool
+        or type(chat.history_file) is not str
+        or len(chat.history_file) > 4096
+        or type(chat.max_history) is not int
+        or not 1 <= chat.max_history <= 10_000
+        or type(chat.multiline) is not bool
+        or type(chat.status_line) is not bool
+        or type(chat.streaming) is not bool
+        or chat.approval_default not in {"ask", "auto", "deny"}
+        or type(chat.mention_max_bytes) is not int
+        or not 1_024 <= chat.mention_max_bytes <= 8 * 1024 * 1024
+        or type(chat.shell_timeout_seconds) is not int
+        or not 1 <= chat.shell_timeout_seconds <= 1_800
+        or type(chat.shell_max_output_chars) is not int
+        or not 1_000 <= chat.shell_max_output_chars <= 1_000_000
+    ):
+        raise ValueError("配置无效：请检查 TOML 字段和权限设置")
 
 
 def _validate_tui_doctor(config: Config) -> None:
@@ -701,4 +782,5 @@ class ConfigResolver:
             config = replace(config, **{section: replace(current, **values)})
             sources[section] = "cli"
         _validate_tui_doctor(config)
+        _validate_chat(config)
         return config, sources

@@ -2,10 +2,8 @@
 
 import asyncio
 import json
-import shlex
 from pathlib import Path
 from typing import Annotated
-from uuid import uuid4
 
 import typer
 from rich.console import Console
@@ -14,19 +12,12 @@ from deity import __version__
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.application.config import Config, ConfigResolver, load_config
 from deity.application.doctor import run_doctor
-from deity.application.plan_service import PlanService
 from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
+from deity.interfaces.cli.chat_commands import run_error_message
+from deity.interfaces.cli.chat_session import run_chat_session
 from deity.interfaces.cli.code import code_app
-from deity.interfaces.cli.menu import choose
-from deity.interfaces.cli.plan import (
-    authorize_dirty_targets,
-    build_approved,
-    build_command,
-    confirm_build,
-    plan_command,
-    plans_app,
-)
+from deity.interfaces.cli.plan import build_command, plan_command, plans_app
 from deity.interfaces.cli.sandbox import sandbox_app
 from deity.interfaces.cli.verify import verify_command
 
@@ -46,13 +37,6 @@ app.command("plan")(plan_command)
 app.command("build")(build_command)
 app.command("verify")(verify_command)
 console = Console()
-
-
-def _run_error_message(exc: Exception) -> str:
-    """Turn internal runtime limits into actionable CLI messages."""
-    if isinstance(exc, BudgetExceeded) and str(exc) == "max_turns":
-        return "已达到最大运行轮次，模型仍未给出最终结论；请缩小任务范围或提高 max_turns。"
-    return str(exc)
 
 
 @skills_app.command("list")
@@ -185,14 +169,16 @@ def run(
         )
         model_name = settings.model.name  # type: ignore[union-attr]
         if task is None:
-            asyncio.run(_interactive(service, model_name, session))
+            asyncio.run(
+                run_chat_session(service, model_name, session, config=settings.chat, output=console)
+            )
         else:
             result = asyncio.run(
                 service.run(" ".join(task), model_name=model_name, session_id=session)
             )
             console.print(result.final_text or "无最终回答")
     except (ModelFailure, ProtocolError, BudgetExceeded) as exc:
-        console.print(f"运行失败：{_run_error_message(exc)}", style="red")
+        console.print(f"运行失败：{run_error_message(exc)}", style="red")
         raise typer.Exit(code=1) from None
     except (ValueError, OSError) as exc:
         console.print(str(exc), style="red")
@@ -200,181 +186,6 @@ def run(
     except KeyboardInterrupt:
         console.print("运行已取消", style="yellow")
         raise typer.Exit(code=130) from None
-
-
-async def _interactive(service: RunService, model_name: str, session_id: str | None) -> None:
-    """Read successive prompts within one persisted conversation session."""
-    active_session = session_id or str(uuid4())
-    pending_skill: str | None = None
-    pending_mcp_tool: str | None = None
-    plan_mode = False
-    console.print("欢迎来到 Deity，我是你的编程助手。")
-    while True:
-        try:
-            prompt = input("Deity[plan]> " if plan_mode else "Deity> ").strip()
-        except EOFError:
-            console.print()
-            return
-        if prompt in {"/exit", "/quit"}:
-            return
-        if not prompt:
-            continue
-        if prompt == "/help":
-            console.print(
-                "/plan 进入持续计划模式；/build [计划ID] [--allow-dirty 路径] 执行已有计划；"
-                "/normal 返回普通模式；/skill 选择 Skill；/mcp 查看并选择 MCP 工具；"
-                "选择会提示模型在下一条任务中使用；/exit 或 /quit 退出"
-            )
-            continue
-        if prompt == "/plan":
-            if not service.coding.plan_build_enabled or not service.coding.git_guard_enabled:
-                console.print(
-                    "Plan/Build 未启用，请在配置中开启 plan_build_enabled 和 git_guard_enabled。"
-                )
-                continue
-            plan_mode = True
-            console.print("已进入计划模式。输入任务后将展示计划并询问是否构建。")
-            continue
-        if prompt == "/normal":
-            plan_mode = False
-            console.print("已返回普通模式。")
-            continue
-        if prompt == "/build" or prompt.startswith("/build "):
-            if not service.coding.plan_build_enabled or not service.coding.git_guard_enabled:
-                console.print(
-                    "Plan/Build 未启用，请在配置中开启 plan_build_enabled 和 git_guard_enabled。"
-                )
-                continue
-            try:
-                parts = shlex.split(prompt)[1:]
-                dirty_paths: list[str] = []
-                plan_id: str | None = None
-                index = 0
-                while index < len(parts):
-                    if parts[index] == "--allow-dirty":
-                        if index + 1 >= len(parts):
-                            raise ValueError("--allow-dirty 需要文件路径")
-                        dirty_paths.append(parts[index + 1])
-                        index += 2
-                    elif plan_id is None:
-                        plan_id = parts[index]
-                        index += 1
-                    else:
-                        raise ValueError("/build 只接受一个计划 ID")
-                planner = PlanService(service)
-                if plan_id is None:
-                    candidates = await planner.buildable(active_session)
-                    selected = choose(
-                        "当前会话待执行计划",
-                        [f"{item.plan_id} {item.draft.goal}" for item in candidates],
-                    )
-                    if selected is None:
-                        continue
-                    artifact = candidates[selected]
-                else:
-                    artifact = await planner.get_buildable(plan_id, active_session)
-                if dirty_paths and any(
-                    path not in {name for step in artifact.draft.steps for name in step.files}
-                    for path in dirty_paths
-                ):
-                    raise ValueError("--allow-dirty 路径必须属于计划目标")
-                if confirm_build(artifact, tuple(dirty_paths)):
-                    allowed = await authorize_dirty_targets(
-                        service, artifact.plan_id, tuple(dirty_paths)
-                    )
-                    if allowed is not None:
-                        result = await build_approved(service, artifact.plan_id, allowed)
-                        console.print(result.final_text or "无最终回答")
-                        plan_mode = True
-                else:
-                    console.print("已取消 Build，计划仍可再次查看和批准。")
-            except (
-                ValueError,
-                OSError,
-                KeyError,
-                ModelFailure,
-                ProtocolError,
-                BudgetExceeded,
-            ) as exc:
-                console.print(f"Build 失败：{_run_error_message(exc)}", style="red")
-            continue
-        if prompt == "/skill" or prompt.startswith("/skill "):
-            skills = service.skills_list()
-            names = [item["name"] for item in skills]
-            requested = prompt.removeprefix("/skill").strip()
-            selected = (
-                names.index(requested)
-                if requested in names
-                else choose(
-                    "可用 Skills", [f"{item['name']} [{item['source']}]" for item in skills]
-                )
-                if not requested
-                else None
-            )
-            if selected is None:
-                if requested:
-                    console.print(f"未找到 Skill：{requested}")
-                continue
-            item = service.skills_inspect(names[selected])
-            pending_skill = item["name"]
-            console.print(
-                f"已选择 {pending_skill} [{item['source']}]：{item['description']}\n"
-                f"来源：{item['path']}\n下一条任务将提示模型加载此 Skill。"
-            )
-            continue
-        if prompt == "/mcp":
-            servers = service.mcp_list()
-            selected = choose("已配置的 MCP servers", servers)
-            if selected is None:
-                continue
-            server_name = servers[selected].split()[0]
-            if "[disabled]" in servers[selected]:
-                console.print(f"{server_name} 已禁用；请在配置中开启 MCP。")
-                continue
-            try:
-                tools = await service.mcp_test(server_name)
-            except (ValueError, OSError, TimeoutError) as exc:
-                console.print(f"MCP 检查失败：{exc}", style="red")
-                continue
-            except Exception as exc:  # noqa: BLE001 - keep an external server failure in this menu
-                console.print(f"MCP 检查失败：{type(exc).__name__}", style="red")
-                continue
-            tool_index = choose(f"{server_name} 的工具（仅发现，未调用）", tools)
-            if tool_index is not None:
-                pending_mcp_tool = tools[tool_index]
-                console.print(f"已选择 {pending_mcp_tool}。下一条任务将提示模型使用此工具。")
-            continue
-        if prompt.startswith("/"):
-            console.print("未知命令。输入 /help 查看可用命令。")
-            continue
-        try:
-            instructions: list[str] = []
-            if pending_skill:
-                instructions.append(f"请先加载并使用 {pending_skill} Skill。")
-            if pending_mcp_tool:
-                instructions.append(f"如适用，请使用 {pending_mcp_tool} 工具。")
-            task = f"{''.join(instructions)}任务：{prompt}" if instructions else prompt
-            pending_skill = None
-            pending_mcp_tool = None
-            if plan_mode:
-                artifact = await PlanService(service).create(
-                    task, model_name=model_name, session_id=active_session
-                )
-                console.print(f"计划 ID：{artifact.plan_id}")
-                if confirm_build(artifact):
-                    allowed = await authorize_dirty_targets(service, artifact.plan_id)
-                    if allowed is None:
-                        continue
-                    result = await build_approved(service, artifact.plan_id, allowed)
-                else:
-                    console.print("已保留计划；输入 /build 可稍后执行。")
-                    continue
-            else:
-                result = await service.run(task, model_name=model_name, session_id=active_session)
-        except (ModelFailure, ProtocolError, BudgetExceeded, ValueError, OSError) as exc:
-            console.print(f"运行失败：{_run_error_message(exc)}", style="red")
-            continue
-        console.print(result.final_text or "无最终回答")
 
 
 @app.command()
