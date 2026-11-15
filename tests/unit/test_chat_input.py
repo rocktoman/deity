@@ -14,6 +14,12 @@ from deity.interfaces.cli.chat_input import (
     wrap_menu_index,
 )
 
+# prompt_toolkit 是可选 chat extra：未装时依赖它的用例跳过（CI 默认只装
+# dev 依赖，装了 extras 的环境照常运行）；缺包回落行为由 falls_back 系列覆盖。
+requires_prompt_toolkit = pytest.mark.skipif(
+    not chat_input._HAS_PROMPT_TOOLKIT, reason="prompt_toolkit 未安装（chat extras）"
+)
+
 
 def test_wrap_menu_index_wraps_around() -> None:
     assert wrap_menu_index(0, "up", 2) == 1
@@ -93,6 +99,7 @@ def test_create_input_falls_back_on_dumb_terminal(
     assert isinstance(create_chat_input(ChatConfig(), workspace=tmp_path, tty=True), PlainInput)
 
 
+@requires_prompt_toolkit
 def test_create_input_uses_prompt_toolkit_on_tty(tmp_path: Path) -> None:
     history = tmp_path / "history"
     config = ChatConfig(history_file=str(history))
@@ -101,6 +108,7 @@ def test_create_input_uses_prompt_toolkit_on_tty(tmp_path: Path) -> None:
     assert created.config.history_file == str(history)
 
 
+@requires_prompt_toolkit
 def test_prompt_toolkit_history_is_truncated_to_max(tmp_path: Path) -> None:
     history = tmp_path / "history"
     history.write_text("\n".join(f"line {i}" for i in range(600)) + "\n", encoding="utf-8")
@@ -110,6 +118,7 @@ def test_prompt_toolkit_history_is_truncated_to_max(tmp_path: Path) -> None:
     assert history.read_text(encoding="utf-8").splitlines()[0] == "line 100"
 
 
+@requires_prompt_toolkit
 def test_prompt_toolkit_select_returns_stub_result(tmp_path: Path) -> None:
     config = ChatConfig(history_file=str(tmp_path / "history"))
     selected = PromptToolkitInput(config, workspace=tmp_path)
@@ -134,6 +143,7 @@ def test_selector_text_marks_current_index() -> None:
     assert "b" in lines[2]
 
 
+@requires_prompt_toolkit
 def test_prompt_toolkit_select_falls_back_to_numbered_when_not_tty(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -38,6 +38,9 @@
   Windows 上按不可用处理（不做弱化替代）、本地进程超时终止在 Windows
   退化为终止进程本体、Docker 创建参数在 Windows 省略 `--user`；
   POSIX 行为不变，`mypy --platform win32` 通过。
+- CI test 作业改装 chat/tui extras（`uv sync --locked --dev --extra chat
+  --extra tui`）；同时给 5 个依赖 prompt_toolkit 的测试加缺包跳过兜底，
+  未装 extras 时跳过而不是失败（装上时照常运行）。
 
 ## [1.0.0] — 2026-11-09
 
