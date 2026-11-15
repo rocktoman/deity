@@ -10,6 +10,7 @@ def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
         [sys.executable, "-m", "deity.interfaces.cli.main", *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 

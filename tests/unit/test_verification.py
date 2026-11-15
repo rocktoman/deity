@@ -1,4 +1,5 @@
 import asyncio
+import ctypes
 import os
 import sys
 from pathlib import Path
@@ -144,5 +145,13 @@ async def test_verification_cancellation_cleans_process_group(tmp_path: Path) ->
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    if sys.platform == "win32":
+        # Windows 无 kill(pid, 0) 探活：OpenProcess 打不开即进程已不存在。
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+        assert not handle, "子进程未被清理"
+    else:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)

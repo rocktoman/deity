@@ -30,7 +30,7 @@ def fixture_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     for item in sorted(path.rglob("*")):
         if item.is_file():
-            digest.update(str(item.relative_to(path)).encode())
+            digest.update(item.relative_to(path).as_posix().encode())
             digest.update(b"\0")
             digest.update(item.read_bytes())
             digest.update(b"\0")

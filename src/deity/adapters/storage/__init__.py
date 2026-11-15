@@ -1,11 +1,13 @@
 """SQLite-backed sessions, runs, tool audit and events."""
 
 import asyncio
+import ctypes
 import hashlib
 import json
 import os
 import re
 import sqlite3
+import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
@@ -147,6 +149,15 @@ def _owner_alive(owner_id: str) -> bool:
         pid = int(owner_id.split(":", 1)[0])
     except ValueError:
         return True
+    if sys.platform == "win32":
+        # Windows 无 kill(pid, 0)：用 OpenProcess 探活。进程不存在返回
+        # False；权限不足（ERROR_ACCESS_DENIED=5）按存活处理，避免误接管。
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return ctypes.get_last_error() == 5
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

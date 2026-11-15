@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -118,11 +119,13 @@ class SafePatchApplier:
                 os.fsync(handle.fileno())
             os.chmod(temporary, stat.S_IMODE(candidate.stat().st_mode))
             os.replace(temporary, candidate)
-            directory_fd = os.open(candidate.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            if sys.platform != "win32":
+                # 目录 fsync 是 POSIX 持久化语义；Windows 无目录句柄概念，跳过。
+                directory_fd = os.open(candidate.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             if temporary.exists():
                 temporary.unlink()

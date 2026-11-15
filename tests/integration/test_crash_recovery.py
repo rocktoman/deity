@@ -82,8 +82,14 @@ async def test_kill_then_reopen_marks_interrupted_and_unknown(tmp_path: Path) ->
     )
     try:
         await _wait_for_status(db_path, "running")
-        child.send_signal(signal.SIGKILL)
-        assert await asyncio.wait_for(child.wait(), timeout=30) == -signal.SIGKILL
+        if sys.platform == "win32":
+            # Windows 无 SIGKILL：用 TerminateProcess 硬终止（退出码 1）等价注入。
+            child.kill()
+            expected_code = 1
+        else:
+            child.send_signal(signal.SIGKILL)
+            expected_code = -signal.SIGKILL
+        assert await asyncio.wait_for(child.wait(), timeout=30) == expected_code
     finally:
         if child.returncode is None:
             child.kill()
