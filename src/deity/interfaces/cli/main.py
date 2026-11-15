@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -41,7 +42,7 @@ app.add_typer(config_app, name="config")
 app.command("plan")(plan_command)
 app.command("build")(build_command)
 app.command("verify")(verify_command)
-console = Console()
+console = Console(legacy_windows=False)
 
 
 @skills_app.command("list")
@@ -140,12 +141,38 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _ensure_utf8_stdio() -> None:
+    """把标准输出/错误切到 UTF-8。
+
+    Windows 控制台与管道默认 cp1252，打印中文会抛 UnicodeEncodeError；
+    交互输出要求跨平台逐字节一致（见 chat parity 测试），故入口统一处理。
+    已是 UTF-8 的流（如测试捕获）不做任何改动。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        encoding = getattr(stream, "encoding", None)
+        if encoding and encoding.lower().replace("-", "") == "utf8":
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8")
+            except (OSError, ValueError):
+                pass
+
+
+# 模块导入即执行：--help 等路径不经过 Typer 回调，也需要 UTF-8 输出。
+_ensure_utf8_stdio()
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
     version: bool = typer.Option(False, "--version", callback=version_callback, is_eager=True),
 ) -> None:
     """Enter the interactive session when no subcommand is provided."""
+    _ensure_utf8_stdio()
     if ctx.invoked_subcommand is None:
         run(task=None, config=None, workspace=None, db=None, session=None)
 

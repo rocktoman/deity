@@ -38,7 +38,9 @@ async def test_model_explicitly_loads_one_of_ten_skills(tmp_path: Path) -> None:
         directory = root / f"skill{index}"
         directory.mkdir(parents=True)
         (directory / "SKILL.md").write_text(
-            f"---\nname: skill{index}\ndescription: skill {index}\n---\nbody {index}"
+            f"---\nname: skill{index}\ndescription: skill {index}\n---\nbody {index}",
+            encoding="utf-8",
+            newline="",
         )
     model = SkillModel()
     db_path = tmp_path / "deity.db"
@@ -62,10 +64,12 @@ async def test_resource_event_records_explicit_path(tmp_path: Path) -> None:
     root = tmp_path / ".deity/skills/demo"
     root.mkdir(parents=True)
     (root / "SKILL.md").write_text(
-        "---\nname: demo\ndescription: Demo\n---\nRead resources/answer.txt"
+        "---\nname: demo\ndescription: Demo\n---\nRead resources/answer.txt",
+        encoding="utf-8",
+        newline="",
     )
     (root / "resources").mkdir()
-    (root / "resources/answer.txt").write_text("answer")
+    (root / "resources/answer.txt").write_text("answer", encoding="utf-8", newline="")
 
     class ResourceModel:
         turn = 0

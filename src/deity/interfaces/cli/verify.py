@@ -16,7 +16,7 @@ from deity.application.config import load_config
 from deity.application.verification_service import VerificationService
 from deity.core.contracts.verification import FinalReport
 
-console = Console()
+console = Console(legacy_windows=False)
 
 
 def verify_command(

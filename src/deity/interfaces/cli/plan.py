@@ -19,7 +19,7 @@ from deity.core.contracts.planning import PlanArtifact
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
 
 plans_app = typer.Typer(help="List and inspect persisted plans")
-console = Console()
+console = Console(legacy_windows=False)
 
 
 def plan_command(

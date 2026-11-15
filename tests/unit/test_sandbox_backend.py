@@ -1,4 +1,5 @@
 import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -172,10 +173,12 @@ def test_artifact_scan_rejects_excess_bytes(tmp_path: Path) -> None:
 def test_stager_rejects_fifo_and_hardlink(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    os.mkfifo(workspace / "pipe")
-    with pytest.raises(ValueError, match="non-regular"):
-        WorkspaceStager(workspace, tmp_path / "stage-fifo").copy()
-    (workspace / "pipe").unlink()
+    if sys.platform != "win32":
+        # FIFO 是 POSIX 概念，Windows 无 os.mkfifo，仅测硬链接拒绝。
+        os.mkfifo(workspace / "pipe")
+        with pytest.raises(ValueError, match="non-regular"):
+            WorkspaceStager(workspace, tmp_path / "stage-fifo").copy()
+        (workspace / "pipe").unlink()
     (workspace / "first").write_text("x", encoding="utf-8")
     os.link(workspace / "first", workspace / "second")
     with pytest.raises(ValueError, match="non-regular"):

@@ -11,7 +11,9 @@ def create_skill(root: Path, name: str, body: str = "instructions") -> None:
     directory = root / name
     directory.mkdir()
     (directory / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: Use {name} when selected\n---\n{body}"
+        f"---\nname: {name}\ndescription: Use {name} when selected\n---\n{body}",
+        encoding="utf-8",
+        newline="",
     )
 
 
@@ -39,8 +41,8 @@ async def test_resource_requires_prior_activation_and_body_reference(tmp_path: P
     create_skill(root, "safe", "Read resources/allowed.txt")
     resource_dir = root / "safe/resources"
     resource_dir.mkdir()
-    (resource_dir / "allowed.txt").write_text("allowed")
-    (resource_dir / "unlisted.txt").write_text("unlisted")
+    (resource_dir / "allowed.txt").write_text("allowed", encoding="utf-8", newline="")
+    (resource_dir / "unlisted.txt").write_text("unlisted", encoding="utf-8", newline="")
     dispatcher = SkillDispatcher(LocalToolDispatcher(), SkillCatalog((("project", root),)))
     request = AgentRequest("s", "t", str(tmp_path), "use safe", "fake")
     early = await dispatcher.dispatch(
@@ -68,7 +70,7 @@ async def test_skill_loaded_content_has_run_budget(tmp_path: Path) -> None:
     root = tmp_path / "skills"
     root.mkdir()
     create_skill(root, "safe", "Read large.txt")
-    (root / "safe/large.txt").write_text("x" * 15_000)
+    (root / "safe/large.txt").write_text("x" * 15_000, encoding="utf-8", newline="")
     dispatcher = SkillDispatcher(LocalToolDispatcher(), SkillCatalog((("project", root),)))
     request = AgentRequest("s", "t", str(tmp_path), "use safe", "fake", run_id="run")
     assert (
@@ -89,7 +91,7 @@ async def test_resumed_skill_activation_restores_resource_access(tmp_path: Path)
     root = tmp_path / "skills"
     root.mkdir()
     create_skill(root, "safe", "Read answer.txt")
-    (root / "safe/answer.txt").write_text("42")
+    (root / "safe/answer.txt").write_text("42", encoding="utf-8", newline="")
     catalog = SkillCatalog((("project", root),))
     previous = SkillDispatcher(LocalToolDispatcher(), catalog)
     request = AgentRequest("s", "t", str(tmp_path), "use safe", "fake", run_id="old")
@@ -133,7 +135,7 @@ def test_malformed_frontmatter_rejected(tmp_path: Path) -> None:
     root.mkdir()
     directory = root / "bad"
     directory.mkdir()
-    (directory / "SKILL.md").write_text("not frontmatter")
+    (directory / "SKILL.md").write_text("not frontmatter", encoding="utf-8", newline="")
     with pytest.raises(ValueError):
         SkillCatalog((("project", root),))
 
@@ -143,7 +145,7 @@ def test_resource_symlink_is_rejected(tmp_path: Path) -> None:
     root.mkdir()
     create_skill(root, "safe")
     outside = tmp_path / "secret.txt"
-    outside.write_text("secret")
+    outside.write_text("secret", encoding="utf-8", newline="")
     (root / "safe" / "link.txt").symlink_to(outside)
     catalog = SkillCatalog((("project", root),))
     with pytest.raises(ValueError):
@@ -156,7 +158,11 @@ def test_loading_skill_does_not_execute_its_script(tmp_path: Path) -> None:
     create_skill(root, "safe", "Run scripts/do_it.py")
     script = root / "safe/scripts/do_it.py"
     script.parent.mkdir()
-    script.write_text("from pathlib import Path\nPath('executed').write_text('bad')\n")
+    script.write_text(
+        "from pathlib import Path\nPath('executed').write_text('bad')\n",
+        encoding="utf-8",
+        newline="",
+    )
     catalog = SkillCatalog((("project", root),))
     body, _digest = catalog.load("safe")
     assert "scripts/do_it.py" in body
@@ -168,7 +174,9 @@ def test_skill_changed_after_discovery_is_rejected(tmp_path: Path) -> None:
     root.mkdir()
     create_skill(root, "safe", "original")
     catalog = SkillCatalog((("project", root),))
-    (root / "safe/SKILL.md").write_text("---\nname: safe\ndescription: Changed\n---\nnew body")
+    (root / "safe/SKILL.md").write_text(
+        "---\nname: safe\ndescription: Changed\n---\nnew body", encoding="utf-8", newline=""
+    )
     with pytest.raises(ValueError, match="changed"):
         catalog.load("safe")
 
@@ -180,7 +188,9 @@ def test_skill_index_has_total_context_limit(tmp_path: Path) -> None:
         directory = root / f"skill{index}"
         directory.mkdir()
         (directory / "SKILL.md").write_text(
-            f"---\nname: skill{index}\ndescription: {'x' * 400}\n---\nbody"
+            f"---\nname: skill{index}\ndescription: {'x' * 400}\n---\nbody",
+            encoding="utf-8",
+            newline="",
         )
     catalog = SkillCatalog((("project", root),))
     with pytest.raises(ValueError, match="index"):
