@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from deity.adapters.execution.local import run_local_process
+from deity.adapters.execution.session_process import ShellSessionManager
 from deity.adapters.tools.patch import PatchError, plan_patch
 from deity.core.contracts import AgentRequest, ToolCall, ToolResult
 
@@ -53,7 +54,29 @@ class GlobArgs(Args):
 
 
 class ShellArgs(Args):
-    argv: list[str] = Field(min_length=1)
+    """shell 两形态（ADR-019 B1）：一次性命令（仅 argv）与持久会话。
+
+    带 session 时：首次调用以 argv 启动会话进程；后续调用 argv 留空
+    即轮询新输出，stdin 向会话写入，close=true 终止会话。yield_ms
+    是本次调用收集输出的等待窗口。
+    """
+
+    argv: list[str] = Field(default_factory=list)
+    session: str | None = None
+    stdin: str | None = None
+    close: bool = False
+    yield_ms: int = Field(default=1000, ge=0, le=60_000)
+
+    @model_validator(mode="after")
+    def _shape(self) -> "ShellArgs":
+        if self.session is None:
+            if not self.argv:
+                raise ValueError("argv is required without session")
+            if self.stdin is not None or self.close:
+                raise ValueError("stdin/close require a session")
+        elif self.close and (self.argv or self.stdin is not None):
+            raise ValueError("close excludes argv/stdin")
+        return self
 
 
 class EmptyArgs(Args):
@@ -78,6 +101,18 @@ WRITE_TOOLS = {"write_file", "apply_patch", "delete_file"}
 PARALLEL_SAFE_TOOLS = frozenset(
     {"read_file", "list_files", "glob", "grep", "git_status", "git_diff"}
 )
+
+
+def _is_session_poll(name: str, args: dict[str, Any]) -> bool:
+    """纯轮询（ADR-019 B1）：带 session、无 argv/stdin/close 的 shell 调用
+    只读取已批准进程的新输出，不能执行任何新东西，免审批。"""
+    return (
+        name == "shell"
+        and bool(args.get("session"))
+        and not args.get("argv")
+        and args.get("stdin") is None
+        and not args.get("close")
+    )
 
 
 def auto_shell_allowed(args: dict[str, Any], root: Path) -> bool:
@@ -142,11 +177,13 @@ class LocalToolDispatcher:
         timeout_seconds: float = 30,
         max_output_chars: int = 16_000,
         sandbox_shell: Callable[[ToolCall, AgentRequest], Awaitable[ToolResult]] | None = None,
+        session_manager: ShellSessionManager | None = None,
     ) -> None:
         self.approve = approve
         self.timeout_seconds = timeout_seconds
         self.max_output_chars = max_output_chars
         self.sandbox_shell = sandbox_shell
+        self._session_manager = session_manager
         self.audit: list[tuple[str, str, str]] = []
         self.seen: set[tuple[str, str]] = set()
         self._prepared: dict[tuple[str, str], tuple[dict[str, Any], Path, Path]] = {}
@@ -175,6 +212,16 @@ class LocalToolDispatcher:
                         "'*** End of File'. All hunks are validated before any write."
                     )
                     if name == "apply_patch"
+                    else (
+                        "Run a command in the workspace. One-shot by default: {argv}. "
+                        "Persistent session: pass session='<name>' together with argv "
+                        "to start a long-lived process (dev server, watcher, REPL); "
+                        "later calls with the same session and empty argv return only "
+                        "new output, stdin writes input to the process, close=true "
+                        "terminates it. yield_ms bounds how long a call waits for "
+                        "output. Sessions live for the whole run."
+                    )
+                    if name == "shell"
                     else name.replace("_", " ")
                 ),
                 "parameters": schema.model_json_schema(),
@@ -221,7 +268,7 @@ class LocalToolDispatcher:
             if not candidate.is_file():
                 return self._record(call, "denied", "not_regular_file")
             path = candidate
-        if call.name in WRITE_TOOLS | {"shell"}:
+        if call.name in WRITE_TOOLS | {"shell"} and not _is_session_poll(call.name, args):
             if self.approve is None:
                 return self._record(call, "denied", "approval_required")
             if not await asyncio.to_thread(self.approve, call.name, args):
@@ -317,6 +364,8 @@ class LocalToolDispatcher:
         if name == "grep":
             return await self._process(["rg", "--", args["pattern"], str(path)], root)
         if name == "shell":
+            if args.get("session"):
+                return await self._execute_session(args, root)
             return await self._process(args["argv"], root)
         if name == "git_status":
             return await self._process(["git", "status", "--short"], root)
@@ -361,3 +410,57 @@ class LocalToolDispatcher:
         return await run_local_process(
             tuple(argv), root, self.timeout_seconds, self.max_output_chars
         )
+
+    def _sessions(self) -> ShellSessionManager:
+        if self._session_manager is None:
+            self._session_manager = ShellSessionManager()
+        return self._session_manager
+
+    async def aclose(self) -> None:
+        """回收全部持久 shell 会话（ADR-019 B1：run 级资源的收尾）。"""
+        if self._session_manager is not None:
+            await self._session_manager.close_all()
+
+    async def _execute_session(
+        self, args: dict[str, Any], root: Path
+    ) -> tuple[str, int | None, bool]:
+        """持久会话的启动/轮询/写入/关闭；输出为增量段 + 状态行。"""
+        manager = self._sessions()
+        name = str(args["session"])
+        yield_seconds = int(args.get("yield_ms", 1000)) / 1000
+        if args.get("close"):
+            session = await manager.close(name)
+            if session is None:
+                return f"session {name}: not found", 1, False
+            read = session.read_new()
+            state = f"exited {read.exit_code}" if read.exit_code is not None else "terminated"
+            lines = [f"[session {name} closed ({state})]"]
+            if read.text:
+                lines.append(read.text)
+            return "\n".join(lines), read.exit_code, read.dropped_chars > 0
+        argv = [str(item) for item in args.get("argv") or []]
+        if argv:
+            try:
+                session = await manager.start(name, tuple(argv), root)
+            except ValueError as exc:
+                return str(exc), 1, False
+            header = f"[session {name} started pid={session.pid}]"
+        else:
+            if manager.get(name) is None:
+                return f"session {name}: not found", 1, False
+            header = f"[session {name}]"
+            if args.get("stdin") is not None:
+                try:
+                    await manager.write(name, str(args["stdin"]))
+                except ValueError as exc:
+                    return str(exc), 1, False
+        read = await manager.collect(name, yield_seconds)
+        state = "running" if read.running else f"exited {read.exit_code}"
+        lines = [header]
+        if read.text:
+            lines.append(read.text)
+        if read.dropped_chars:
+            lines.append(f"[output buffer dropped {read.dropped_chars} chars]")
+        lines.append(f"[session {name}: {state}]")
+        exit_code = None if read.running else read.exit_code
+        return "\n".join(lines), exit_code, read.dropped_chars > 0

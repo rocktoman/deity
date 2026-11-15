@@ -7,6 +7,20 @@
 
 ### 新增
 
+- F2（融合计划 V1.2 下半，ADR-019）：持久 shell 会话——shell 工具
+  新增 `session`/`stdin`/`close`/`yield_ms` 参数，可在一次运行内
+  跨轮保活进程（dev server、watch、REPL），按游标增量取输出；
+  纯轮询免审批，启动与写入仍走审批门；运行结束统一回收，另有
+  900 秒空闲回收。
+- F2（ADR-019）：持久审批规则——审批决定可沉淀为
+  `~/.config/deity/rules.toml`（或 `DEITY_RULES_PATH`）中的
+  allow/deny 规则（shell 为命令模式、其余为工具级），ask 路径下
+  规则先行表态；审批卡片新增「永久允许（保存为规则）」选项，
+  `deity rules list/add/remove` 管理规则文件。
+- F2（ADR-019）：compact 结构化摘要——`[run] compact_summary`
+  开启后，压缩时用本次运行的模型为被折叠的旧轮次生成结构化
+  摘要（`compaction_summary_v1` 消息），与确定性账本并存；摘要
+  失败或导致超限时回退纯账本，默认关闭。
 - F1（融合计划 V1.2 上半，ADR-018）：apply_patch 新增多文件 patch
   文本形态（`patch` 参数：Add/Delete/Update/Move hunk、`@@` 上下文锚、
   四级模糊定位、先全量校验后落盘；旧 `path`+`old`+`new` 形态保留

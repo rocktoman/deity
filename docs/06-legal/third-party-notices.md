@@ -15,5 +15,16 @@ Deity 的实现均为自研；个别模块在设计与算法层面参照了开�
 - 本仓库对应实现：`src/deity/adapters/tools/patch.py`（ADR-018）。
   一处刻意差异：old_lines 为空的 chunk（纯插入）在锚点位置插入，
   而非追加到文件末尾。
+- 参照对象：`codex-rs/core/src/unified_exec` 的进程会话模型
+  （会话表、write_stdin、分段取输出）与
+  `codex-rs/prompts/templates/compact` 摘要模板的章节结构。
+- 本仓库对应实现：`src/deity/adapters/execution/session_process.py`
+  （ADR-019 B1）与 `src/deity/core/context/reliable.py` 的
+  `build_summary_prompt`（ADR-019 A5，模板文本为重新编写）。
+- 参照对象：`codex-rs/execpolicy` 的「持久前缀规则 + amend 流程」
+  审批资产形态。
+- 本仓库对应实现：`src/deity/application/approval_rules.py`
+  （ADR-019 A3；规则格式为 Deity 自己的 TOML，模式语义与既有
+  会话允许模式一致）。
 - 许可证全文：https://www.apache.org/licenses/LICENSE-2.0
   （Apache License, Version 2.0；Copyright OpenAI）。

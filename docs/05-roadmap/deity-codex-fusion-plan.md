@@ -182,6 +182,7 @@ Deity 现状（实读 `src/deity/core/context/reliable.py`）：压缩是**确�
 内容：B1（持久 shell）+ A3（规则文件）+ A5（compact 触发与摘要）。
 目标：dev server/长测试能跑；审批决定能沉淀；长会话不丢魂。
 验收：后台进程跑 dev server 并被工具读到输出的端到端用例；规则文件 amend 全流程测试；compact 后继续任务的回归用例（含账本可查）。
+进展（2026-11-15）：B1/A3/A5 已实现（ADR-019；session_process 会话表 + approval_rules 规则文件 + compact_summary_v1 摘要），新增 31 个专项测试；dev server 端到端、amend 全流程、compact 后继续任务三项验收用例均已落地。
 - **F3：安全分级与会话 UX**
 内容：B2（bwrap 沙箱档）+ A6（resume 选择器/fork/archive）+ A7（JSONL 导出）+ B5（约束层）。
 目标：Linux 上 workspace-write 成为真沙箱而非自觉；会话管理追平主流手感。

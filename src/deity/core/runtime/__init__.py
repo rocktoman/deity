@@ -19,7 +19,10 @@ from deity.core.context.reliable import (
     ConservativeEstimator,
     ContextBudget,
     ContextCompactor,
+    ContextOverflow,
+    build_summary_prompt,
     normalize_unicode,
+    sanitize_text,
 )
 from deity.core.contracts import (
     AgentRequest,
@@ -372,7 +375,21 @@ class AgentLoop:
                     else 0
                 )
                 old_estimate = estimator.estimate(messages, schema_tokens)
-                snapshot = ContextCompactor(estimator).compact(messages, budget, schema_tokens)
+                compactor = ContextCompactor(estimator)
+                summary_text: str | None = None
+                if request.compact_summary:
+                    source = compactor.summary_source(messages, budget, schema_tokens)
+                    if source is not None:
+                        summary_text = await self._summarize(source, request, deadline)
+                try:
+                    snapshot = compactor.compact(
+                        messages, budget, schema_tokens, summary=summary_text
+                    )
+                except ContextOverflow:
+                    if summary_text is None:
+                        raise
+                    # 摘要本身导致超限：丢弃摘要回退纯账本（ADR-019 A5）。
+                    snapshot = compactor.compact(messages, budget, schema_tokens)
                 if snapshot.estimated_tokens < old_estimate:
                     await self._repository.record_context_compaction(
                         run_id,
@@ -688,6 +705,31 @@ class AgentLoop:
             payload["workspace_fingerprint"] = self._workspace_fingerprint()
         payload["config_fingerprint"] = self._config_fingerprint
         return payload
+
+    async def _summarize(self, source: str, request: AgentRequest, deadline: float) -> str | None:
+        """A5 摘要生成（ADR-019）：用本次运行的模型发一次无工具调用。
+
+        任何失败（超时、模型错误、空文本）都返回 None，调用方回退纯
+        账本压缩；运行取消（CancelledError）不吞，照常向上传播。摘要
+        调用的 token 暂不计入运行用量上限（有独立的输出/时间上限）。
+        """
+        timeout = min(60.0, deadline - time.monotonic())
+        if timeout <= 0:
+            return None
+        model_request = ModelRequest(
+            request.model,
+            ({"role": "user", "content": build_summary_prompt(source)},),
+            (),
+            2048,
+        )
+        try:
+            text, _calls, _usage = await asyncio.wait_for(
+                self._collect(self._model.stream(model_request)), timeout=timeout
+            )
+        except (ModelFailure, OSError, ProtocolError, TimeoutError, ValueError):
+            return None
+        cleaned = sanitize_text(text).strip()
+        return cleaned or None
 
     @staticmethod
     async def _collect(
