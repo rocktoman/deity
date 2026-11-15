@@ -13,6 +13,20 @@
   `qwen3.8-omni-flash`，默认端点为 DashScope OpenAI 兼容端点，可用 `base_url` 覆盖）。
 - V1.1-M1：新增 `deity init` 命令生成最小可用配置（默认 Qwen；只写密钥环境变量名，
   不写密钥值；已有配置默认拒绝覆盖，`--force` 才覆盖）。
+- V1.1-M2：新增进程内事件总线 `InProcessEventBus`（ADR-017）：`run_stream` 与
+  `ClientService` 的进程内订阅统一走总线（回放 + live），SQLite 只做持久化、
+  跨进程接入与重放；新增 CLI 视图模型 `ChatViewModel`（事件先折叠成状态树，
+  渲染器只画树）；工具分发器组装自 `RunService` 抽出为 `ToolPipeline`。
+- V1.1-M3：流式渲染增强：Markdown 按段落块渲染（终端流式时开启）、工具节点
+  折叠/展开（完成行只显示摘要，新增 `/tools` 命令展开完整参数）、状态条补
+  当前工具与上下文占用、长时间无事件时的思考/运行提示。
+- V1.1-M4：`deity config show` 分层展示有效配置（每段标注来源层，密钥只查
+  环境变量存在性）；TUI 冻结为监视用途并在文档标注（不再新增功能）。
+
+### 变更
+
+- V1.1-M4：shell 工具的「本次会话允许」细化到命令模式（如 `pytest *`，
+  按命令首 token 派生），不再放行整个 shell 工具；非 shell 工具不变。
 
 ## [1.0.0] — 2026-11-09
 

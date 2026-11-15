@@ -57,6 +57,21 @@
 - **M4 审批与收尾**：会话级允许细化到命令模式（如 `pytest *`）；TUI 冻结决策落地
   （只保留监视用途并在文档标注，或移除默认入口）；`deity config show` 分层展示。
 
+### 实施进度（2026-11-15）
+
+- **M1 已交付**：Qwen 一等厂商 + `deity init`（见 M1 提交）。
+- **M2 已交付**：进程内事件总线 `InProcessEventBus`（ADR-017），`run_stream` 与
+  `ClientService` 进程内订阅统一走总线，SQLite 只做持久化/跨进程/重放；CLI 新增
+  `ChatViewModel` 状态树，渲染器只画树；组装逻辑自 `RunService` 抽出为 `ToolPipeline`。
+- **M3 已交付**：Markdown 按段落块渲染（终端流式开启）、工具节点折叠/展开
+  （新增 `/tools`）、状态条补当前工具与上下文占用、思考/运行提示。
+- **M4 已交付**：shell 会话允许细化到命令模式（首 token 派生，如 `pytest *`）；
+  新增 `deity config show` 分层展示；TUI 冻结为监视用途并在代码与文档标注。
+- **验证（2026-11-15）**：全量测试 611 通过 / 5 失败 / 16 跳过——5 个失败均为
+  本机既有环境问题（4 个 release-artifact、1 个 crash_recovery  flaky，单独重跑通过），
+  无新增失败；ruff check / format 与 mypy strict 全过；真实 Qwen
+  （`qwen3.8-omni-flash`）端到端冒烟通过。状态：**待合并 main**（等用户确认）。
+
 ## V1.2 能力补课
 
 验收标准：拿 10 个真实中型仓库任务跑自带 benchmark，和 V1.0 比成功率与平均轮次。

@@ -70,35 +70,47 @@ class RunViewModel:
                     call_id=call_id, name=str(payload.get("tool_name", ""))
                 )
         elif event.kind == "ToolCompleted":
-            call_id = str(payload.get("call_id", ""))
-            view = self._tools.get(call_id)
-            if view is None and call_id:
-                view = ToolCallView(call_id=call_id, name=str(payload.get("tool_name", "")))
-                self._tools[call_id] = view
-            if view is not None:
-                status = str(payload.get("status", "ok"))
-                view.status = (
-                    cast(ToolStatus, status)
-                    if status
-                    in {
-                        "ok",
-                        "error",
-                        "denied",
-                        "timeout",
-                        "cancelled",
-                        "unknown",
-                    }
-                    else "unknown"
-                )
-                output = str(payload.get("output", ""))
-                if len(output) > self.max_tool_output_chars:
-                    output = output[: self.max_tool_output_chars] + "…"
-                view.output = output
+            self._complete_tool(
+                str(payload.get("call_id", "")),
+                str(payload.get("tool_name", "")),
+                str(payload.get("status", "ok")),
+                str(payload.get("output", "")),
+            )
+        elif event.kind == "tool_call_completed":
+            # live 事件（V1.1-M2 事件总线）：与 ToolCompleted 同义，
+            # 工具名在 name 字段、无 output 字段。
+            self._complete_tool(
+                str(payload.get("call_id", "")),
+                str(payload.get("name", "")),
+                str(payload.get("status", "ok")),
+                "",
+            )
         elif event.kind == "RunStatusChanged":
             status = str(payload.get("status", ""))
             if status:
                 self.status = status
+        elif event.kind == "run_status":
+            # live 终态事件（事件总线）：与 RunStatusChanged 同义。
+            status = str(payload.get("status", ""))
+            if status:
+                self.status = status
         return True
+
+    def _complete_tool(self, call_id: str, name: str, status: str, output: str) -> None:
+        """工具完成折叠：持久化 ToolCompleted 与 live tool_call_completed 共用。"""
+        view = self._tools.get(call_id)
+        if view is None and call_id:
+            view = ToolCallView(call_id=call_id, name=name)
+            self._tools[call_id] = view
+        if view is not None:
+            view.status = (
+                cast(ToolStatus, status)
+                if status in {"ok", "error", "denied", "timeout", "cancelled", "unknown"}
+                else "unknown"
+            )
+            if len(output) > self.max_tool_output_chars:
+                output = output[: self.max_tool_output_chars] + "…"
+            view.output = output
 
     def apply_approval(self, request: ApprovalRequest) -> bool:
         """登记审批；同一 approval_id 只保留首次登记。"""

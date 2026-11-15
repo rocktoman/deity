@@ -25,10 +25,8 @@ from deity.adapters.model.openai_compatible import OpenAICompatibleProvider
 from deity.adapters.skills import SkillCatalog, SkillDispatcher
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.adapters.tools import LocalToolDispatcher, auto_shell_allowed
-from deity.adapters.tools.code_intelligence import CodeIntelligenceDispatcher
 from deity.adapters.tools.delegation import DelegationDispatcher
 from deity.adapters.tools.git_guard import GitGuardedDispatcher
-from deity.adapters.tools.planning import PlanningDispatcher
 from deity.adapters.tools.read_only import ReadOnlyToolDispatcher
 from deity.adapters.tools.workspace import workspace_digest
 from deity.application.config import (
@@ -44,7 +42,9 @@ from deity.application.config import (
     SandboxConfig,
     VerificationConfig,
 )
+from deity.application.event_bus import InProcessEventBus
 from deity.application.sandbox_service import SandboxService, SandboxUnavailable
+from deity.application.tool_pipeline import ToolPipeline
 from deity.core.context import HARNESS_SYSTEM_INSTRUCTIONS, ContextBuilder
 from deity.core.context.reliable import normalize_unicode
 from deity.core.contracts import (
@@ -186,6 +186,22 @@ class RunService:
         self._active_loop: AgentLoop | None = None
         self._active_children: dict[str, AgentLoop] = {}
         self._sandbox_active_run_id: str | None = None
+        self._tool_pipeline = ToolPipeline(
+            workspace=self.workspace,
+            db_path=self.db_path,
+            authorize=self._authorize,
+            mcp_wrap=self._mcp_dispatcher,
+            sandbox_shell=(
+                self._sandbox_shell
+                if self.sandbox.enabled and self.sandbox.backend == "docker"
+                else None
+            ),
+            skill_catalog=self.skill_catalog,
+            code_intelligence_enabled=self.coding.code_intelligence_enabled,
+            code_search=self._code_search,
+            git_guard_enabled=self.coding.git_guard_enabled,
+            require_read_before_write=self.git_guard.require_read_before_write,
+        )
 
     def cancel(self, run_id: str) -> bool:
         """Signal cancellation to this service's active run."""
@@ -779,53 +795,16 @@ class RunService:
         plan_targets: tuple[str, ...] | None = None,
         approved_plan_writes: bool = False,
     ) -> tuple[ToolDispatcher, GitGuardedDispatcher | None]:
-        def authorize(name: str, args: dict[str, Any]) -> bool:
-            if approved_plan_writes and name in {"write_file", "apply_patch", "delete_file"}:
-                return True
-            return self._authorize(name, args)
-
-        guard_ref: list[GitGuardedDispatcher | None] = [None]
-        dispatcher: ToolDispatcher = await self._mcp_dispatcher(
-            LocalToolDispatcher(
-                approve=authorize,
-                sandbox_shell=(
-                    lambda call, context: self._sandbox_shell(repo, call, context, guard_ref[0])
-                )
-                if self.sandbox.enabled and self.sandbox.backend == "docker"
-                else None,
-            )
+        """组装顺序已抽到 ToolPipeline（V1.1-M2）；本方法保留为兼容入口。"""
+        return await self._tool_pipeline.compose(
+            repo,
+            mode,
+            baseline=baseline,
+            allow_dirty_paths=allow_dirty_paths,
+            change_set_id=change_set_id,
+            plan_targets=plan_targets,
+            approved_plan_writes=approved_plan_writes,
         )
-        if self.skill_catalog is not None:
-            dispatcher = SkillDispatcher(dispatcher, self.skill_catalog)
-        if self.coding.code_intelligence_enabled:
-            dispatcher = CodeIntelligenceDispatcher(dispatcher, self._code_search(), repo)
-        if mode == ExecutionMode.PLAN:
-            return (
-                PlanningDispatcher(
-                    dispatcher,
-                    repo,
-                    GitWorkspaceAdapter(self.workspace, ignored=(self.db_path,)),
-                ),
-                None,
-            )
-        if self.coding.git_guard_enabled:
-            if baseline is None:
-                baseline = await GitWorkspaceAdapter(
-                    self.workspace, ignored=(self.db_path,)
-                ).capture()
-                await repo.create_workspace_snapshot(baseline)
-            guarded = GitGuardedDispatcher(
-                dispatcher,
-                repo,
-                baseline,
-                allow_dirty_paths=allow_dirty_paths,
-                require_read_before_write=self.git_guard.require_read_before_write,
-                change_set_id=change_set_id,
-                plan_targets=plan_targets,
-            )
-            guard_ref[0] = guarded
-            return guarded, guarded
-        return dispatcher, None
 
     async def run(
         self,
@@ -993,15 +972,18 @@ class RunService:
     ) -> AsyncIterator[ClientEvent]:
         """执行一次任务并以 live ClientEvent 流产出模型增量与工具完成事件。
 
-        复用 run() 的全部装配逻辑（分发器、上下文、审批链），只多接一条
-        live 事件流（ADR-016）。live 事件不写 SQLite、不参与重放；
-        结束时补一条终态 run_status 事件（payload 含 status / final_text）。
-        Run 被 cancel() 时以 status=cancelled 的终态事件正常结束；
-        其它异常在排空已发事件后原样向上传播，与 run() 的异常语义一致。
+        复用 run() 的全部装配逻辑（分发器、上下文、审批链），live 事件
+        经进程内事件总线（V1.1-M2）投递：AgentLoop 的 live_event_sink
+        直接 publish 到总线，本方法订阅同一 Run 的事件流转发给消费方。
+        live 事件不写 SQLite、不参与重放；结束时补一条终态 run_status
+        事件（payload 含 status / final_text）。Run 被 cancel() 时以
+        status=cancelled 的终态事件正常结束；其它异常在排空已发事件后
+        原样向上传播，与 run() 的异常语义一致。
         """
-        queue: asyncio.Queue[ClientEvent] = asyncio.Queue()
+        bus = InProcessEventBus()
         run_id = str(uuid4())
         active_session = session_id or str(uuid4())
+        subscription = bus.subscribe(run_id)
         forwarded = 0
         runner = asyncio.create_task(
             self.run(
@@ -1010,26 +992,26 @@ class RunService:
                 session_id=active_session,
                 execution_mode=execution_mode,
                 run_id=run_id,
-                live_event_sink=queue.put_nowait,
+                live_event_sink=bus.publish,
             )
         )
         try:
             while not runner.done():
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=0.05)
-                except TimeoutError:
+                event = await subscription.next_event(0.05)
+                if event is None:
                     continue
                 forwarded += 1
                 yield event
-            while not queue.empty():
+            for event in subscription.drain():
                 forwarded += 1
-                yield queue.get_nowait()
+                yield event
         except asyncio.CancelledError:
             runner.cancel()
             raise
         finally:
             if not runner.done():
                 runner.cancel()
+            subscription.detach()
         try:
             result = runner.result()
         except asyncio.CancelledError:

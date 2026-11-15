@@ -15,6 +15,8 @@ class ChatStatus:
     tool_calls: int = 0
     input_tokens: int | None = None
     output_tokens: int | None = None
+    last_input_tokens: int | None = None
+    context_window_tokens: int | None = None
     started_at: float = field(default_factory=time.monotonic)
     elapsed_seconds: float = 0.0
     clock: Callable[[], float] = time.monotonic
@@ -30,6 +32,8 @@ class ChatStatus:
             outgoing = event.payload.get("output_tokens")
             if isinstance(incoming, int):
                 self.input_tokens = (self.input_tokens or 0) + incoming
+                # 最近一次 usage 的输入量近似当前上下文占用（状态条用）。
+                self.last_input_tokens = incoming
             if isinstance(outgoing, int):
                 self.output_tokens = (self.output_tokens or 0) + outgoing
         self.elapsed_seconds = self.clock() - self.started_at
@@ -40,18 +44,34 @@ class ChatStatus:
             return "—"
         return f"{self.input_tokens or 0}/{self.output_tokens or 0} tokens"
 
+    def context_text(self) -> str | None:
+        """上下文占用：最近输入 token / 窗口；数据不全时返回 None 不编造。"""
+        if self.last_input_tokens is None or not self.context_window_tokens:
+            return None
+        return f"上下文 {self.last_input_tokens}/{self.context_window_tokens}"
+
     def summary_line(
-        self, *, model_name: str, mode: str, context_messages: int | None = None
+        self,
+        *,
+        model_name: str,
+        mode: str,
+        context_messages: int | None = None,
+        current_tool: str | None = None,
     ) -> str:
-        """状态栏一行摘要：模型、模式、轮次、工具数、token、耗时。"""
+        """状态栏一行摘要：模型、模式、轮次、工具数、当前工具、token、上下文、耗时。"""
         parts = [
             f"模型 {model_name}",
             mode,
             f"第 {self.turns} 轮",
             f"工具 {self.tool_calls} 次",
-            self.token_text(),
-            f"{self.elapsed_seconds:.1f}s",
         ]
+        if current_tool:
+            parts.append(f"当前工具 {current_tool}")
+        parts.append(self.token_text())
+        context = self.context_text()
+        if context is not None:
+            parts.append(context)
+        parts.append(f"{self.elapsed_seconds:.1f}s")
         if context_messages is not None:
             parts.append(f"上下文 {context_messages} 条")
         return " · ".join(parts)

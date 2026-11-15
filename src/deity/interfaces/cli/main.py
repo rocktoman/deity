@@ -18,6 +18,7 @@ from deity.interfaces.cli.chat_approval import ApprovalController, make_approve
 from deity.interfaces.cli.chat_commands import run_error_message
 from deity.interfaces.cli.chat_session import run_chat_session
 from deity.interfaces.cli.code import _search, code_app
+from deity.interfaces.cli.config_show import format_config_show
 from deity.interfaces.cli.init_config import build_init_config, write_init_config
 from deity.interfaces.cli.plan import build_command, plan_command, plans_app
 from deity.interfaces.cli.sandbox import sandbox_app
@@ -35,6 +36,8 @@ app.add_typer(code_app, name="code")
 app.add_typer(sandbox_app, name="sandbox")
 eval_app = typer.Typer(help="Replay eval reports and check the regression gate")
 app.add_typer(eval_app, name="eval")
+config_app = typer.Typer(help="Inspect effective configuration")
+app.add_typer(config_app, name="config")
 app.command("plan")(plan_command)
 app.command("build")(build_command)
 app.command("verify")(verify_command)
@@ -361,6 +364,26 @@ def init_command(
     )
 
 
+@config_app.command("show")
+def config_show(
+    config: Annotated[Path | None, typer.Option("--config", help="用户 TOML 配置路径")] = None,
+    workspace: Annotated[Path | None, typer.Option("--workspace", help="工作区路径")] = None,
+) -> None:
+    """分层展示有效配置：每段标注来源（默认/用户/项目），密钥只查存在性。"""
+    try:
+        workdir = (workspace or Path.cwd()).resolve(strict=True)
+        settings, sources = ConfigResolver.resolve(
+            {},
+            workdir / ".deity" / "config.toml",
+            config or Path.home() / ".config/deity/config.toml",
+            loader=load_config,
+        )
+    except (ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+    typer.echo(format_config_show(settings, sources))
+
+
 @app.command()
 def doctor(
     config: Annotated[Path | None, typer.Option("--config", help="TOML 配置路径")] = None,
@@ -382,10 +405,11 @@ def tui(
     task: Annotated[str | None, typer.Option("--task", help="启动新 Run 的任务")] = None,
     run_id: Annotated[str | None, typer.Option("--run-id", help="接入已有 Run")] = None,
 ) -> None:
-    """启动 Textual TUI；未安装 Textual 时提示安装方式并退出码 2。
+    """启动 Textual TUI（已冻结：仅监视用途，不再新增功能，见 V1.1-M4）。
 
-    经 ClientService 订阅事件喂给 TuiApp：a/d 批准/拒绝首个待决审批，
-    c 取消当前 Run，r 恢复当前/指定 Run。
+    未安装 Textual 时提示安装方式并退出码 2。经 ClientService 订阅事件
+    喂给 TuiApp：a/d 批准/拒绝首个待决审批，c 取消当前 Run，r 恢复
+    当前/指定 Run。日常交互请用 CLI。
     """
     try:
         from deity.application.client_service import ClientService

@@ -5,11 +5,18 @@ deny/auto 策略仍由 _authorize 先行决定，本模块只处理 ask 策略�
 到 CLI 的那一步。allow_session 只在内存、只对 (tool_name, workspace)
 生效，会话结束即失效；不写磁盘、不跨会话共享。
 
+V1.1-M4 起，shell 工具的 allow_session 细化到命令模式：选「本次会话
+允许」时记录的是命令首个 token 派生的模式（如 `pytest *`），而不是
+放行整个 shell 工具；同模式的后续命令直接放行，不同命令仍出卡片。
+非 shell 工具保持 (tool_name, workspace) 粒度不变。
+
 注意：decide() 由工具分发器经 asyncio.to_thread 在工作线程调用，
 卡片渲染与输入均用同步 API（Rich Console 自带锁；input() 直接读 stdin），
 不得在这里用 prompt_toolkit（非线程安全）或 await。
 """
 
+import fnmatch
+import shlex
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -25,25 +32,81 @@ ApprovalDecision = Literal["allow_once", "allow_session", "deny"]
 _MAX_DIFF_CHARS = 200_000
 
 
+def shell_command_text(args: dict[str, Any]) -> str:
+    """从 shell 工具参数取命令全文：command 字符串优先，其次 argv 拼接。"""
+    command = args.get("command")
+    if isinstance(command, str):
+        return command
+    argv = args.get("argv")
+    if isinstance(argv, list):
+        return " ".join(str(item) for item in argv)
+    return ""
+
+
+def command_pattern_for(args: dict[str, Any]) -> str | None:
+    """由一条 shell 命令派生会话允许模式：首 token + ` *`（单 token 用其本身）。
+
+    例：`pytest -q tests/` -> `pytest *`；`ls` -> `ls`。
+    无法解析出 token 时返回 None，调用方回退到工具级允许。
+    """
+    text = shell_command_text(args).strip()
+    if not text:
+        return None
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    if not tokens:
+        return None
+    if len(tokens) == 1:
+        return tokens[0]
+    return f"{tokens[0]} *"
+
+
 class SessionAllowlist:
-    """会话级允许表：(tool_name, workspace) -> 已允许。仅内存。"""
+    """会话级允许表：工具级 (tool_name, workspace) + shell 命令模式。仅内存。"""
 
     def __init__(self) -> None:
         self._allowed: set[tuple[str, str]] = set()
+        self._patterns: set[tuple[str, str]] = set()
 
     def allow(self, tool_name: str, workspace: Path) -> None:
-        """记录一次 allow_session 决策。"""
+        """记录一次工具级 allow_session 决策。"""
         self._allowed.add((tool_name, str(workspace.resolve())))
 
-    def is_allowed(self, tool_name: str, workspace: Path) -> bool:
-        """该工具在该工作区是否已被本次会话允许。"""
-        return (tool_name, str(workspace.resolve())) in self._allowed
+    def allow_pattern(self, workspace: Path, pattern: str) -> None:
+        """记录一条 shell 命令模式的 allow_session 决策。"""
+        self._patterns.add((str(workspace.resolve()), pattern))
+
+    def patterns(self, workspace: Path | None = None) -> tuple[str, ...]:
+        """已允许的命令模式（可按工作区过滤），排序后返回。"""
+        if workspace is None:
+            return tuple(sorted({pattern for _, pattern in self._patterns}))
+        resolved = str(workspace.resolve())
+        return tuple(sorted({pattern for ws, pattern in self._patterns if ws == resolved}))
+
+    def is_allowed(
+        self, tool_name: str, workspace: Path, args: dict[str, Any] | None = None
+    ) -> bool:
+        """该调用是否已被本次会话允许：先查工具级，再查 shell 命令模式。"""
+        resolved = str(workspace.resolve())
+        if (tool_name, resolved) in self._allowed:
+            return True
+        if tool_name == "shell" and args is not None:
+            text = shell_command_text(args).strip()
+            if text:
+                return any(
+                    fnmatch.fnmatchcase(text, pattern)
+                    for ws, pattern in self._patterns
+                    if ws == resolved
+                )
+        return False
 
     def __bool__(self) -> bool:
-        return bool(self._allowed)
+        return bool(self._allowed or self._patterns)
 
     def __len__(self) -> int:
-        return len(self._allowed)
+        return len(self._allowed) + len(self._patterns)
 
 
 class ApprovalCard:
@@ -58,11 +121,7 @@ class ApprovalCard:
         """卡片正文：按工具类型展示最关键的执行内容。"""
         lines = [f"工具：{self.tool_name}"]
         if self.tool_name == "shell":
-            command = self.args.get("command")
-            if not isinstance(command, str):
-                argv = self.args.get("argv")
-                command = " ".join(argv) if isinstance(argv, list) else ""
-            lines.append(f"命令：{command}")
+            lines.append(f"命令：{shell_command_text(self.args)}")
             lines.append("风险：Shell 命令将在本机工作区执行。")
         elif self.tool_name == "write_file":
             path = str(self.args.get("path", ""))
@@ -119,8 +178,16 @@ class ApprovalCard:
     def prompt(
         self, console: Console, *, input_fn: Callable[[str], str] | None = None
     ) -> ApprovalDecision:
-        """三选一：默认拒绝；输入异常（EOF/Ctrl-C）同样拒绝。"""
-        console.print("[1] 允许一次  [2] 本次会话都允许  [3] 拒绝（默认）")
+        """三选一：默认拒绝；输入异常（EOF/Ctrl-C）同样拒绝。
+
+        shell 工具的选项 2 展示将记录的命令模式（M4），让用户明确知道
+        放行范围是同类命令而不是整个 shell。
+        """
+        pattern = command_pattern_for(self.args) if self.tool_name == "shell" else None
+        if pattern is not None:
+            console.print(f"[1] 允许一次  [2] 本次会话允许同类命令（{pattern}）  [3] 拒绝（默认）")
+        else:
+            console.print("[1] 允许一次  [2] 本次会话都允许  [3] 拒绝（默认）")
         read = input_fn or input
         try:
             choice = read("选择 [1/2/3]（默认拒绝）> ").strip()
@@ -160,7 +227,7 @@ class ApprovalController:
         """approve(name, args) -> bool 的实现：折叠卡片决策。"""
         if self.mode == "auto":
             return True
-        if self.allowlist.is_allowed(name, self.workspace):
+        if self.allowlist.is_allowed(name, self.workspace, args):
             return True
         card = ApprovalCard(name, args, workspace=self.workspace)
         card.render(self.console)
@@ -168,7 +235,11 @@ class ApprovalController:
         if decision == "allow_once":
             return True
         if decision == "allow_session":
-            self.allowlist.allow(name, self.workspace)
+            pattern = command_pattern_for(args) if name == "shell" else None
+            if pattern is not None:
+                self.allowlist.allow_pattern(self.workspace, pattern)
+            else:
+                self.allowlist.allow(name, self.workspace)
             self.mode = "session"
             return True
         return False
@@ -210,5 +281,7 @@ __all__ = [
     "ApprovalController",
     "ApprovalDecision",
     "SessionAllowlist",
+    "command_pattern_for",
     "make_approve",
+    "shell_command_text",
 ]
