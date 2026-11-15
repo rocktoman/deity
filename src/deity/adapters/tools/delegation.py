@@ -54,6 +54,12 @@ class DelegationDispatcher:
             },
         )
 
+    def supports_parallel(self, name: str) -> bool:
+        if name == "delegate":
+            return False
+        check = getattr(self.inner, "supports_parallel", None)
+        return bool(check(name)) if callable(check) else False
+
     async def prepare(self, call: ToolCall, context: AgentRequest) -> ToolResult | None:
         """Validate a complete batch before the Runtime claims the tool call."""
         if call.name != "delegate":

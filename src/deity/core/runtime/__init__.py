@@ -129,7 +129,10 @@ def _emit_model_event(event: ModelEvent, emit: Callable[[str, dict[str, Any]], N
 
 
 class AgentLoop:
-    """Collect complete model turns, then execute tool calls serially."""
+    """Collect complete model turns, then execute their tool calls.
+
+    只读调用按连续批次并发执行，其余调用串行（ADR-018 A2）。
+    """
 
     def __init__(
         self,
@@ -450,10 +453,17 @@ class AgentLoop:
                         raise ProtocolError("重复 call_id")
                     seen.add(call.call_id)
                 messages.append(self._context.assistant_calls(text, calls))
-                for call in calls:
+                supports_parallel = getattr(self._tools, "supports_parallel", None)
+
+                def _parallel_eligible(call: ToolCall, _check: Any = supports_parallel) -> bool:
+                    return callable(_check) and bool(_check(call.name))
+
+                async def _prepare_call(
+                    call: ToolCall, _reservations: Any = reservations
+                ) -> ToolResult | None:
                     self._cancellation.raise_if_cancelled()
-                    if callable(reservations):
-                        _, current_reserved_tools, _, _ = await reservations(run_id)
+                    if callable(_reservations):
+                        _, current_reserved_tools, _, _ = await _reservations(run_id)
                         if tool_count + current_reserved_tools + 1 > limits.max_tool_calls:
                             raise BudgetExceeded("delegated_max_tool_calls")
                     veto = await self._run_hook(
@@ -485,19 +495,24 @@ class AgentLoop:
                         ),
                     ):
                         raise ProtocolError("工具调用已被占用")
-                    if prepared_result is None:
-                        try:
-                            result = await asyncio.wait_for(
-                                self._tools.dispatch(call, request),
-                                timeout=max(0.001, deadline - time.monotonic()),
-                            )
-                        except (Exception, asyncio.CancelledError) as exc:
-                            await self._repository.mark_tool_unknown(
-                                run_id, call.call_id, type(exc).__name__, epoch=epoch
-                            )
-                            raise
-                    else:
-                        result = prepared_result
+                    return prepared_result
+
+                async def _dispatch_call(call: ToolCall) -> ToolResult:
+                    try:
+                        return await asyncio.wait_for(
+                            self._tools.dispatch(call, request),
+                            timeout=max(0.001, deadline - time.monotonic()),
+                        )
+                    except (Exception, asyncio.CancelledError) as exc:
+                        await self._repository.mark_tool_unknown(
+                            run_id, call.call_id, type(exc).__name__, epoch=epoch
+                        )
+                        raise
+
+                async def _finish_call(
+                    call: ToolCall, result: ToolResult, _messages: Any = messages
+                ) -> None:
+                    nonlocal tool_count
                     tool_count += 1
                     await self._repository.record_tool(run_id, result, epoch=epoch)
                     if emit is not None:
@@ -519,7 +534,56 @@ class AgentLoop:
                         {"call_id": call.call_id, "name": call.name, "status": result.status},
                     )
                     await self._repository.record_step(run_id, "tool", result.status, epoch=epoch)
-                    messages.append(self._context.tool_result(result))
+                    _messages.append(self._context.tool_result(result))
+
+                # 串行段与并行批次交替执行（ADR-018 A2）：连续的可并行调用
+                # 先逐个 prepare/claim，再并发 dispatch，最后按原序 finish；
+                # 其余调用保持原串行语义，构成批次屏障。
+                call_index = 0
+                while call_index < len(calls):
+                    if not _parallel_eligible(calls[call_index]):
+                        call = calls[call_index]
+                        call_index += 1
+                        prepared_result = await _prepare_call(call)
+                        result = (
+                            prepared_result
+                            if prepared_result is not None
+                            else await _dispatch_call(call)
+                        )
+                        await _finish_call(call, result)
+                        continue
+                    batch: list[ToolCall] = []
+                    while call_index < len(calls) and _parallel_eligible(calls[call_index]):
+                        batch.append(calls[call_index])
+                        call_index += 1
+                    prepared_batch = [await _prepare_call(call) for call in batch]
+                    results: list[ToolResult | None] = list(prepared_batch)
+                    pending = [
+                        offset for offset, prepared in enumerate(prepared_batch) if prepared is None
+                    ]
+                    if len(pending) == 1:
+                        results[pending[0]] = await _dispatch_call(batch[pending[0]])
+                    elif pending:
+                        outcomes = await asyncio.gather(
+                            *(_dispatch_call(batch[offset]) for offset in pending),
+                            return_exceptions=True,
+                        )
+                        for offset, outcome in zip(pending, outcomes, strict=True):
+                            if isinstance(outcome, BaseException):
+                                raise outcome
+                            results[offset] = outcome
+                    for call, batch_result in zip(batch, results, strict=True):
+                        assert batch_result is not None
+                        await _finish_call(call, batch_result)
+                flush_turn_diff = getattr(self._tools, "flush_turn_diff", None)
+                if callable(flush_turn_diff):
+                    diff_payload = await flush_turn_diff(request)
+                    if diff_payload is not None:
+                        record_event = getattr(self._repository, "record_event", None)
+                        if callable(record_event):
+                            await record_event(run_id, "turn_diff", diff_payload)
+                        if emit is not None:
+                            emit("turn_diff", diff_payload)
                 await self._repository.save_checkpoint(
                     run_id,
                     messages,

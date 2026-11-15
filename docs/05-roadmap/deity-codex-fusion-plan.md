@@ -177,6 +177,7 @@ Deity 现状（实读 `src/deity/core/context/reliable.py`）：压缩是**确�
 内容：A1（patch 协议）+ A2（只读并行）+ A4（per-turn diff）。
 目标：模型改代码的成功率与轮次效率可测地提升；每轮改动可视。
 验收：沿用路线图 V1.2 标准（10 个真实中型仓库任务跑自带 benchmark，对比 V1.0 的成功率与平均轮次）；patch 工具新增测试覆盖多 hunk/模糊四级/先验后写原子性；per-turn diff 与 git diff 结果一致性抽查。
+进展（2026-11-15）：A1/A2/A4 已实现（ADR-018；patch.py + 运行时分段批次 + TurnDiffDispatcher/turn_diff 事件），新增 18 个专项测试；10 任务 Qwen 基准对比与 per-turn diff 抽查随 F1 交付一并完成。
 - **F2（= V1.2 下半）：长任务与审批资产**
 内容：B1（持久 shell）+ A3（规则文件）+ A5（compact 触发与摘要）。
 目标：dev server/长测试能跑；审批决定能沉淀；长会话不丢魂。

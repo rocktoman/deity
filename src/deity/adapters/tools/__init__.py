@@ -6,9 +6,10 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from deity.adapters.execution.local import run_local_process
+from deity.adapters.tools.patch import PatchError, plan_patch
 from deity.core.contracts import AgentRequest, ToolCall, ToolResult
 
 
@@ -24,9 +25,22 @@ class WriteArgs(PathArgs):
     content: str
 
 
-class PatchArgs(PathArgs):
-    old: str
-    new: str
+class PatchArgs(Args):
+    """apply_patch 两形态（ADR-018）：旧形态 path+old+new 与新形态 patch 互斥。"""
+
+    path: str = ""
+    old: str | None = None
+    new: str | None = None
+    patch: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_form(self) -> "PatchArgs":
+        if self.patch is not None:
+            if self.path or self.old is not None or self.new is not None:
+                raise ValueError("patch form excludes path/old/new")
+        elif not self.path or self.old is None or self.new is None:
+            raise ValueError("legacy form requires path/old/new")
+        return self
 
 
 class SearchArgs(Args):
@@ -59,6 +73,11 @@ TOOL_ARGS: dict[str, type[Args]] = {
     "git_diff": EmptyArgs,
 }
 WRITE_TOOLS = {"write_file", "apply_patch", "delete_file"}
+
+# 无副作用、可安全并发的本地只读工具（ADR-018 A2）。
+PARALLEL_SAFE_TOOLS = frozenset(
+    {"read_file", "list_files", "glob", "grep", "git_status", "git_diff"}
+)
 
 
 def auto_shell_allowed(args: dict[str, Any], root: Path) -> bool:
@@ -132,6 +151,10 @@ class LocalToolDispatcher:
         self.seen: set[tuple[str, str]] = set()
         self._prepared: dict[tuple[str, str], tuple[dict[str, Any], Path, Path]] = {}
 
+    def supports_parallel(self, name: str) -> bool:
+        """只读工具可并行（ADR-018 A2）；写与 shell 永远串行。"""
+        return name in PARALLEL_SAFE_TOOLS
+
     def definitions(self) -> tuple[dict[str, Any], ...]:
         """Return provider-neutral JSON schemas for the model."""
         return tuple(
@@ -140,7 +163,17 @@ class LocalToolDispatcher:
                 "description": (
                     "Delete one regular workspace file selected from the user's request and conversation; never directories"
                     if name == "delete_file"
-                    else "Replace one exact string in an existing file; old may be empty only when the file is empty"
+                    else (
+                        "Edit workspace files. Legacy form {path, old, new}: replace one "
+                        "exact string (old must occur exactly once; old may be empty only "
+                        "when the file is empty). Patch form {patch}: a multi-file patch "
+                        "starting with '*** Begin Patch' and ending with '*** End Patch'; "
+                        "hunks are '*** Add File: p' (lines prefixed '+'), "
+                        "'*** Delete File: p', and '*** Update File: p' (optional "
+                        "'*** Move to: q') whose chunks start with '@@ optional context' "
+                        "and use ' ' context, '-' remove, '+' add lines, with optional "
+                        "'*** End of File'. All hunks are validated before any write."
+                    )
                     if name == "apply_patch"
                     else name.replace("_", " ")
                 ),
@@ -270,6 +303,8 @@ class LocalToolDispatcher:
                 handle.write(args["content"])
             return "created", None, False
         if name == "apply_patch":
+            if args.get("patch") is not None:
+                return self._execute_patch_form(args["patch"], root)
             current = path.read_text(encoding="utf-8")
             if (not args["old"] and current) or (args["old"] and current.count(args["old"]) != 1):
                 return "patch_conflict", 1, False
@@ -288,6 +323,39 @@ class LocalToolDispatcher:
         if name == "git_diff":
             return await self._process(["git", "diff", "--"], root)
         raise ValueError("unknown tool")
+
+    def _execute_patch_form(self, patch_text: str, root: Path) -> tuple[str, int | None, bool]:
+        """新形态 patch：先全量校验（plan_patch），通过后才逐文件落盘。"""
+
+        def read(relative: str) -> str | None:
+            try:
+                target = self._path(root, relative)
+            except BoundaryError:
+                raise PatchError(f"{relative}: 路径越出工作区") from None
+            if not target.is_file():
+                return None
+            try:
+                return target.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                raise PatchError(f"{relative}: 不是 UTF-8 文本文件") from None
+
+        try:
+            changes = plan_patch(patch_text, read)
+        except PatchError as exc:
+            return f"patch_invalid: {exc}", 1, False
+        for change in changes:
+            target = self._path(root, change.path)
+            if change.kind == "delete":
+                target.unlink()
+                continue
+            destination = self._path(root, change.move_to) if change.move_to else target
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            assert change.new_content is not None
+            destination.write_text(change.new_content, encoding="utf-8", newline="")
+            if change.move_to:
+                target.unlink()
+        names = ", ".join(change.move_to or change.path for change in changes)
+        return f"patched {len(changes)} file(s): {names}", None, False
 
     async def _process(self, argv: list[str], root: Path) -> tuple[str, int, bool]:
         return await run_local_process(

@@ -19,7 +19,7 @@ class OpenAICompatibleProvider:
 
     def capabilities(self) -> ModelCapabilities:
         """Declare the supported baseline features."""
-        return ModelCapabilities(True, True, False)
+        return ModelCapabilities(True, True, True)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         """Request a stream and normalize every received chunk."""
@@ -28,7 +28,7 @@ class OpenAICompatibleProvider:
             "model": request.model or self.model,
             "messages": messages,
             "stream": True,
-            "parallel_tool_calls": False,
+            "parallel_tool_calls": True,
             "stream_options": {"include_usage": True},
         }
         if request.tools:

@@ -227,6 +227,12 @@ class McpCompositeDispatcher:
             for tool in self.tools.values()
         )
 
+    def supports_parallel(self, name: str) -> bool:
+        if name in self.tools:
+            return False
+        check = getattr(self.local, "supports_parallel", None)
+        return bool(check(name)) if callable(check) else False
+
     async def prepare(self, call: ToolCall, context: AgentRequest) -> ToolResult | None:
         """Validate complete MCP arguments before durable intent."""
         tool = self.tools.get(call.name)
