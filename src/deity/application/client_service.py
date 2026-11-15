@@ -1,17 +1,21 @@
 """统一客户端服务：CLI 与 TUI 共用的 Run 入口。
 
 快照 + 增量订阅、after_seq 重连、重复审批去重、慢消费者断开。
-订阅读 SQLite 已持久化事件，不重复执行工具。
+V1.1-M2 起，进程内启动的 Run 经事件总线投递 live 事件（回放 + 增量，
+不再轮询 SQLite）；SQLite 订阅只用于跨进程接入与事后重放，collect()
+始终读持久化事件。不重复执行工具。
 """
 
 import asyncio
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 from deity.adapters.events import TERMINAL_STATUSES, SQLiteEventSubscriber
 from deity.adapters.storage import SQLiteSessionRepository
+from deity.application.event_bus import InProcessEventBus
 from deity.application.run_service import RunService
 from deity.core.contracts import AgentResult, RunStatus
 from deity.core.contracts.client import (
@@ -98,10 +102,12 @@ class ClientService(ApprovalPort):
         run_service: RunService,
         *,
         subscriber: Any | None = None,
+        event_bus: InProcessEventBus | None = None,
         poll_interval_seconds: float = 0.1,
         max_queue: int = 100,
     ) -> None:
         self._run_service = run_service
+        self._event_bus = event_bus or InProcessEventBus()
         self._subscriber = subscriber or SQLiteEventSubscriber(
             run_service.db_path, poll_interval_seconds=poll_interval_seconds
         )
@@ -111,6 +117,11 @@ class ClientService(ApprovalPort):
         self._approval_events: dict[str, asyncio.Event] = {}
         self._tasks: dict[str, asyncio.Task[AgentResult]] = {}
         self._handles: dict[str, RunHandle] = {}
+
+    @property
+    def event_bus(self) -> InProcessEventBus:
+        """进程内事件总线：本服务启动的 Run 的 live 事件都经它投递。"""
+        return self._event_bus
 
     # -- 审批端口 ---------------------------------------------------------
     def _register_approval(
@@ -196,6 +207,7 @@ class ClientService(ApprovalPort):
                     session_id=active_session,
                     run_id=run_id,
                     on_run_created=lambda _run_id: created.set(),
+                    live_event_sink=self._event_bus.publish,
                 ),
                 run_id,
             )
@@ -217,11 +229,30 @@ class ClientService(ApprovalPort):
     async def _guarded_run(
         self, coro: Coroutine[Any, Any, AgentResult], run_id: str
     ) -> AgentResult:
-        """取消时把 CancelledError 转为 CANCELLED 终态；持久化状态已由循环写入。"""
+        """取消时把 CancelledError 转为 CANCELLED 终态；持久化状态已由循环写入。
+
+        终态同时以 run_status 事件发布到事件总线（seq 接续该 Run 已发布
+        的 live 事件），总线订阅者据此结束订阅。
+        """
         try:
-            return await coro
+            result = await coro
         except asyncio.CancelledError:
+            self._publish_terminal(run_id, RunStatus.CANCELLED.value, None)
             return AgentResult(run_id, RunStatus.CANCELLED, None)
+        self._publish_terminal(run_id, result.status.value, result.final_text)
+        return result
+
+    def _publish_terminal(self, run_id: str, status: str, final_text: str | None) -> None:
+        """向事件总线发布该 Run 的终态 run_status 事件。"""
+        self._event_bus.publish(
+            ClientEvent(
+                seq=self._event_bus.last_seq(run_id) + 1,
+                run_id=run_id,
+                kind="run_status",
+                payload={"status": status, "final_text": final_text},
+                created_at=datetime.now(UTC).isoformat(),
+            )
+        )
 
     async def wait(self, run_id: str) -> AgentResult:
         """等待一次已启动 Run 的终态结果。"""
@@ -264,7 +295,15 @@ class ClientService(ApprovalPort):
         return events
 
     async def subscribe_events(self, run_id: str, after_seq: int = 0) -> EventSubscription:
-        """订阅事件：先给快照，再跟随增量；断线后用 after_seq 续订。"""
+        """订阅事件：先给快照，再跟随增量；断线后用 after_seq 续订。
+
+        本服务进程内启动的 Run 走事件总线：回放缓冲 + live 增量，
+        投递 live 事件（text_delta / tool_call_* / run_status），不轮询
+        SQLite。其余 Run（跨进程接入、resume 的后继 Run、历史 Run）走
+        SQLite 持久化事件（RunStatusChanged / Tool* 等）。
+        """
+        if run_id in self._tasks:
+            return self._event_bus.subscribe(run_id, after_seq=after_seq)
         initial = await self._subscriber.read(run_id, 0)
         if not initial:
             raise ClientError("run_not_found", f"未知 Run：{run_id}")

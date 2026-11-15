@@ -18,6 +18,8 @@ from deity.interfaces.cli.chat_approval import ApprovalController, make_approve
 from deity.interfaces.cli.chat_commands import run_error_message
 from deity.interfaces.cli.chat_session import run_chat_session
 from deity.interfaces.cli.code import _search, code_app
+from deity.interfaces.cli.config_show import format_config_show
+from deity.interfaces.cli.init_config import build_init_config, write_init_config
 from deity.interfaces.cli.plan import build_command, plan_command, plans_app
 from deity.interfaces.cli.sandbox import sandbox_app
 from deity.interfaces.cli.verify import verify_command
@@ -34,6 +36,8 @@ app.add_typer(code_app, name="code")
 app.add_typer(sandbox_app, name="sandbox")
 eval_app = typer.Typer(help="Replay eval reports and check the regression gate")
 app.add_typer(eval_app, name="eval")
+config_app = typer.Typer(help="Inspect effective configuration")
+app.add_typer(config_app, name="config")
 app.command("plan")(plan_command)
 app.command("build")(build_command)
 app.command("verify")(verify_command)
@@ -329,6 +333,57 @@ def eval_gate(
         raise typer.Exit(code=1)
 
 
+@app.command("init")
+def init_command(
+    config: Annotated[Path | None, typer.Option("--config", help="要生成的 TOML 配置路径")] = None,
+    provider: Annotated[str, typer.Option("--provider", help="模型厂商")] = "qwen",
+    model: Annotated[str | None, typer.Option("--model", help="模型名")] = None,
+    api_key_env: Annotated[
+        str | None, typer.Option("--api-key-env", help="存放密钥的环境变量名")
+    ] = None,
+    base_url: Annotated[str | None, typer.Option("--base-url", help="覆盖默认端点")] = None,
+    force: Annotated[bool, typer.Option("--force", help="覆盖已有配置")] = False,
+) -> None:
+    """生成最小可用配置（默认 Qwen / qwen3.8-omni-flash）；只写环境变量名，不写密钥值。"""
+    target = config or Path.home() / ".config/deity/config.toml"
+    try:
+        text = build_init_config(provider, model=model, api_key_env=api_key_env, base_url=base_url)
+        write_init_config(target, text, force=force)
+        settings = load_config(target)
+    except (ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+    assert settings.model is not None
+    console.print(f"配置已生成：{target}")
+    console.print(
+        f"厂商 {settings.model.provider} · 模型 {settings.model.name} · "
+        f"密钥环境变量 {settings.model.api_key_env}"
+    )
+    console.print(
+        f"下一步：先设置环境变量 {settings.model.api_key_env}，再运行 deity doctor 检查。"
+    )
+
+
+@config_app.command("show")
+def config_show(
+    config: Annotated[Path | None, typer.Option("--config", help="用户 TOML 配置路径")] = None,
+    workspace: Annotated[Path | None, typer.Option("--workspace", help="工作区路径")] = None,
+) -> None:
+    """分层展示有效配置：每段标注来源（默认/用户/项目），密钥只查存在性。"""
+    try:
+        workdir = (workspace or Path.cwd()).resolve(strict=True)
+        settings, sources = ConfigResolver.resolve(
+            {},
+            workdir / ".deity" / "config.toml",
+            config or Path.home() / ".config/deity/config.toml",
+            loader=load_config,
+        )
+    except (ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+    typer.echo(format_config_show(settings, sources))
+
+
 @app.command()
 def doctor(
     config: Annotated[Path | None, typer.Option("--config", help="TOML 配置路径")] = None,
@@ -350,10 +405,11 @@ def tui(
     task: Annotated[str | None, typer.Option("--task", help="启动新 Run 的任务")] = None,
     run_id: Annotated[str | None, typer.Option("--run-id", help="接入已有 Run")] = None,
 ) -> None:
-    """启动 Textual TUI；未安装 Textual 时提示安装方式并退出码 2。
+    """启动 Textual TUI（已冻结：仅监视用途，不再新增功能，见 V1.1-M4）。
 
-    经 ClientService 订阅事件喂给 TuiApp：a/d 批准/拒绝首个待决审批，
-    c 取消当前 Run，r 恢复当前/指定 Run。
+    未安装 Textual 时提示安装方式并退出码 2。经 ClientService 订阅事件
+    喂给 TuiApp：a/d 批准/拒绝首个待决审批，c 取消当前 Run，r 恢复
+    当前/指定 Run。日常交互请用 CLI。
     """
     try:
         from deity.application.client_service import ClientService

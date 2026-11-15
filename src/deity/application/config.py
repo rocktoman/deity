@@ -213,9 +213,15 @@ class HookSpec:
     priority: int = 0
 
 
+QWEN_PROVIDER = "qwen"
+QWEN_DEFAULT_MODEL = "qwen3.8-omni-flash"
+QWEN_DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+QWEN_DEFAULT_API_KEY_ENV = "DASHSCOPE_API_KEY"
+
+
 @dataclass(frozen=True)
 class ModelConfig:
-    provider: Literal["openai_compatible", "anthropic"]
+    provider: Literal["openai_compatible", "anthropic", "qwen"]
     name: str
     api_key_env: str
     base_url: str | None = None
@@ -655,7 +661,7 @@ def load_config(path: Path) -> Config:
             raise ValueError
         model_config = ModelConfig(**model) if model else None
         if model_config is not None and (
-            model_config.provider not in ("openai_compatible", "anthropic")
+            model_config.provider not in ("openai_compatible", "anthropic", "qwen")
             or not model_config.name
             or re.fullmatch(r"[A-Z][A-Z0-9_]*", model_config.api_key_env) is None
             or (

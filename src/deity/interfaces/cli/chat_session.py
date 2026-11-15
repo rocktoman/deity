@@ -296,12 +296,20 @@ class ChatSession:
             )
 
     async def _run_streaming(self, task: str) -> RunSummary | None:
-        """流式执行一轮任务：渲染 live 事件流；取消时返回 None 回到提示符。"""
+        """流式执行一轮任务：渲染 live 事件流；取消时返回 None 回到提示符。
+
+        本方法只在终端下走（_use_streaming 已把关），故开启 Markdown
+        渲染与思考指示（V1.1-M3）；视图模型挂到命令上下文供 /tools 展开。
+        """
         renderer = StreamingRenderer(
             self.console,
             model_name=self.model_name,
             mode="计划" if self.state.plan_mode else "普通",
+            render_markdown=True,
+            thinking_indicator=True,
+            context_window_tokens=getattr(self.service, "context_window_tokens", None),
         )
+        self.context.last_view = renderer.view
         stream = self.service.run_stream(
             task, model_name=self.model_name, session_id=self.state.session_id
         )

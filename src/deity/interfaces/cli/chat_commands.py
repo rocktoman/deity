@@ -20,6 +20,7 @@ from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
 from deity.interfaces.cli.chat_approval import ApprovalController
 from deity.interfaces.cli.chat_input import PlainInput, PromptToolkitInput
 from deity.interfaces.cli.chat_status import ChatStatus
+from deity.interfaces.cli.chat_view_model import ChatViewModel
 from deity.interfaces.cli.plan import (
     authorize_dirty_targets,
     build_approved,
@@ -69,6 +70,7 @@ class ChatContext:
     config_path: Path | None = None
     status: ChatStatus = field(default_factory=ChatStatus)
     audit: list[dict[str, Any]] = field(default_factory=list)
+    last_view: ChatViewModel | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("/cost", "/cost", "查看本会话 token 与轮次"),
     Command("/model", "/model [名称]", "查看或切换模型（仅本次会话）"),
     Command("/status", "/status", "查看会话状态"),
+    Command("/tools", "/tools [call_id]", "查看上一轮工具调用（折叠列表/展开参数）"),
     Command("/auto", "/auto", "进入/退出自动接受模式"),
     Command("/doctor", "/doctor", "运行环境检查"),
     Command("/exit", "/exit 或 /quit", "退出交互"),
@@ -159,6 +162,9 @@ async def dispatch(prompt: str, ctx: ChatContext) -> bool:
         return True
     if prompt == "/status":
         await _handle_status(ctx)
+        return True
+    if prompt == "/tools" or prompt.startswith("/tools "):
+        _handle_tools(prompt, ctx)
         return True
     if prompt == "/auto":
         _handle_auto(ctx)
@@ -451,6 +457,37 @@ async def _handle_status(ctx: ChatContext) -> None:
     )
     if ctx.audit:
         ctx.console.print(f"审计拒绝：{len(ctx.audit)} 条")
+
+
+def _handle_tools(prompt: str, ctx: ChatContext) -> None:
+    """执行 /tools：折叠列出上一轮工具节点；带 call_id 时展开其完整参数。"""
+    view = ctx.last_view
+    if view is None or not view.tools:
+        ctx.console.print("上一轮没有工具调用记录。", highlight=False, markup=False)
+        return
+    parts = prompt.split(maxsplit=1)
+    if len(parts) == 2:
+        call_id = parts[1].strip()
+        node = view.tools.get(call_id)
+        if node is None:
+            ctx.console.print(f"未找到工具调用：{call_id}", highlight=False, markup=False)
+            return
+        view.toggle_expanded(call_id)
+        ctx.console.print(
+            f"{node.name}（{node.call_id}）· {node.status or '运行中'}",
+            highlight=False,
+            markup=False,
+        )
+        ctx.console.print(f"参数：{node.args_text or '—'}", highlight=False, markup=False)
+        return
+    for node in view.tools.values():
+        summary = node.arguments_summary() or "—"
+        ctx.console.print(
+            f"{node.name}（{node.call_id}）· {node.status or '运行中'} · {summary}",
+            highlight=False,
+            markup=False,
+        )
+    ctx.console.print("展开完整参数：/tools <call_id>", highlight=False, markup=False)
 
 
 def _handle_auto(ctx: ChatContext) -> None:

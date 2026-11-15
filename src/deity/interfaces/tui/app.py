@@ -1,5 +1,8 @@
 """Textual TUI：视图状态独立于 Run 状态，经 ClientEvent 折叠渲染。
 
+冻结（V1.1-M4）：本 TUI 只保留监视用途（看状态、批/拒、取消、恢复），
+不再新增功能；产品交互以 CLI 为准。解冻需新 ADR。
+
 本模块需要 `tui` extra（Textual）；未安装时由 CLI 给出安装提示。
 
 接通方式：调用方（`deity tui` 或测试）传入 `client_service` 与
