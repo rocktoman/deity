@@ -3,6 +3,7 @@
 import asyncio
 import os
 import signal
+import sys
 import time
 from pathlib import Path
 
@@ -16,6 +17,18 @@ from deity.core.contracts.execution import (
     SandboxCleanupReport,
     SandboxHandle,
 )
+
+
+def _terminate_process_group(process: asyncio.subprocess.Process, *, force: bool) -> None:
+    """终止进程组：POSIX 用 killpg（先 TERM 后 KILL）；Windows 无进程组
+    概念（也无 SIGKILL），退化为终止进程本体。进程已退出时静默。"""
+    if sys.platform == "win32":
+        process.kill()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+    except ProcessLookupError:
+        pass
 
 
 async def run_local_process(
@@ -54,17 +67,11 @@ async def run_local_process(
             timeout,
         )
     except (TimeoutError, asyncio.CancelledError):
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        _terminate_process_group(process, force=False)
         try:
             await asyncio.wait_for(process.wait(), 2.0)
         except TimeoutError:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            _terminate_process_group(process, force=True)
             await process.wait()
         raise
     stdout, stdout_clipped = stdout_result

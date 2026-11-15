@@ -34,6 +34,10 @@
   时不再因 import-not-found 阻断 test 矩阵（此前 pytest 步骤被连带跳过）；
   supply-chain 漏洞扫描的依赖导出加 `--no-emit-project`，避免 pip-audit
   在 `-e .` 可编辑行上误报失败。
+- Windows 类型检查：三处 POSIX 专属调用加平台守卫——Skill 有界读取在
+  Windows 上按不可用处理（不做弱化替代）、本地进程超时终止在 Windows
+  退化为终止进程本体、Docker 创建参数在 Windows 省略 `--user`；
+  POSIX 行为不变，`mypy --platform win32` 通过。
 
 ## [1.0.0] — 2026-11-09
 

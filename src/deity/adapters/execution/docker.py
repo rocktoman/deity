@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -67,6 +68,10 @@ class DockerExecutionBackend:
             raise ValueError("invalid cwd")
         if not stage.is_absolute() or stage.is_symlink():
             raise ValueError("invalid staging path")
+        # Windows 无 getuid/getgid：省略 --user，容器使用镜像默认用户。
+        user_option: tuple[str, ...] = ()
+        if sys.platform != "win32":
+            user_option = ("--user", f"{os.getuid()}:{os.getgid()}")
         return (
             "docker",
             "create",
@@ -75,8 +80,7 @@ class DockerExecutionBackend:
             name,
             "--label",
             f"deity.execution={request.execution_id}",
-            "--user",
-            f"{os.getuid()}:{os.getgid()}",
+            *user_option,
             "--read-only",
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,10 @@ _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 def _read_bounded_file(root: Path, parts: tuple[str, ...]) -> bytes:
     """Read through directory handles without following replaced symlinks."""
+    if sys.platform == "win32":
+        # dir_fd + O_NOFOLLOW 的有界读取是 POSIX 语义；Windows 上不做
+        # 弱化替代（会跟随符号链接），按不可用处理，与 OSError 同一出口。
+        raise ValueError("Skill file unavailable")
     try:
         flags = os.O_RDONLY | os.O_NOFOLLOW
         fd = os.open(root, flags | os.O_DIRECTORY)
