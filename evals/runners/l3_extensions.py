@@ -32,6 +32,7 @@ async def run_case(kind: str) -> dict[str, Any]:
         (skill_dir / "SKILL.md").write_text(
             "---\nname: demo\ndescription: 回答验证码时使用\n---\n验证码是 SKILL-42",
             encoding="utf-8",
+            newline="",
         )
         script = ROOT / "tests/fixtures/mcp_echo_server.py"
         config = Config(

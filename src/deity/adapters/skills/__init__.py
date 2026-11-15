@@ -17,12 +17,35 @@ from deity.core.contracts import AgentRequest, ToolCall, ToolResult
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 
+def _read_bounded_file_windows(root: Path, parts: tuple[str, ...]) -> bytes:
+    """Windows 有界读取：逐段 lstat 拒绝符号链接与重解析点，其余语义同 POSIX 版。"""
+    current = root
+    details: os.stat_result | None = None
+    for part in parts:
+        current = current / part
+        try:
+            details = os.lstat(current)
+        except OSError:
+            raise ValueError("Skill file unavailable") from None
+        reparse = getattr(details, "st_file_attributes", 0) & 0x400
+        if stat.S_ISLNK(details.st_mode) or reparse:
+            raise ValueError("Skill file unavailable")
+    if details is None or not stat.S_ISREG(details.st_mode) or details.st_size > 16_000:
+        raise ValueError("Skill file unavailable or too large")
+    try:
+        with open(current, "rb") as handle:
+            content = handle.read(16_001)
+    except OSError:
+        raise ValueError("Skill file unavailable") from None
+    if len(content) > 16_000:
+        raise ValueError("Skill file too large")
+    return content
+
+
 def _read_bounded_file(root: Path, parts: tuple[str, ...]) -> bytes:
     """Read through directory handles without following replaced symlinks."""
     if sys.platform == "win32":
-        # dir_fd + O_NOFOLLOW 的有界读取是 POSIX 语义；Windows 上不做
-        # 弱化替代（会跟随符号链接），按不可用处理，与 OSError 同一出口。
-        raise ValueError("Skill file unavailable")
+        return _read_bounded_file_windows(root, parts)
     try:
         flags = os.O_RDONLY | os.O_NOFOLLOW
         fd = os.open(root, flags | os.O_DIRECTORY)

@@ -39,7 +39,7 @@ async def test_second_turn_receives_same_session_history(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_repository_instructions_do_not_replace_current_task(tmp_path: Path) -> None:
-    (tmp_path / "AGENTS.md").write_text("只修改现有模块")
+    (tmp_path / "AGENTS.md").write_text("只修改现有模块", encoding="utf-8")
 
     class Model:
         async def stream(self, request: ModelRequest):

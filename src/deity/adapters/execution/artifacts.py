@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -113,6 +114,9 @@ class ArtifactApplier:
 
     @staticmethod
     def _fsync_dir(path: Path) -> None:
+        if sys.platform == "win32":
+            # Windows 不允许以文件句柄打开目录做 fsync，跳过目录同步。
+            return
         descriptor = os.open(path, os.O_RDONLY)
         try:
             os.fsync(descriptor)

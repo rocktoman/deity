@@ -46,7 +46,7 @@ from deity.interfaces.cli.plan import (
     confirm_build,
 )
 
-console = Console()
+console = Console(legacy_windows=False)
 
 
 class ChatSession:
