@@ -210,12 +210,9 @@ async def test_guard_patch_requires_read_before_write(tmp_path: Path) -> None:
     (tmp_path / "calc.py").write_text("return a - b\n", encoding="utf-8")
     guard = _guard(tmp_path, _Repo())
     patch = (
-        "*** Begin Patch\n*** Update File: calc.py\n"
-        "-return a - b\n+return a + b\n*** End Patch\n"
+        "*** Begin Patch\n*** Update File: calc.py\n-return a - b\n+return a + b\n*** End Patch\n"
     )
-    denied = await guard.prepare(
-        ToolCall("p", "apply_patch", {"patch": patch}), _request(tmp_path)
-    )
+    denied = await guard.prepare(ToolCall("p", "apply_patch", {"patch": patch}), _request(tmp_path))
     assert denied is not None and denied.output == "read_before_write_required"
 
 
@@ -251,8 +248,7 @@ async def test_guard_patch_preimage_drift_denied(tmp_path: Path) -> None:
     request = _request(tmp_path)
     await guard.dispatch(ToolCall("r", "read_file", {"path": "calc.py"}), request)
     patch = (
-        "*** Begin Patch\n*** Update File: calc.py\n"
-        "-return a - b\n+return a + b\n*** End Patch\n"
+        "*** Begin Patch\n*** Update File: calc.py\n-return a - b\n+return a + b\n*** End Patch\n"
     )
     call = ToolCall("p", "apply_patch", {"patch": patch})
     assert await guard.prepare(call, request) is None

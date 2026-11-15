@@ -75,21 +75,26 @@ async def test_flush_truncates_oversized_diff(tmp_path: Path) -> None:
     tools = _stack()
     request = _request(tmp_path)
     big = "\n".join(f"line {index}" for index in range(2000)) + "\n"
-    await tools.dispatch(
-        ToolCall("w", "write_file", {"path": "big.txt", "content": big}), request
-    )
+    await tools.dispatch(ToolCall("w", "write_file", {"path": "big.txt", "content": big}), request)
     payload = await tools.flush_turn_diff(request)
     assert payload is not None
     entry = payload["files"][0]
     assert entry["truncated"] is True and len(entry["diff"]) == 8_000
 
 
+def _git(repo: Path, *args: str) -> str:
+    """同步 git 助手（ASYNC221：异步测试内不得直接跑阻塞子进程）。"""
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    ).stdout
+
+
 @pytest.mark.asyncio
 async def test_turn_diff_consistent_with_git_diff(tmp_path: Path) -> None:
     """抽查：两轮 turn_diff 的改动集合与内容应与 git status/git diff 一致。"""
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    _git(tmp_path, "init", "-q")
     (tmp_path / "mod.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    _git(tmp_path, "add", ".")
     tools = _stack()
     request = _request(tmp_path)
     await tools.dispatch(
@@ -105,16 +110,10 @@ async def test_turn_diff_consistent_with_git_diff(tmp_path: Path) -> None:
     tracked = {entry["path"] for entry in first["files"]} | {
         entry["path"] for entry in second["files"]
     }
-    porcelain = subprocess.run(
-        ["git", "-C", str(tmp_path), "status", "--porcelain"],
-        capture_output=True, text=True, check=True,
-    ).stdout
+    porcelain = _git(tmp_path, "status", "--porcelain")
     git_paths = {line[3:] for line in porcelain.splitlines() if line}
     assert tracked == git_paths == {"mod.py", "new.py"}
-    git_diff = subprocess.run(
-        ["git", "-C", str(tmp_path), "diff", "--", "mod.py"],
-        capture_output=True, text=True, check=True,
-    ).stdout
+    git_diff = _git(tmp_path, "diff", "--", "mod.py")
     turn_lines = {
         line
         for line in first["files"][0]["diff"].splitlines()
@@ -159,9 +158,7 @@ async def test_turn_diff_event_persisted_and_emitted(tmp_path: Path) -> None:
     assert result.status == RunStatus.COMPLETED
     assert "turn_diff" in kinds
     connection = sqlite3.connect(tmp_path / "deity.db")
-    rows = connection.execute(
-        "SELECT payload_json FROM events WHERE type='turn_diff'"
-    ).fetchall()
+    rows = connection.execute("SELECT payload_json FROM events WHERE type='turn_diff'").fetchall()
     connection.close()
     assert len(rows) == 1
     payload = json.loads(rows[0][0])
