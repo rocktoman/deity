@@ -70,7 +70,8 @@
 - **验证（2026-11-15）**：全量测试 611 通过 / 5 失败 / 16 跳过——5 个失败均为
   本机既有环境问题（4 个 release-artifact、1 个 crash_recovery  flaky，单独重跑通过），
   无新增失败；ruff check / format 与 mypy strict 全过；真实 Qwen
-  （`qwen3.8-omni-flash`）端到端冒烟通过。状态：**待合并 main**（等用户确认）。
+  （`qwen3.8-omni-flash`）端到端冒烟通过。状态：**已合并 main**
+  （2026-11-15，用户确认后经 PR #2 合并，合并提交 `ff4a85af`）。
 
 ## V1.2 能力补课
 
