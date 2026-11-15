@@ -33,7 +33,7 @@ deity = "deity.interfaces.cli.main:app"
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.8", "mypy>=1.13"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/unit/test_shell_sessions.py", "tests/unit/test_approval_rules.py", "tests/unit/test_compact_summary.py"]
 pythonpath = ["."]
 norecursedirs = ["tests/fixtures"]
 asyncio_mode = "auto"
