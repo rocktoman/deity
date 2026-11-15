@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from deity.adapters.code_intelligence import LexicalCodeSearch
+from deity.adapters.execution.session_process import ShellSessionManager
 from deity.adapters.git import GitWorkspaceAdapter
 from deity.adapters.skills import SkillCatalog, SkillDispatcher
 from deity.adapters.storage import SQLiteSessionRepository
@@ -62,6 +63,7 @@ class ToolPipeline:
         self._code_search = code_search
         self._git_guard_enabled = git_guard_enabled
         self._require_read_before_write = require_read_before_write
+        self._session_managers: dict[int, ShellSessionManager] = {}
 
     async def compose(
         self,
@@ -86,7 +88,11 @@ class ToolPipeline:
         routed_shell: Callable[[ToolCall, AgentRequest], Awaitable[ToolResult]] | None = None
         if sandbox_shell is not None:
             routed_shell = lambda call, context: sandbox_shell(repo, call, context, guard_ref[0])
-        local = LocalToolDispatcher(approve=authorize, sandbox_shell=routed_shell)
+        session_manager = ShellSessionManager()
+        self._session_managers[id(repo)] = session_manager
+        local = LocalToolDispatcher(
+            approve=authorize, sandbox_shell=routed_shell, session_manager=session_manager
+        )
         dispatcher: ToolDispatcher = await self._mcp_wrap(local)
         if self._skill_catalog is not None:
             dispatcher = SkillDispatcher(dispatcher, self._skill_catalog)
@@ -121,6 +127,16 @@ class ToolPipeline:
             guard_ref[0] = guarded
             return TurnDiffDispatcher(guarded), guarded
         return TurnDiffDispatcher(dispatcher), None
+
+    async def close_sessions(self, repo: SQLiteSessionRepository) -> None:
+        """回收某次运行的持久 shell 会话（ADR-019 B1：run 级资源）。
+
+        以 repo 实例标识一次运行的组装结果：父子运行各开各的 repo，
+        互不影响；重复调用无副作用。
+        """
+        manager = self._session_managers.pop(id(repo), None)
+        if manager is not None:
+            await manager.close_all()
 
 
 __all__ = ["ToolPipeline"]

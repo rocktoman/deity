@@ -11,6 +11,7 @@ from rich.console import Console
 
 from deity import __version__
 from deity.adapters.storage import SQLiteSessionRepository
+from deity.application.approval_rules import ApprovalRule, ApprovalRules
 from deity.application.config import Config, ConfigResolver, load_config
 from deity.application.doctor import run_doctor
 from deity.application.run_service import RunService
@@ -39,10 +40,52 @@ eval_app = typer.Typer(help="Replay eval reports and check the regression gate")
 app.add_typer(eval_app, name="eval")
 config_app = typer.Typer(help="Inspect effective configuration")
 app.add_typer(config_app, name="config")
+rules_app = typer.Typer(help="Manage persistent approval rules")
+app.add_typer(rules_app, name="rules")
 app.command("plan")(plan_command)
 app.command("build")(build_command)
 app.command("verify")(verify_command)
 console = Console(legacy_windows=False)
+
+
+@rules_app.command("list")
+def rules_list() -> None:
+    """Show persistent approval rules (ADR-019 A3)."""
+    rules = ApprovalRules.load()
+    typer.echo(f"规则文件：{rules.path}")
+    if rules.load_error:
+        typer.echo(f"加载错误（当前按空规则处理）：{rules.load_error}")
+    if not rules.rules:
+        typer.echo("（无规则）")
+    for index, rule in enumerate(rules.rules):
+        typer.echo(f"{index}: {rule.effect} tool={rule.tool} pattern={rule.pattern or '*'}")
+
+
+@rules_app.command("add")
+def rules_add(
+    tool: str,
+    pattern: Annotated[str | None, typer.Argument(help="shell 命令模式，如 'pytest *'")] = None,
+    deny: Annotated[bool, typer.Option("--deny", help="添加为拒绝规则")] = False,
+) -> None:
+    """Add one persistent approval rule and save it."""
+    rules = ApprovalRules.load()
+    if rules.load_error:
+        console.print(f"规则文件加载错误：{rules.load_error}", style="red")
+        raise typer.Exit(code=2)
+    rule = ApprovalRule(tool, pattern, "deny" if deny else "allow")
+    typer.echo("已添加。" if rules.add(rule) else "规则已存在，未重复添加。")
+
+
+@rules_app.command("remove")
+def rules_remove(index: int) -> None:
+    """Remove the rule at the index shown by `deity rules list`."""
+    rules = ApprovalRules.load()
+    try:
+        removed = rules.remove(index)
+    except IndexError:
+        console.print(f"没有序号为 {index} 的规则。", style="red")
+        raise typer.Exit(code=2) from None
+    typer.echo(f"已删除：{removed.effect} tool={removed.tool} pattern={removed.pattern or '*'}")
 
 
 @skills_app.command("list")
@@ -191,9 +234,14 @@ def run(
         settings = _resolve_config(config, workdir)
         db_path = db or Path.home() / ".local/share/deity/deity.db"
 
-        approval = ApprovalController(workspace=workdir, console=console)
+        rules = ApprovalRules.load()
+        approval = ApprovalController(workspace=workdir, console=console, rules=rules)
         service = RunService.from_config(
-            settings, db_path=db_path, workspace=workdir, approve=make_approve(approval)
+            settings,
+            db_path=db_path,
+            workspace=workdir,
+            approve=make_approve(approval),
+            rules=rules,
         )
         model_name = settings.model.name  # type: ignore[union-attr]
         if task is None:

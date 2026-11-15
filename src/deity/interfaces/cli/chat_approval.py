@@ -1,4 +1,4 @@
-"""审批卡片：工具调用的三选一决策（允许一次/本次会话允许/拒绝）。
+"""审批卡片：工具调用的决策（允许一次/本次会话允许/永久允许存规则/拒绝）。
 
 决策折叠成现有 approve(name, args) -> bool，不改 RunService._authorize：
 deny/auto 策略仍由 _authorize 先行决定，本模块只处理 ask 策略下回调
@@ -16,7 +16,6 @@ V1.1-M4 起，shell 工具的 allow_session 细化到命令模式：选「本次
 """
 
 import fnmatch
-import shlex
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -24,43 +23,18 @@ from typing import Any, Literal
 from rich.console import Console
 from rich.panel import Panel
 
+from deity.application.approval_rules import (
+    ApprovalRule,
+    ApprovalRules,
+    command_pattern_for,
+    shell_command_text,
+)
 from deity.core.contracts.client import approval_args_summary
 from deity.interfaces.cli.chat_render import render_diff
 
-ApprovalDecision = Literal["allow_once", "allow_session", "deny"]
+ApprovalDecision = Literal["allow_once", "allow_session", "allow_always", "deny"]
 
 _MAX_DIFF_CHARS = 200_000
-
-
-def shell_command_text(args: dict[str, Any]) -> str:
-    """从 shell 工具参数取命令全文：command 字符串优先，其次 argv 拼接。"""
-    command = args.get("command")
-    if isinstance(command, str):
-        return command
-    argv = args.get("argv")
-    if isinstance(argv, list):
-        return " ".join(str(item) for item in argv)
-    return ""
-
-
-def command_pattern_for(args: dict[str, Any]) -> str | None:
-    """由一条 shell 命令派生会话允许模式：首 token + ` *`（单 token 用其本身）。
-
-    例：`pytest -q tests/` -> `pytest *`；`ls` -> `ls`。
-    无法解析出 token 时返回 None，调用方回退到工具级允许。
-    """
-    text = shell_command_text(args).strip()
-    if not text:
-        return None
-    try:
-        tokens = shlex.split(text)
-    except ValueError:
-        tokens = text.split()
-    if not tokens:
-        return None
-    if len(tokens) == 1:
-        return tokens[0]
-    return f"{tokens[0]} *"
 
 
 class SessionAllowlist:
@@ -112,10 +86,18 @@ class SessionAllowlist:
 class ApprovalCard:
     """一张审批卡片：工具名、参数摘要、diff/命令全文与风险提示。"""
 
-    def __init__(self, tool_name: str, args: dict[str, Any], *, workspace: Path) -> None:
+    def __init__(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        workspace: Path,
+        allow_permanent: bool = False,
+    ) -> None:
         self.tool_name = tool_name
         self.args = args
         self.workspace = workspace
+        self.allow_permanent = allow_permanent
 
     def body_lines(self) -> list[str]:
         """卡片正文：按工具类型展示最关键的执行内容。"""
@@ -185,18 +167,25 @@ class ApprovalCard:
         """
         pattern = command_pattern_for(self.args) if self.tool_name == "shell" else None
         if pattern is not None:
-            console.print(f"[1] 允许一次  [2] 本次会话允许同类命令（{pattern}）  [3] 拒绝（默认）")
+            options = f"[1] 允许一次  [2] 本次会话允许同类命令（{pattern}）"
         else:
-            console.print("[1] 允许一次  [2] 本次会话都允许  [3] 拒绝（默认）")
+            options = "[1] 允许一次  [2] 本次会话都允许"
+        if self.allow_permanent:
+            scope = f"同类命令（{pattern}）" if pattern is not None else "该工具"
+            options += f"  [4] 永久允许{scope}（保存为规则）"
+        options += "  [3] 拒绝（默认）"
+        console.print(options)
         read = input_fn or input
         try:
-            choice = read("选择 [1/2/3]（默认拒绝）> ").strip()
+            choice = read("选择（默认拒绝）> ").strip()
         except (EOFError, KeyboardInterrupt):
             return "deny"
         if choice == "1":
             return "allow_once"
         if choice == "2":
             return "allow_session"
+        if choice == "4" and self.allow_permanent:
+            return "allow_always"
         return "deny"
 
 
@@ -216,12 +205,14 @@ class ApprovalController:
         workspace: Path,
         console: Console | None = None,
         input_fn: Callable[[str], str] | None = None,
+        rules: ApprovalRules | None = None,
     ) -> None:
         self.workspace = workspace
         self.console = console or Console(legacy_windows=False)
         self.allowlist = SessionAllowlist()
         self.mode: Literal["ask", "auto", "session"] = "ask"
         self._input_fn = input_fn
+        self.rules = rules
 
     def decide(self, name: str, args: dict[str, Any]) -> bool:
         """approve(name, args) -> bool 的实现：折叠卡片决策。"""
@@ -229,10 +220,25 @@ class ApprovalController:
             return True
         if self.allowlist.is_allowed(name, self.workspace, args):
             return True
-        card = ApprovalCard(name, args, workspace=self.workspace)
+        card = ApprovalCard(
+            name, args, workspace=self.workspace, allow_permanent=self.rules is not None
+        )
         card.render(self.console)
         decision = card.prompt(self.console, input_fn=self._input_fn)
         if decision == "allow_once":
+            return True
+        if decision == "allow_always" and self.rules is not None:
+            pattern = command_pattern_for(args) if name == "shell" else None
+            rule = ApprovalRule(name, pattern, "allow")
+            try:
+                self.rules.add(rule)
+            except OSError:
+                self.console.print("规则保存失败，仅本次会话内生效。", style="red")
+            if pattern is not None:
+                self.allowlist.allow_pattern(self.workspace, pattern)
+            else:
+                self.allowlist.allow(name, self.workspace)
+            self.mode = "session"
             return True
         if decision == "allow_session":
             pattern = command_pattern_for(args) if name == "shell" else None

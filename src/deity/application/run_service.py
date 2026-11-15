@@ -29,6 +29,7 @@ from deity.adapters.tools.delegation import DelegationDispatcher
 from deity.adapters.tools.git_guard import GitGuardedDispatcher
 from deity.adapters.tools.read_only import ReadOnlyToolDispatcher
 from deity.adapters.tools.workspace import workspace_digest
+from deity.application.approval_rules import ApprovalRules
 from deity.application.config import (
     QWEN_DEFAULT_BASE_URL,
     CodeIntelligenceConfig,
@@ -112,12 +113,14 @@ class RunService:
         sandbox: SandboxConfig | None = None,
         multi_agent: MultiAgentConfig | None = None,
         approval_port: ApprovalPort | None = None,
+        rules: ApprovalRules | None = None,
     ) -> None:
         self.db_path = db_path
         self.workspace = workspace.resolve(strict=True)
         self.model = model
         self.approve = approve
         self.approval_port = approval_port
+        self.rules = rules
         self._loop: asyncio.AbstractEventLoop | None = None
         self._current_run_id: str = ""
         self.limits = limits or RunConfig()
@@ -218,6 +221,11 @@ class RunService:
             return False
         if policy == "auto":
             return auto_shell_allowed(args, self.workspace) if name == "shell" else True
+        if self.rules is not None:
+            # ADR-019 A3：持久规则在 ask 路径先行表态，未命中才落到交互审批。
+            decided_by_rule = self.rules.decide(name, args)
+            if decided_by_rule is not None:
+                return decided_by_rule
         if self.approval_port is not None and self._loop is not None:
             # 同步审批回调经 to_thread 调用：把可等待端口的请求发回事件循环，
             # 在工作线程阻塞等决定，循环线程本身不阻塞。
@@ -247,6 +255,7 @@ class RunService:
         workspace: Path,
         approve: Callable[[str, dict[str, Any]], bool] | None = None,
         inspection_only: bool = False,
+        rules: ApprovalRules | None = None,
     ) -> "RunService":
         """Resolve an explicitly selected provider and its environment key."""
         if config.model is None and not inspection_only:
@@ -326,6 +335,7 @@ class RunService:
             hooks=HookRegistry(tuple(registered_hooks))
             if config.extensions.hooks_enabled
             else None,
+            rules=rules if rules is not None else ApprovalRules.load(),
             coding=config.coding,
             code_intelligence=config.code_intelligence,
             git_guard=config.git_guard,
@@ -458,6 +468,7 @@ class RunService:
                             )
                         finally:
                             self._active_children.pop(child_id, None)
+                            await self._tool_pipeline.close_sessions(child_repo)
                             await child_repo.close()
                         await repo.finish_delegation(sub_result)
                         results[index] = sub_result
@@ -850,6 +861,7 @@ class RunService:
                 max_output_tokens=self.limits.max_output_tokens,
                 context_window_tokens=self.context_window_tokens,
                 compaction_enabled=self.limits.compaction_enabled,
+                compact_summary=self.limits.compact_summary,
                 max_input_tokens_total=self.limits.max_input_tokens_total,
                 max_output_tokens_total=self.limits.max_output_tokens_total,
                 provider_name=self.provider_id,
@@ -960,6 +972,7 @@ class RunService:
             self._sandbox_active_run_id = None
             self._loop = None
             self._current_run_id = ""
+            await self._tool_pipeline.close_sessions(repo)
             await repo.close()
 
     async def run_stream(
@@ -1075,6 +1088,7 @@ class RunService:
                 max_output_tokens=self.limits.max_output_tokens,
                 context_window_tokens=self.context_window_tokens,
                 compaction_enabled=self.limits.compaction_enabled,
+                compact_summary=self.limits.compact_summary,
                 max_input_tokens_total=self.limits.max_input_tokens_total,
                 max_output_tokens_total=self.limits.max_output_tokens_total,
                 provider_name=self.provider_id or info["model_provider"],
@@ -1120,6 +1134,7 @@ class RunService:
         finally:
             self._active_loop = None
             self._sandbox_active_run_id = None
+            await self._tool_pipeline.close_sessions(repo)
             await repo.close()
 
     async def inspect(self, run_id: str) -> dict[str, Any]:
@@ -1206,6 +1221,7 @@ class RunService:
         if inspection["decision"] != "resume":
             raise ValueError(f"cannot resume: {inspection['reason']}")
         repo = await SQLiteSessionRepository.open(self.db_path)
+        local: LocalToolDispatcher | None = None
         try:
             info = await repo.run_info(run_id)
             checkpoint = await repo.latest_checkpoint(run_id)
@@ -1238,14 +1254,14 @@ class RunService:
                 max_output_tokens=self.limits.max_output_tokens,
                 context_window_tokens=self.context_window_tokens,
                 compaction_enabled=self.limits.compaction_enabled,
+                compact_summary=self.limits.compact_summary,
                 max_input_tokens_total=self.limits.max_input_tokens_total,
                 max_output_tokens_total=self.limits.max_output_tokens_total,
                 provider_name=info["model_provider"],
                 extension_fingerprint=self.extension_fingerprint,
             )
-            dispatcher: ToolDispatcher = await self._mcp_dispatcher(
-                LocalToolDispatcher(approve=self._authorize)
-            )
+            local = LocalToolDispatcher(approve=self._authorize)
+            dispatcher: ToolDispatcher = await self._mcp_dispatcher(local)
             if self.skill_catalog is not None:
                 dispatcher = SkillDispatcher(dispatcher, self.skill_catalog)
                 if restored_skills is not None:
@@ -1263,6 +1279,8 @@ class RunService:
             )
         finally:
             self._active_loop = None
+            if local is not None:
+                await local.aclose()
             await repo.close()
 
     def _recovery_request(self, info: dict[str, Any]) -> AgentRequest:
@@ -1279,6 +1297,7 @@ class RunService:
             max_output_tokens=self.limits.max_output_tokens,
             context_window_tokens=self.context_window_tokens,
             compaction_enabled=self.limits.compaction_enabled,
+            compact_summary=self.limits.compact_summary,
             max_input_tokens_total=self.limits.max_input_tokens_total,
             max_output_tokens_total=self.limits.max_output_tokens_total,
             provider_name=self.provider_id or info["model_provider"],

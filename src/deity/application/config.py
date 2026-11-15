@@ -23,6 +23,7 @@ class RunConfig:
     deadline_seconds: int = 900
     max_output_tokens: int | None = None
     compaction_enabled: bool = False
+    compact_summary: bool = False
     resume_enabled: bool = True
     max_input_tokens_total: int | None = None
     max_output_tokens_total: int | None = None
@@ -612,6 +613,7 @@ def load_config(path: Path) -> Config:
             "deadline_seconds",
             "max_output_tokens",
             "compaction_enabled",
+            "compact_summary",
             "resume_enabled",
             "max_input_tokens_total",
             "max_output_tokens_total",
@@ -640,7 +642,7 @@ def load_config(path: Path) -> Config:
             raise ValueError
         flags = {
             key: run.get(key, getattr(RunConfig(), key))
-            for key in ("compaction_enabled", "resume_enabled")
+            for key in ("compaction_enabled", "compact_summary", "resume_enabled")
         }
         if any(type(value) is not bool for value in flags.values()):
             raise ValueError

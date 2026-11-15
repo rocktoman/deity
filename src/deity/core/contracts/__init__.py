@@ -161,6 +161,7 @@ class AgentRequest:
     run_id: str = ""
     context_window_tokens: int | None = None
     compaction_enabled: bool = False
+    compact_summary: bool = False
     max_input_tokens_total: int | None = None
     max_output_tokens_total: int | None = None
     provider_name: str = ""
@@ -180,6 +181,7 @@ class AgentRequest:
             "max_output_tokens": self.max_output_tokens,
             "context_window_tokens": self.context_window_tokens,
             "compaction_enabled": self.compaction_enabled,
+            "compact_summary": self.compact_summary,
             "max_input_tokens_total": self.max_input_tokens_total,
             "max_output_tokens_total": self.max_output_tokens_total,
         }
