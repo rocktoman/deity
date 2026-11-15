@@ -28,6 +28,13 @@
 - V1.1-M4：shell 工具的「本次会话允许」细化到命令模式（如 `pytest *`，
   按命令首 token 派生），不再放行整个 shell 工具；非 shell 工具不变。
 
+### 修复
+
+- CI：mypy 对可选 extras（prompt_toolkit / textual）加 overrides，未装 extras
+  时不再因 import-not-found 阻断 test 矩阵（此前 pytest 步骤被连带跳过）；
+  supply-chain 漏洞扫描的依赖导出加 `--no-emit-project`，避免 pip-audit
+  在 `-e .` 可编辑行上误报失败。
+
 ## [1.0.0] — 2026-11-09
 
 ### 新增

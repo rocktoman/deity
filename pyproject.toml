@@ -47,3 +47,15 @@ extend-exclude = ["docs"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+# 可选 extras（chat/tui）未安装时不阻断类型检查：这两个包只在
+# chat_input / tui.app 中以 try/except 方式可选导入，CI 默认只装 dev 依赖。
+[[tool.mypy.overrides]]
+module = ["prompt_toolkit", "prompt_toolkit.*", "textual", "textual.*"]
+ignore_missing_imports = true
+
+# extras 缺失时，上述两个消费模块里由 Any 基类/装饰器派生的错误同样忽略；
+# extras 已安装（本地开发）时这些错误码本就不会触发，strict 其余检查不变。
+[[tool.mypy.overrides]]
+module = ["deity.interfaces.cli.chat_input", "deity.interfaces.tui.app"]
+disable_error_code = ["untyped-decorator", "misc"]
