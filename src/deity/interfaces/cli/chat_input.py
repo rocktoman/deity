@@ -137,15 +137,27 @@ class PromptToolkitInput:
         history_path = default_history_path(config)
         history_path.parent.mkdir(parents=True, exist_ok=True)
         self._truncate_history(history_path, config.max_history)
-        assert PromptSession is not None
-        assert FileHistory is not None
-        self._session: Any = PromptSession(
-            history=FileHistory(str(history_path)),
-            multiline=True,
-            key_bindings=self._key_bindings(),
-            completer=self._completer(),
-            bottom_toolbar=self._bottom_toolbar,
-        )
+        self._history_path = history_path
+        self._session: Any = None
+
+    def _get_session(self) -> Any:
+        """首次真正提示输入时才创建 PromptSession。
+
+        PromptSession 在 Windows 无控制台环境下创建即抛错（如 CI 的
+        NoConsoleScreenBufferError）；构造输入层对象本身不依赖控制台，
+        因此延迟到第一次 read_line 才创建会话。
+        """
+        if self._session is None:
+            assert PromptSession is not None
+            assert FileHistory is not None
+            self._session = PromptSession(
+                history=FileHistory(str(self._history_path)),
+                multiline=True,
+                key_bindings=self._key_bindings(),
+                completer=self._completer(),
+                bottom_toolbar=self._bottom_toolbar,
+            )
+        return self._session
 
     @staticmethod
     def _truncate_history(path: Path, max_history: int) -> None:
@@ -215,7 +227,7 @@ class PromptToolkitInput:
 
     def read_line(self, prompt_text: str) -> str:
         """读一行输入（多行模式：Enter 提交，Alt+Enter 换行）。"""
-        return str(self._session.prompt(prompt_text))
+        return str(self._get_session().prompt(prompt_text))
 
     def select(self, title: str, items: list[str], *, app_factory: Any | None = None) -> int | None:
         """选择一项：TTY 时用 prompt_toolkit 应用，否则走编号。"""

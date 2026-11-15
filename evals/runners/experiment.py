@@ -97,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     }
     (reports / f"exp-{config.name}.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2)
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     lines = [
         f"# 实验 {config.name}\n",
@@ -113,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
             f"p95 {item.p95_ms:.1f}ms，失败类别 {item.failure_categories}\n"
         )
     lines.append("\n## 全部 case\n\n" + ", ".join(report.iter_cases()) + "\n")
-    (reports / f"exp-{config.name}.md").write_text("".join(lines))
+    (reports / f"exp-{config.name}.md").write_text("".join(lines), encoding="utf-8")
     print(
         f"experiment {config.name}: "
         + ", ".join(f"{item.variant_name} {item.passed}/{item.total}" for item in report.variants)

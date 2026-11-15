@@ -33,28 +33,36 @@ def _fixture(root: Path, case: str) -> None:
     _git(root, "init", "-q")
     _git(root, "config", "user.email", "deity-eval@example.invalid")
     _git(root, "config", "user.name", "Deity Eval")
-    (root / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n*.pyc\n")
+    (root / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n*.pyc\n", encoding="utf-8")
     if case == "E01":
-        (root / "calc.py").write_text("def add(a: int, b: int) -> int:\n    return a + b\n")
+        (root / "calc.py").write_text(
+            "def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8"
+        )
     elif case == "E02":
-        (root / "README.md").write_text("Small Python package. Add multiply.py.\n")
+        (root / "README.md").write_text(
+            "Small Python package. Add multiply.py.\n", encoding="utf-8"
+        )
     elif case == "E03":
-        (root / "calc.py").write_text("def add(a: int, b: int) -> int:\n    return a - b\n")
+        (root / "calc.py").write_text(
+            "def add(a: int, b: int) -> int:\n    return a - b\n", encoding="utf-8"
+        )
         (root / "test_calc.py").write_text(
-            "from calc import add\n\ndef test_add():\n    assert add(2, 3) == 5\n"
+            "from calc import add\n\ndef test_add():\n    assert add(2, 3) == 5\n", encoding="utf-8"
         )
     else:
         (root / "calc.py").write_text(
             "def add(a: int, b: int) -> int:\n    return a - b\n\n"
             "def multiply(a: int, b: int) -> int:\n    return a + b\n\n"
-            "def safe_divide(a: int, b: int) -> float | None:\n    return a / b\n"
+            "def safe_divide(a: int, b: int) -> float | None:\n    return a / b\n",
+            encoding="utf-8",
         )
         (root / "test_calc.py").write_text(
             "from calc import add, multiply, safe_divide\n\n"
             "def test_add():\n    assert add(2, 3) == 5\n\n"
             "def test_multiply():\n    assert multiply(3, 4) == 12\n\n"
             "def test_divide():\n    assert safe_divide(8, 2) == 4\n"
-            "    assert safe_divide(8, 0) is None\n"
+            "    assert safe_divide(8, 0) is None\n",
+            encoding="utf-8",
         )
     assert _git(root, "add", ".").returncode == 0
     assert _git(root, "commit", "-qm", "fixture").returncode == 0
@@ -249,14 +257,15 @@ async def main() -> int:
     )
     report = {"passed": passed, "cases": results, "totals": totals, "cost": "UNKNOWN"}
     (REPORTS / "L3-v0.3-candidate.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2)
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     (REPORTS / "L3-v0.3-candidate.md").write_text(
         "# V0.3 DeepSeek L3 候选版\n\n"
         + "\n".join(
             f"- {item['case_id']}: {'PASS' if item['passed'] else 'FAIL'}" for item in results
         )
-        + f"\n\n总结果：{'PASS' if passed else 'FAIL'}；费用：UNKNOWN。\n"
+        + f"\n\n总结果：{'PASS' if passed else 'FAIL'}；费用：UNKNOWN。\n",
+        encoding="utf-8",
     )
     return 0 if passed else 1
 

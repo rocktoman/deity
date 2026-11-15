@@ -73,7 +73,9 @@ def test_full_extension_cli_walkthrough(tmp_path: Path) -> None:
     try:
         skill = tmp_path / ".deity/skills/demo"
         skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text("---\nname: demo\ndescription: CLI demo\n---\n正文示例")
+        (skill / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: CLI demo\n---\n正文示例", encoding="utf-8"
+        )
         script = Path(__file__).parents[1] / "fixtures/mcp_echo_server.py"
         config = tmp_path / "config.toml"
         config.write_text(
@@ -96,6 +98,7 @@ def test_full_extension_cli_walkthrough(tmp_path: Path) -> None:
                 [executable, *args],
                 input=answer,
                 text=True,
+                encoding="utf-8",
                 capture_output=True,
                 env=env,
                 timeout=45,
@@ -180,6 +183,7 @@ def test_full_extension_cli_walkthrough(tmp_path: Path) -> None:
             ],
             input="",
             text=True,
+            encoding="utf-8",
             capture_output=True,
             env=env,
             timeout=30,

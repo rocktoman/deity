@@ -30,7 +30,8 @@ async def run_case(kind: str) -> dict[str, Any]:
         skill_dir = workspace / ".deity/skills/demo"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
-            "---\nname: demo\ndescription: 回答验证码时使用\n---\n验证码是 SKILL-42"
+            "---\nname: demo\ndescription: 回答验证码时使用\n---\n验证码是 SKILL-42",
+            encoding="utf-8",
         )
         script = ROOT / "tests/fixtures/mcp_echo_server.py"
         config = Config(
@@ -129,10 +130,13 @@ async def main() -> int:
     results = [await run_case(kind) for kind in ("mcp", "skill")]
     for result in results:
         stem = result["case_id"]
-        (REPORTS / f"{stem}.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+        (REPORTS / f"{stem}.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         (REPORTS / f"{stem}.md").write_text(
             f"# {stem}\n\n验证：{result['verification']}\n\n"
-            f"工具调用：{result['tool_calls']}\n\n耗时：{result['duration_seconds']} 秒\n"
+            f"工具调用：{result['tool_calls']}\n\n耗时：{result['duration_seconds']} 秒\n",
+            encoding="utf-8",
         )
     print(f"{sum(item['passed'] for item in results)}/2 V0.4 L3 cases passed")
     return 0 if all(item["passed"] for item in results) else 1
