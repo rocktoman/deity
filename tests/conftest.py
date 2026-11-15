@@ -1,6 +1,15 @@
-"""诊断专用 conftest（仅 diag 分支）：把失败用例以 ::error 注解输出。"""
+"""诊断专用 conftest（仅 diag 分支）：把失败用例以 ::error 注解输出。
 
-_failures: list[str] = []
+注解消息必须净化：nodeid 里的 :: 与 longrepr 里的 % 都会破坏
+GitHub workflow command 解析（v2 因此只剩 DIAGSUMMARY），故 nodeid
+与错误正文分行输出且统一转义。
+"""
+
+_failures: list[tuple[str, str]] = []
+
+
+def _clean(text: str) -> str:
+    return text.replace("%", "%25").replace("\r", " ").replace("\n", " | ").replace("::", "//")
 
 
 def pytest_runtest_logreport(report: object) -> None:
@@ -9,8 +18,9 @@ def pytest_runtest_logreport(report: object) -> None:
         "setup",
         "teardown",
     }:
-        text = str(getattr(report, "longrepr", ""))[-400:].replace("\n", " | ")
-        _failures.append(f"{getattr(report, 'nodeid', '?')} :: {text}")
+        nodeid = _clean(str(getattr(report, "nodeid", "?")))
+        text = _clean(str(getattr(report, "longrepr", ""))[-300:])
+        _failures.append((nodeid, text))
 
 
 def pytest_sessionfinish(session: object, exitstatus: int) -> None:
@@ -19,6 +29,7 @@ def pytest_sessionfinish(session: object, exitstatus: int) -> None:
     reporter = manager.get_plugin("terminalreporter") if manager else None
     if reporter is None:
         return
-    for line in _failures[:40]:
-        reporter.write_line(f"::error title=DIAGFAIL::{line}")
+    for nodeid, text in _failures[:40]:
+        reporter.write_line(f"::error title=DIAGNODE::{nodeid}")
+        reporter.write_line(f"::error title=DIAGFAIL::{text}")
     reporter.write_line(f"::error title=DIAGSUMMARY::failures={len(_failures)}")
