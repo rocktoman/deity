@@ -1,6 +1,5 @@
 """Diag-only conftest (never merge to main): POSTs failure summary to ntfy."""
 
-import json
 import urllib.request
 
 TOPIC = "https://ntfy.sh/deity-diag-9f3k7x2"
@@ -25,5 +24,5 @@ def pytest_sessionfinish(session, exitstatus):
                 TOPIC, data=chunk.encode("utf-8", "replace"), method="POST"
             )
             urllib.request.urlopen(req, timeout=10).read()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
