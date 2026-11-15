@@ -34,10 +34,9 @@
   时不再因 import-not-found 阻断 test 矩阵（此前 pytest 步骤被连带跳过）；
   supply-chain 漏洞扫描的依赖导出加 `--no-emit-project`，避免 pip-audit
   在 `-e .` 可编辑行上误报失败。
-- Windows 类型检查：三处 POSIX 专属调用加平台守卫——Skill 有界读取在
-  Windows 上按不可用处理（不做弱化替代）、本地进程超时终止在 Windows
-  退化为终止进程本体、Docker 创建参数在 Windows 省略 `--user`；
-  POSIX 行为不变，`mypy --platform win32` 通过。
+- Windows 类型检查：三处 POSIX 专属调用加平台守卫——本地进程超时终止
+  在 Windows 退化为终止进程本体、Docker 创建参数在 Windows 省略
+  `--user`；POSIX 行为不变，`mypy --platform win32` 通过。
 - CI test 作业改装 chat/tui extras（`uv sync --locked --dev --extra chat
   --extra tui`）；同时给 5 个依赖 prompt_toolkit 的测试加缺包跳过兜底，
   未装 extras 时跳过而不是失败（装上时照常运行）。
@@ -50,6 +49,14 @@
   evals 运行器与回归门禁的文本读写统一显式 UTF-8（Windows 默认 cp1252
   会编码失败）；崩溃恢复测试在 Windows 用 TerminateProcess 等价注入
   硬终止；发布校验和文件改写字节避免 CRLF 污染。
+- Windows 运行时兼容（第二轮，CI 诊断实测修复）：Skill 有界读取补
+  Windows 实现（逐段 lstat 拒绝符号链接与重解析点，语义与 POSIX 版
+  一致，此前 Windows 上一律不可用）；工件目录 fsync 在 Windows 跳过；
+  CLI 入口统一把 stdio 切到 UTF-8 并关闭 Rich 的 legacy Windows 模式
+  （其宽度减一会使帮助折行与基线差一字节），evals 运行器包导入时做
+  同样处理；测试侧把 SKILL.md 等字节敏感夹具改 LF 字节直写、子进程
+  文本模式统一 UTF-8、E03 用例的工具参数改用 json.dumps 构造
+  （Windows 路径反斜杠会破坏手拼 JSON）、FIFO 断言仅在 POSIX 测。
 
 ## [1.0.0] — 2026-11-09
 

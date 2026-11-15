@@ -1,4 +1,5 @@
 import asyncio
+import json
 import shutil
 import sys
 from collections.abc import AsyncIterator
@@ -132,7 +133,9 @@ async def test_e03_fix_reproducible_bug(tmp_path: Path) -> None:
             tool_turn(
                 "s",
                 "shell",
-                '{"argv":["' + sys.executable + '","-m","pytest","-q","test_calc.py"]}',
+                # 用 json.dumps 构造参数：Windows 的 sys.executable 含反斜杠，
+                # 手工拼接会产生非法 JSON 转义。
+                json.dumps({"argv": [sys.executable, "-m", "pytest", "-q", "test_calc.py"]}),
             ),
             [ModelEvent("text_delta", text="修复完成，测试通过"), ModelEvent("message_completed")],
         ],
