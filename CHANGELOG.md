@@ -3,6 +3,17 @@
 格式遵循 Keep a Changelog；版本号遵循 semver（见
 `docs/03-development/compatibility-policy.md`）。
 
+## [Unreleased]
+
+### 新增
+
+- V1.1 立项：`docs/05-roadmap/deity-cli-optimization-roadmap.md`（CLI 优化路线图，
+  V1.1 里程碑 M1–M4 / V1.2 / V2.0）。
+- V1.1-M1：Qwen 成为一等模型厂商（`provider = "qwen"`，默认模型
+  `qwen3.8-omni-flash`，默认端点为 DashScope OpenAI 兼容端点，可用 `base_url` 覆盖）。
+- V1.1-M1：新增 `deity init` 命令生成最小可用配置（默认 Qwen；只写密钥环境变量名，
+  不写密钥值；已有配置默认拒绝覆盖，`--force` 才覆盖）。
+
 ## [1.0.0] — 2026-11-09
 
 ### 新增

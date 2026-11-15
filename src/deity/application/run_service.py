@@ -32,6 +32,7 @@ from deity.adapters.tools.planning import PlanningDispatcher
 from deity.adapters.tools.read_only import ReadOnlyToolDispatcher
 from deity.adapters.tools.workspace import workspace_digest
 from deity.application.config import (
+    QWEN_DEFAULT_BASE_URL,
     CodeIntelligenceConfig,
     CodingConfig,
     Config,
@@ -261,6 +262,12 @@ class RunService:
             if config.model.provider == "openai_compatible":
                 provider = OpenAICompatibleProvider(
                     api_key=key, model=config.model.name, base_url=config.model.base_url
+                )
+            elif config.model.provider == "qwen":
+                provider = OpenAICompatibleProvider(
+                    api_key=key,
+                    model=config.model.name,
+                    base_url=config.model.base_url or QWEN_DEFAULT_BASE_URL,
                 )
             elif config.model.provider == "anthropic":
                 provider = AnthropicProvider(api_key=key, model=config.model.name)

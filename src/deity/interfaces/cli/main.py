@@ -18,6 +18,7 @@ from deity.interfaces.cli.chat_approval import ApprovalController, make_approve
 from deity.interfaces.cli.chat_commands import run_error_message
 from deity.interfaces.cli.chat_session import run_chat_session
 from deity.interfaces.cli.code import _search, code_app
+from deity.interfaces.cli.init_config import build_init_config, write_init_config
 from deity.interfaces.cli.plan import build_command, plan_command, plans_app
 from deity.interfaces.cli.sandbox import sandbox_app
 from deity.interfaces.cli.verify import verify_command
@@ -327,6 +328,37 @@ def eval_gate(
     if result.failures:
         console.print(f"失败：{', '.join(result.failures)}", style="red")
         raise typer.Exit(code=1)
+
+
+@app.command("init")
+def init_command(
+    config: Annotated[Path | None, typer.Option("--config", help="要生成的 TOML 配置路径")] = None,
+    provider: Annotated[str, typer.Option("--provider", help="模型厂商")] = "qwen",
+    model: Annotated[str | None, typer.Option("--model", help="模型名")] = None,
+    api_key_env: Annotated[
+        str | None, typer.Option("--api-key-env", help="存放密钥的环境变量名")
+    ] = None,
+    base_url: Annotated[str | None, typer.Option("--base-url", help="覆盖默认端点")] = None,
+    force: Annotated[bool, typer.Option("--force", help="覆盖已有配置")] = False,
+) -> None:
+    """生成最小可用配置（默认 Qwen / qwen3.8-omni-flash）；只写环境变量名，不写密钥值。"""
+    target = config or Path.home() / ".config/deity/config.toml"
+    try:
+        text = build_init_config(provider, model=model, api_key_env=api_key_env, base_url=base_url)
+        write_init_config(target, text, force=force)
+        settings = load_config(target)
+    except (ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+    assert settings.model is not None
+    console.print(f"配置已生成：{target}")
+    console.print(
+        f"厂商 {settings.model.provider} · 模型 {settings.model.name} · "
+        f"密钥环境变量 {settings.model.api_key_env}"
+    )
+    console.print(
+        f"下一步：先设置环境变量 {settings.model.api_key_env}，再运行 deity doctor 检查。"
+    )
 
 
 @app.command()
