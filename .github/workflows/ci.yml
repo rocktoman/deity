@@ -53,7 +53,7 @@ jobs:
         run: uv export --locked --format cyclonedx1.5 --output-file sbom.json
       - name: Vulnerability scan (any known vulnerability blocks)
         run: |
-          uv export --locked --format requirements.txt --output-file requirements-locked.txt
+          uv export --locked --no-emit-project --format requirements.txt --output-file requirements-locked.txt
           uvx --from pip-audit pip-audit -r requirements-locked.txt --strict
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
