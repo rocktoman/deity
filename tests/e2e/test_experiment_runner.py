@@ -25,11 +25,12 @@ def test_experiment_example_reports_both_variants(tmp_path: Path) -> None:
         cwd=ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=600,
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    payload = json.loads((reports / "exp-compaction-ab.json").read_text())
+    payload = json.loads((reports / "exp-compaction-ab.json").read_text(encoding="utf-8"))
     assert payload["experiment"] == "compaction-ab"
     assert payload["repetitions"] == 3
     assert payload["case_ids"] == ["B01"]

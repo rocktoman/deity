@@ -218,7 +218,7 @@ class ApprovalController:
         input_fn: Callable[[str], str] | None = None,
     ) -> None:
         self.workspace = workspace
-        self.console = console or Console()
+        self.console = console or Console(legacy_windows=False)
         self.allowlist = SessionAllowlist()
         self.mode: Literal["ask", "auto", "session"] = "ask"
         self._input_fn = input_fn

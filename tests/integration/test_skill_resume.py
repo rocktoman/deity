@@ -18,13 +18,15 @@ async def test_skill_content_change_blocks_silent_resume(tmp_path: Path) -> None
     directory = tmp_path / ".deity/skills/demo"
     directory.mkdir(parents=True)
     skill = directory / "SKILL.md"
-    skill.write_text("---\nname: demo\ndescription: Demo\n---\nfirst")
+    skill.write_text("---\nname: demo\ndescription: Demo\n---\nfirst", encoding="utf-8", newline="")
     db_path = tmp_path / "deity.db"
     first = RunService(db_path=db_path, workspace=tmp_path, model=FinalModel(), skills_enabled=True)
     result = await first.run("use demo", model_name="fake")
     with sqlite3.connect(db_path) as db:
         db.execute("UPDATE runs SET status='interrupted' WHERE id=?", (result.run_id,))
-    skill.write_text("---\nname: demo\ndescription: Demo\n---\nchanged")
+    skill.write_text(
+        "---\nname: demo\ndescription: Demo\n---\nchanged", encoding="utf-8", newline=""
+    )
     second = RunService(
         db_path=db_path, workspace=tmp_path, model=FinalModel(), skills_enabled=True
     )
@@ -36,8 +38,10 @@ async def test_skill_content_change_blocks_silent_resume(tmp_path: Path) -> None
 async def test_safe_resume_can_load_resource_of_activated_skill(tmp_path: Path) -> None:
     directory = tmp_path / ".deity/skills/demo"
     directory.mkdir(parents=True)
-    (directory / "SKILL.md").write_text("---\nname: demo\ndescription: Demo\n---\nRead answer.txt")
-    (directory / "answer.txt").write_text("42")
+    (directory / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo\n---\nRead answer.txt", encoding="utf-8", newline=""
+    )
+    (directory / "answer.txt").write_text("42", encoding="utf-8", newline="")
 
     class ActivationModel:
         turns = 0
@@ -96,9 +100,11 @@ async def test_safe_resume_can_load_resource_of_activated_skill(tmp_path: Path) 
 async def test_loaded_resource_change_blocks_resume(tmp_path: Path) -> None:
     directory = tmp_path / ".deity/skills/demo"
     directory.mkdir(parents=True)
-    (directory / "SKILL.md").write_text("---\nname: demo\ndescription: Demo\n---\nRead answer.txt")
+    (directory / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo\n---\nRead answer.txt", encoding="utf-8", newline=""
+    )
     resource = directory / "answer.txt"
-    resource.write_text("first")
+    resource.write_text("first", encoding="utf-8", newline="")
 
     class ResourceModel:
         turns = 0
@@ -124,7 +130,7 @@ async def test_loaded_resource_change_blocks_resume(tmp_path: Path) -> None:
     result = await first.run("use demo", model_name="fake")
     with sqlite3.connect(db_path) as db:
         db.execute("UPDATE runs SET status='interrupted' WHERE id=?", (result.run_id,))
-    resource.write_text("changed")
+    resource.write_text("changed", encoding="utf-8", newline="")
     second = RunService(
         db_path=db_path, workspace=tmp_path, model=FinalModel(), skills_enabled=True
     )
