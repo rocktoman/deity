@@ -71,7 +71,7 @@ def test_checksums_verify(tmp_path: Path) -> None:
     for artifact in sorted(out.iterdir()):
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
         lines.append(f"{digest}  {artifact.name}\n")
-    checksums.write_text("".join(lines), encoding="utf-8")
+    checksums.write_bytes("".join(lines).encode("utf-8"))
     verify = subprocess.run(
         ["sha256sum", "-c", str(checksums)],
         cwd=out,

@@ -44,9 +44,12 @@ def run_case(
         "token_usage": None,
         "output_tail": (completed.stdout + completed.stderr)[-4000:],
     }
-    (reports / f"{case_id}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    (reports / f"{case_id}.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     (reports / f"{case_id}.md").write_text(
-        f"# {case_id}\n\n验证：{report['verification']}\n\n用例：`{'`, `'.join(selectors)}`\n\n退出码：{completed.returncode}\n"
+        f"# {case_id}\n\n验证：{report['verification']}\n\n用例：`{'`, `'.join(selectors)}`\n\n退出码：{completed.returncode}\n",
+        encoding="utf-8",
     )
     return report
 
@@ -56,7 +59,7 @@ def main() -> int:
     reports = ROOT / "evals/reports"
     results = []
     for case in sorted(CASES.glob("E*.yaml")):
-        spec = json.loads(case.read_text())
+        spec = json.loads(case.read_text(encoding="utf-8"))
         results.append(run_case(spec["id"], spec["pytest"], reports))
     if len(results) != 8:
         raise RuntimeError("expected exactly eight baseline cases")

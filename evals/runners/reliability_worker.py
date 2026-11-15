@@ -21,7 +21,7 @@ async def run(root: Path, point: str) -> None:
     assert await repo.claim_tool(run_id, "c1", "write_file", {"path": "x"})
     if point == "after_intent":
         os._exit(91)
-    (root / "effect.log").write_text("executed\n")
+    (root / "effect.log").write_text("executed\n", encoding="utf-8")
     if point == "after_effect":
         os._exit(91)
     await repo.record_tool(run_id, ToolResult("c1", "ok", "created"))

@@ -15,7 +15,7 @@ def main() -> int:
         raise RuntimeError("expected exactly six reliability cases")
     results = []
     for case in cases:
-        spec = json.loads(case.read_text())
+        spec = json.loads(case.read_text(encoding="utf-8"))
         result = run_case(spec["id"], spec["pytest"], reports, spec.get("pytest_args"))
         if spec["id"] == "R04":
             observations: dict[str, list[float]] = {}
@@ -39,7 +39,9 @@ def main() -> int:
                 }
                 for kind, values in observations.items()
             }
-            (reports / "R04.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+            (reports / "R04.json").write_text(
+                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             (reports / "R04.md").write_text(
                 "# R04\n\n验证："
                 + result["verification"]
@@ -48,7 +50,8 @@ def main() -> int:
                     f"- {kind}: P50={stats['p50']}, P95={stats['p95']}, max={stats['max']}"
                     for kind, stats in result["latency_ms"].items()
                 )
-                + "\n"
+                + "\n",
+                encoding="utf-8",
             )
         results.append(result)
     print(f"{sum(item['passed'] for item in results)}/{len(results)} reliability cases passed")
