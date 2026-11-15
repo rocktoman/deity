@@ -22,6 +22,9 @@ class ReadOnlyToolDispatcher:
             if definition["name"] in self._allowed
         )
 
+    def supports_parallel(self, name: str) -> bool:
+        return name in self._allowed and self._local.supports_parallel(name)
+
     async def prepare(self, call: ToolCall, context: AgentRequest) -> ToolResult | None:
         """Reject unauthorized tools before the durable execution claim."""
         if call.name not in self._allowed:

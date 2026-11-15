@@ -1373,6 +1373,11 @@ class SQLiteSessionRepository:
             ),
         )
 
+    async def record_event(self, run_id: str, kind: str, payload: dict[str, Any]) -> None:
+        """追加一条持久化事件的公开入口（ADR-018：turn_diff 等扩展事件）。"""
+        await self._event(run_id, kind, payload)
+        await self.db.commit()
+
     async def _context_message(self, run_id: str, payload: dict[str, Any]) -> None:
         async with self.db.execute(
             "SELECT COALESCE(MAX(seq),0)+1 FROM context_messages WHERE run_id=?", (run_id,)

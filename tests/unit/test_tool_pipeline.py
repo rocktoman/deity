@@ -7,6 +7,7 @@ import pytest
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.adapters.tools import LocalToolDispatcher
 from deity.adapters.tools.planning import PlanningDispatcher
+from deity.adapters.tools.turn_diff import TurnDiffDispatcher
 from deity.application.tool_pipeline import ToolPipeline
 from deity.core.contracts import ExecutionMode, ToolDispatcher
 
@@ -39,7 +40,9 @@ async def test_compose_build_returns_local_dispatcher(tmp_path: Path) -> None:
         dispatcher, guarded = await _pipeline(tmp_path).compose(repo, ExecutionMode.BUILD)
     finally:
         await repo.close()
-    assert isinstance(dispatcher, LocalToolDispatcher)
+    # ADR-018 A4：最外层恒为 TurnDiffDispatcher，内层仍是本地分发器。
+    assert isinstance(dispatcher, TurnDiffDispatcher)
+    assert isinstance(dispatcher.inner, LocalToolDispatcher)
     assert guarded is None
 
 
@@ -50,7 +53,8 @@ async def test_compose_plan_wraps_planning_dispatcher(tmp_path: Path) -> None:
         dispatcher, guarded = await _pipeline(tmp_path).compose(repo, ExecutionMode.PLAN)
     finally:
         await repo.close()
-    assert isinstance(dispatcher, PlanningDispatcher)
+    assert isinstance(dispatcher, TurnDiffDispatcher)
+    assert isinstance(dispatcher.inner, PlanningDispatcher)
     assert guarded is None
 
 
@@ -69,8 +73,10 @@ async def test_approved_plan_writes_bypass_authorize(tmp_path: Path) -> None:
         )
     finally:
         await repo.close()
-    assert isinstance(dispatcher, LocalToolDispatcher)
-    assert dispatcher.approve is not None
-    assert dispatcher.approve("write_file", {}) is True
-    assert dispatcher.approve("shell", {}) is False
+    assert isinstance(dispatcher, TurnDiffDispatcher)
+    local = dispatcher.inner
+    assert isinstance(local, LocalToolDispatcher)
+    assert local.approve is not None
+    assert local.approve("write_file", {}) is True
+    assert local.approve("shell", {}) is False
     assert calls == ["shell"]

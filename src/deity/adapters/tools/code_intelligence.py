@@ -46,6 +46,12 @@ class CodeIntelligenceDispatcher:
             },
         )
 
+    def supports_parallel(self, name: str) -> bool:
+        if name in {"find_symbol", "find_references"}:
+            return True
+        check = getattr(self.delegate, "supports_parallel", None)
+        return bool(check(name)) if callable(check) else False
+
     async def prepare(self, call: ToolCall, context: AgentRequest) -> ToolResult | None:
         if call.name not in {"find_symbol", "find_references"}:
             prepare = getattr(self.delegate, "prepare", None)

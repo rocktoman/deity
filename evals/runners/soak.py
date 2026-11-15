@@ -13,7 +13,11 @@ import argparse
 import asyncio
 import json
 import os
-import resource
+
+try:
+    import resource
+except ImportError:  # Windows 无 resource 模块，RSS 采样降级为不可用
+    resource = None  # type: ignore[assignment]
 import sqlite3
 import statistics
 import subprocess
@@ -61,6 +65,8 @@ def current_rss_mb() -> tuple[float, str]:
                 return float(line.split()[1]) / 1024.0, "proc_status"
     except OSError:
         pass
+    if resource is None:
+        return 0.0, "unavailable"
     ru_maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     # Linux: KB；macOS: bytes。
     if sys.platform == "darwin":

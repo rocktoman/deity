@@ -37,7 +37,7 @@ class AnthropicProvider:
 
     def capabilities(self) -> ModelCapabilities:
         """Declare the supported baseline features."""
-        return ModelCapabilities(True, True, False)
+        return ModelCapabilities(True, True, True)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         """Request a stream and normalize raw events."""

@@ -89,6 +89,10 @@ class PlanningDispatcher:
             },
         )
 
+    def supports_parallel(self, name: str) -> bool:
+        check = getattr(self.delegate, "supports_parallel", None)
+        return bool(check(name)) if callable(check) else False
+
     async def prepare(self, call: ToolCall, context: AgentRequest) -> ToolResult | None:
         decision = self.policy.authorize(call.name, call.arguments, ExecutionMode.PLAN)
         if not decision.allowed:

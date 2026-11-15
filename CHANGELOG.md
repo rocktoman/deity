@@ -7,6 +7,21 @@
 
 ### 新增
 
+- F1（融合计划 V1.2 上半，ADR-018）：apply_patch 新增多文件 patch
+  文本形态（`patch` 参数：Add/Delete/Update/Move hunk、`@@` 上下文锚、
+  四级模糊定位、先全量校验后落盘；旧 `path`+`old`+`new` 形态保留
+  兼容），实现参照 openai/codex apply-patch 文法重新实现，来源声明见
+  `docs/06-legal/third-party-notices.md`；Git 守卫对新形态逐文件执行
+  同一套预检与预像锁定。
+- F1（ADR-018）：只读工具并行——同一轮内连续的只读调用
+  （read_file/list_files/glob/grep/git_status/git_diff 及
+  find_symbol/find_references）并发执行、结果按原序回注，写调用
+  构成屏障；OpenAI 兼容与 Anthropic 适配器能力声明改为支持
+  parallel_tool_calls。
+- F1（ADR-018）：新增持久化事件 `turn_diff`——每轮工具调用后产出
+  本轮文件变更的 unified diff（单文件截断 8,000 字符，二进制只记
+  sha256），同时经 live 事件同名投递，为 /undo 与证据时间线提供
+  数据前置。shell 的改动不在追踪范围。
 - V1.1 立项：`docs/05-roadmap/deity-cli-optimization-roadmap.md`（CLI 优化路线图，
   V1.1 里程碑 M1–M4 / V1.2 / V2.0）。
 - V1.1-M1：Qwen 成为一等模型厂商（`provider = "qwen"`，默认模型

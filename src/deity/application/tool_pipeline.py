@@ -2,7 +2,8 @@
 
 组装顺序（与抽取前 RunService._compose_dispatcher 完全一致）：
 LocalToolDispatcher（可选 sandbox shell 路由）→ MCP 组合 → Skill →
-代码智能 → Plan 只读包装 / Git 守卫包装。RunService 只保留单步能力
+代码智能 → Plan 只读包装 / Git 守卫包装 → TurnDiff（最外层，
+ADR-018 A4）。RunService 只保留单步能力
 的实现（_authorize、_mcp_dispatcher、_sandbox_shell、_code_search），
 组装顺序、计划模式的已批写放行与守卫回填（guard_ref）归本模块。
 """
@@ -19,6 +20,7 @@ from deity.adapters.tools import LocalToolDispatcher
 from deity.adapters.tools.code_intelligence import CodeIntelligenceDispatcher
 from deity.adapters.tools.git_guard import GitGuardedDispatcher
 from deity.adapters.tools.planning import PlanningDispatcher
+from deity.adapters.tools.turn_diff import TurnDiffDispatcher
 from deity.core.contracts import (
     AgentRequest,
     ExecutionMode,
@@ -92,10 +94,12 @@ class ToolPipeline:
             dispatcher = CodeIntelligenceDispatcher(dispatcher, self._code_search(), repo)
         if mode == ExecutionMode.PLAN:
             return (
-                PlanningDispatcher(
-                    dispatcher,
-                    repo,
-                    GitWorkspaceAdapter(self._workspace, ignored=(self._db_path,)),
+                TurnDiffDispatcher(
+                    PlanningDispatcher(
+                        dispatcher,
+                        repo,
+                        GitWorkspaceAdapter(self._workspace, ignored=(self._db_path,)),
+                    )
                 ),
                 None,
             )
@@ -115,8 +119,8 @@ class ToolPipeline:
                 plan_targets=plan_targets,
             )
             guard_ref[0] = guarded
-            return guarded, guarded
-        return dispatcher, None
+            return TurnDiffDispatcher(guarded), guarded
+        return TurnDiffDispatcher(dispatcher), None
 
 
 __all__ = ["ToolPipeline"]

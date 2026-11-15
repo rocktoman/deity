@@ -253,6 +253,10 @@ class SkillDispatcher:
                 self._active_bodies[(target_run_id, name)] = body
         self._content_bytes[target_run_id] = previous._content_bytes.get(source_run_id, 0)
 
+    def supports_parallel(self, name: str) -> bool:
+        check = getattr(self.inner, "supports_parallel", None)
+        return bool(check(name)) if callable(check) else False
+
     def definitions(self) -> tuple[dict[str, Any], ...]:
         inner_definitions: tuple[dict[str, Any], ...] = self.inner.definitions()
         return inner_definitions + (
