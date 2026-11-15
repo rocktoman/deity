@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
                 "isolated_db": str(isolated.db_path),
             }
             (reports / f"{case.id}.json").write_text(
-                json.dumps(enriched, ensure_ascii=False, indent=2)
+                json.dumps(enriched, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             (reports / f"{case.id}.md").write_text(
                 f"# {case.id} {case.title}\n\n"
@@ -77,7 +77,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"环境 hash：{environment.fingerprint()}\n\n"
                 f"模型：{MODEL}；代码版本：{environment.git_commit}\n\n"
                 f"断言：`{'`, `'.join(case.assertions)}`\n\n"
-                f"耗时：{record.duration_ms}ms；失败类别：{record.failure_category}\n"
+                f"耗时：{record.duration_ms}ms；失败类别：{record.failure_category}\n",
+                encoding="utf-8",
             )
         finally:
             service.cleanup(isolated)
@@ -93,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         "cases": [metric_to_dict(item) for item in records],
     }
     (reports / f"benchmark-{version.version}.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2)
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"{summary['passed']}/{summary['total']} benchmark cases passed")
     return 0 if summary["passed"] == summary["total"] else 1

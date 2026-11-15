@@ -41,6 +41,15 @@
 - CI test 作业改装 chat/tui extras（`uv sync --locked --dev --extra chat
   --extra tui`）；同时给 5 个依赖 prompt_toolkit 的测试加缺包跳过兜底，
   未装 extras 时跳过而不是失败（装上时照常运行）。
+- Windows 运行时兼容（CI Windows 矩阵 pytest 实测修复）：会话所有者探活
+  在 Windows 改用 OpenProcess（原 `os.kill(pid, 0)` 报 WinError 87）；
+  Git 安全补丁的目录 fsync 在 Windows 跳过（无目录句柄语义）；聊天输入
+  的 PromptSession 改为首次提示时懒创建（Windows 无控制台时构造即抛
+  NoConsoleScreenBufferError）；`fixture_sha256` 的路径分量统一用 POSIX
+  分隔符，仓库加 `.gitattributes` 固定 LF 检出，避免 CRLF 漂移误报；
+  evals 运行器与回归门禁的文本读写统一显式 UTF-8（Windows 默认 cp1252
+  会编码失败）；崩溃恢复测试在 Windows 用 TerminateProcess 等价注入
+  硬终止；发布校验和文件改写字节避免 CRLF 污染。
 
 ## [1.0.0] — 2026-11-09
 

@@ -13,7 +13,7 @@ def main() -> int:
         raise RuntimeError("expected exactly five client cases")
     results = []
     for case in cases:
-        spec = json.loads(case.read_text())
+        spec = json.loads(case.read_text(encoding="utf-8"))
         results.append(run_case(spec["id"], spec["pytest"], reports, spec.get("pytest_args")))
     print(f"{sum(item['passed'] for item in results)}/{len(results)} client cases passed")
     return 0 if all(item["passed"] for item in results) else 1

@@ -168,7 +168,9 @@ def main(argv: list[str] | None = None) -> int:
     reports = Path(args.reports_dir) if args.reports_dir else ROOT / "evals" / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     result = asyncio.run(soak(args.minutes, args.threshold_mb))
-    (reports / "soak.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    (reports / "soak.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     print(
         f"soak {result['iterations']} iterations, "
         f"RSS {result['rss_start_mb']} -> {result['rss_end_mb']} MB "
