@@ -27,7 +27,7 @@ jobs:
         run: command -v rg || brew install ripgrep
       - if: runner.os == 'Windows'
         run: choco install ripgrep -y
-      - run: uv sync --locked --dev
+      - run: uv sync --locked --dev --extra chat --extra tui
       - run: uv run --locked ruff check .
       - run: uv run --locked ruff format --check .
       - run: uv run --locked mypy src
