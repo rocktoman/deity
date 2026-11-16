@@ -270,24 +270,36 @@ async def test_dev_server_end_to_end(tmp_path: Path) -> None:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     dispatcher = _dispatcher()
+    # 不用 python -m http.server：HTTPServer.server_bind 会调用
+    # socket.getfqdn()，在 macOS CI runner 上该调用可阻塞数十秒
+    # （主机名不可解析），导致 socket 已绑定却迟迟不 listen、
+    # 取数全部超时。改用 TCPServer（其 server_bind 不做 fqdn）
+    # + SimpleHTTPRequestHandler 的等价内联服务脚本。
+    server_script = (
+        "import functools, http.server, socketserver, sys\n"
+        "handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[2])\n"
+        "socketserver.ThreadingTCPServer.allow_reuse_address = True\n"
+        "server = socketserver.ThreadingTCPServer(('127.0.0.1', int(sys.argv[1])), handler)\n"
+        "server.serve_forever()\n"
+    )
     started = await _shell(
         dispatcher,
         tmp_path,
         "c1",
-        argv=[sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+        argv=[sys.executable, "-c", server_script, str(port), str(tmp_path)],
         session="web",
         yield_ms=800,
     )
     assert "running" in started.output
     fetch = (
         "import urllib.request\n"
-        f"print(urllib.request.urlopen('http://127.0.0.1:{port}/hello.txt', timeout=5).read().decode())\n"
+        f"print(urllib.request.urlopen('http://127.0.0.1:{port}/hello.txt', timeout=10).read().decode())\n"
     )
-    # 轮询等待式断言：慢 runner 上解释器启动 + bind 可能数秒，20 秒内
+    # 轮询等待式断言：慢 runner 上解释器启动 + bind 可能数秒，45 秒内
     # 持续重试真实 HTTP 取数；会话若已退出则立即失败并带出其输出。
     body = ""
     last_output = ""
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + 45
     attempt = 0
     while time.monotonic() < deadline:
         attempt += 1
@@ -305,6 +317,10 @@ async def test_dev_server_end_to_end(tmp_path: Path) -> None:
         if "exited" in poll.output or "no session" in poll.output:
             raise AssertionError(f"dev server session died early: {poll.output}")
         await asyncio.sleep(0.3)
-    assert "hello from session server" in body, f"fetch never succeeded: {last_output}"
+    if "hello from session server" not in body:
+        final_poll = await _shell(dispatcher, tmp_path, "p-final", session="web")
+        raise AssertionError(
+            f"fetch never succeeded: {last_output}; session state: {final_poll.output}"
+        )
     closed = await _shell(dispatcher, tmp_path, "c9", session="web", close=True)
     assert "closed" in closed.output
