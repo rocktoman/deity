@@ -187,6 +187,7 @@ Deity 现状（实读 `src/deity/core/context/reliable.py`）：压缩是**确�
 内容：B2（bwrap 沙箱档）+ A6（resume 选择器/fork/archive）+ A7（JSONL 导出）+ B5（约束层）。
 目标：Linux 上 workspace-write 成为真沙箱而非自觉；会话管理追平主流手感。
 验收：沙箱越界写入/联网的拒绝测试；fork 后两条会话独立演进的集成测试。无 bwrap 的环境必须明确降级提示（不假装安全）。
+进展（2026-11-16）：B2/A6/A7/B5 已实现（ADR-020；BwrapExecutionBackend + SandboxPolicy 三档 + schema v7 会话标题/归档/分叉 + run_export JSONL + requirements.toml 约束层），新增 23 个专项测试；沙箱只写暂存区、fork 双分叉独立演进两项验收用例均已落地。
 - **F4（= V2.0 主体）：差异化兑现**
 内容：B3（信任分级）+ B6（可写委派 patch 回收）+ 证据时间线 UI + /replay 产品化（均属既有 V2.0 条目，此处只排期不改义）+ B4/B7 视前端需求推进。
 验收：沿用路线图 V2.0 标准（README 第一屏换成证据时间线截图）。

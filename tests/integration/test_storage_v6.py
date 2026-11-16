@@ -55,7 +55,7 @@ async def test_v5_backup_exists_before_v6_and_can_restore(tmp_path: Path) -> Non
     await repo.close()
     with sqlite3.connect(path) as db:
         db.execute("DROP TABLE delegations")
-        db.execute("DELETE FROM schema_migrations WHERE version=6")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (6, 7)")
     repo = await SQLiteSessionRepository.open(path)
     await repo.close()
     with sqlite3.connect(path.with_suffix(".v5.bak")) as backup:
@@ -160,7 +160,7 @@ async def test_corrupt_v5_backup_blocks_migration(tmp_path: Path) -> None:
     await repo.close()
     with sqlite3.connect(path) as db:
         db.execute("DROP TABLE delegations")
-        db.execute("DELETE FROM schema_migrations WHERE version=6")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (6, 7)")
     path.with_suffix(".v5.bak").write_text("corrupt")
     with pytest.raises(ValueError, match="v5 backup verification failed"):
         await SQLiteSessionRepository.open(path)

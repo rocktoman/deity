@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from deity.adapters.code_intelligence import LexicalCodeSearch
 from deity.adapters.execution.artifacts import ArtifactApplier
+from deity.adapters.execution.bwrap import BwrapExecutionBackend
 from deity.adapters.execution.docker import DockerExecutionBackend
 from deity.adapters.git import GitWorkspaceAdapter
 from deity.adapters.mcp import McpCompositeDispatcher, McpServerConfig, McpSessionManager, McpTool
@@ -77,6 +78,7 @@ from deity.core.contracts.execution import (
     ExecutionStatus,
     ResourceBudget,
     SandboxHandle,
+    SandboxPolicy,
     SandboxSpec,
 )
 from deity.core.delegation import DelegationPolicy, ResultReducer
@@ -196,7 +198,7 @@ class RunService:
             mcp_wrap=self._mcp_dispatcher,
             sandbox_shell=(
                 self._sandbox_shell
-                if self.sandbox.enabled and self.sandbox.backend == "docker"
+                if self.sandbox.enabled and self.sandbox.backend in {"docker", "bwrap"}
                 else None
             ),
             skill_catalog=self.skill_catalog,
@@ -531,27 +533,43 @@ class RunService:
         context: AgentRequest,
         guard: GitGuardedDispatcher | None = None,
     ) -> ToolResult:
-        """Route an approved shell call through the required Docker backend."""
+        """Route an approved shell call through the configured sandbox backend."""
         if not context.run_id:
             raise ValueError("sandbox run identity missing")
         self._sandbox_active_run_id = context.run_id
         config = self.sandbox
-        backend = DockerExecutionBackend(
-            self.workspace,
-            Path(tempfile.gettempdir()) / "deity-sandbox",
-            excluded_paths=(
-                self.db_path,
-                self.db_path.with_name(self.db_path.name + "-wal"),
-                self.db_path.with_name(self.db_path.name + "-shm"),
-                *(self.db_path.with_suffix(f".v{version}.bak") for version in range(1, 5)),
-            ),
-            excluded_patterns=config.exclude,
-            max_workspace_files=config.max_workspace_files,
-            max_workspace_bytes=config.max_workspace_bytes,
-            max_artifact_files=config.max_artifact_files,
-            max_artifact_bytes=config.max_artifact_bytes,
-            cleanup_timeout_seconds=config.cleanup_timeout_seconds,
+        excluded = (
+            self.db_path,
+            self.db_path.with_name(self.db_path.name + "-wal"),
+            self.db_path.with_name(self.db_path.name + "-shm"),
+            *(self.db_path.with_suffix(f".v{version}.bak") for version in range(1, 5)),
         )
+        if config.backend == "bwrap":
+            # ADR-020 B2：bwrap 里程碑只支持禁网；非 none 明确拒绝，不假装隔离。
+            if config.network != "none":
+                return ToolResult(call.call_id, "denied", "bwrap sandbox requires network=none")
+            backend: DockerExecutionBackend | BwrapExecutionBackend = BwrapExecutionBackend(
+                self.workspace,
+                Path(tempfile.gettempdir()) / "deity-sandbox",
+                excluded_paths=excluded,
+                excluded_patterns=config.exclude,
+                max_workspace_files=config.max_workspace_files,
+                max_workspace_bytes=config.max_workspace_bytes,
+                max_artifact_files=config.max_artifact_files,
+                max_artifact_bytes=config.max_artifact_bytes,
+            )
+        else:
+            backend = DockerExecutionBackend(
+                self.workspace,
+                Path(tempfile.gettempdir()) / "deity-sandbox",
+                excluded_paths=excluded,
+                excluded_patterns=config.exclude,
+                max_workspace_files=config.max_workspace_files,
+                max_workspace_bytes=config.max_workspace_bytes,
+                max_artifact_files=config.max_artifact_files,
+                max_artifact_bytes=config.max_artifact_bytes,
+                cleanup_timeout_seconds=config.cleanup_timeout_seconds,
+            )
         budget = ResourceBudget(
             config.timeout_seconds,
             config.cpu_count,
@@ -573,13 +591,14 @@ class RunService:
             tuple(call.arguments["argv"]),
             ".",
             SandboxSpec(
-                BackendKind.DOCKER,
-                config.image,
+                BackendKind.BWRAP if config.backend == "bwrap" else BackendKind.DOCKER,
+                config.image if config.backend == "docker" else None,
                 budget,
                 network=config.network,
                 network_approved=network_approved,
                 env_names=config.env_names,
                 artifact_policy=config.artifact_policy,
+                policy=SandboxPolicy(config.policy),
             ),
         )
         reviewer = None

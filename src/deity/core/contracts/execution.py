@@ -8,7 +8,20 @@ from typing import Literal, Protocol
 class BackendKind(StrEnum):
     LOCAL = "local"
     DOCKER = "docker"
+    BWRAP = "bwrap"
     FAKE = "fake"
+
+
+class SandboxPolicy(StrEnum):
+    """沙箱分级语义（ADR-020，参照 Codex SandboxPolicy 三档）。
+
+    read-only：根文件系统与工作区都只读；workspace-write：仅工作区
+    可写；full-access：无沙箱（只能由 local 后端表达，隔离后端拒绝）。
+    """
+
+    READ_ONLY = "read-only"
+    WORKSPACE_WRITE = "workspace-write"
+    FULL_ACCESS = "full-access"
 
 
 class ExecutionStatus(StrEnum):
@@ -60,6 +73,7 @@ class SandboxSpec:
     env_names: tuple[str, ...] = ()
     workspace: WorkspaceMountPolicy = WorkspaceMountPolicy()
     artifact_policy: Literal["discard", "review"] = "discard"
+    policy: SandboxPolicy = SandboxPolicy.WORKSPACE_WRITE
 
 
 @dataclass(frozen=True)

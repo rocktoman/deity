@@ -50,7 +50,7 @@ async def test_legacy_db_opens_and_events_readable(tmp_path: Path) -> None:
         info = await repo.run_info(RUN_ID)
         assert info["status"] == "completed"
         with sqlite3.connect(db_path) as db:
-            assert db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 6
+            assert db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 7
     finally:
         await repo.close()
 

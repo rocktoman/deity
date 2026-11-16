@@ -90,6 +90,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("/skill", "/skill [名称]", "选择 Skill（只影响下一条任务）"),
     Command("/mcp", "/mcp", "查看并选择 MCP 工具（只影响下一条任务）"),
     Command("/resume", "/resume [运行ID]", "恢复中断的运行"),
+    Command("/fork", "/fork <运行ID>", "从某运行的最新前沿分叉新运行"),
     Command("/sessions", "/sessions", "列出并切换会话"),
     Command("/compact", "/compact", "查看上下文压缩状态"),
     Command("/clear", "/clear", "清屏（不删除 SQLite 历史）"),
@@ -143,6 +144,9 @@ async def dispatch(prompt: str, ctx: ChatContext) -> bool:
         return True
     if prompt == "/resume" or prompt.startswith("/resume "):
         await _handle_resume(prompt, ctx)
+        return True
+    if prompt == "/fork" or prompt.startswith("/fork "):
+        await _handle_fork(prompt, ctx)
         return True
     if prompt == "/sessions":
         await _handle_sessions(ctx)
@@ -347,6 +351,28 @@ async def _handle_resume(prompt: str, ctx: ChatContext) -> None:
         await _resume_run(ctx, resumable[selected]["id"])
 
 
+async def _handle_fork(prompt: str, ctx: ChatContext) -> None:
+    """执行 /fork <run-id>：从该运行最新前沿分叉，打印新 run id 供 /resume 继续。"""
+    parts = shlex.split(prompt)[1:]
+    db_path = getattr(ctx.service, "db_path", None)
+    if not parts or db_path is None:
+        ctx.console.print("用法：/fork <run-id>")
+        return
+    repo = await SQLiteSessionRepository.open(db_path)
+    try:
+        new_id = await repo.create_forked_run(parts[0])
+    except (KeyError, ValueError, OSError) as exc:
+        ctx.console.print(f"分叉失败：{exc}", style="red")
+        return
+    finally:
+        await repo.close()
+    ctx.console.print(
+        f"已分叉：{new_id}（用 /resume {new_id} 继续执行）",
+        highlight=False,
+        markup=False,
+    )
+
+
 async def _handle_sessions(ctx: ChatContext) -> None:
     """执行 /sessions：列出历史会话，选中后切换并清空计划模式与待用选择。"""
     db_path = getattr(ctx.service, "db_path", None)
@@ -363,7 +389,7 @@ async def _handle_sessions(ctx: ChatContext) -> None:
         return
     selected = ctx.input.select(
         "历史会话",
-        [f"{item['id'][:8]} · {item['workspace']}" for item in sessions],
+        [f"{item['id'][:8]} · {item['title'] or item['workspace']}" for item in sessions],
     )
     if selected is None:
         return

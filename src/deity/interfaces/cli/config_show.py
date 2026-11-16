@@ -87,6 +87,9 @@ def format_config_show(config: Config, sources: dict[str, str]) -> str:
         env_name = config.model.api_key_env
         present = "已设置" if os.environ.get(env_name) else "未设置"
         lines.append(f"密钥环境变量 {env_name}：{present}（只查存在性，不读值）")
+    if sources.get("requirements"):
+        lines.append("[requirements]（来源：项目约束层 .deity/requirements.toml，只收紧）")
+        lines.append("  已应用：有效配置中的权限/沙箱/上限均已按约束取更严者")
     return "\n".join(lines)
 
 
