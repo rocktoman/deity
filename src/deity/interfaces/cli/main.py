@@ -350,6 +350,65 @@ def export(
         typer.echo(text, nl=False)
 
 
+@app.command()
+def timeline(
+    run_id: str,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite 路径")] = None,
+) -> None:
+    """证据时间线（ADR-021）：按序打印一个 Run 的事件、证据、委派与验证。"""
+    from deity.application.timeline import format_timeline, run_timeline
+
+    async def produce() -> str:
+        repo = await SQLiteSessionRepository.open(db or Path.home() / ".local/share/deity/deity.db")
+        try:
+            return format_timeline(await run_timeline(repo, run_id))
+        finally:
+            await repo.close()
+
+    try:
+        text = asyncio.run(produce())
+    except (KeyError, ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+    typer.echo(text)
+
+
+@app.command()
+def replay(
+    target: str,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite 路径")] = None,
+) -> None:
+    """只读回放一份评估报告或一个 Run 的事件（ADR-021：eval replay 的顶层入口）。"""
+    from deity.application.replay import TraceReplayer
+
+    try:
+        replayer = TraceReplayer()
+        path = Path(target)
+        if path.is_file():
+            result = replayer.replay_report(path)
+        else:
+            result = replayer.replay_sqlite(
+                db or Path.home() / ".local/share/deity/deity.db", target
+            )
+        console.print(f"{result.case_id}: {result.status} 事件 {result.events_seen} 条")
+        if result.schema_mismatch:
+            console.print("schema_mismatch：旧 schema 事件只读，未迁移", style="yellow")
+        if result.blocked:
+            console.print(f"replay_blocked：{', '.join(result.blocked)}", style="yellow")
+        summary = result.summary
+        if summary.get("tool_calls") is not None:
+            console.print(
+                f"工具调用 {summary.get('tool_calls')} · 审批 {summary.get('approvals')}",
+                markup=False,
+                highlight=False,
+            )
+        if summary.get("text"):
+            console.print(str(summary["text"])[:500], markup=False, highlight=False)
+    except (ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+
+
 @runs_app.command("inspect")
 def inspect_run(
     run_id: str,

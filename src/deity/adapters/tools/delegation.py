@@ -14,6 +14,8 @@ class ChildTaskArgs(BaseModel):
 
     goal: str = Field(min_length=1, max_length=8000)
     allowed_tools: list[str] = Field(min_length=1)
+    # ADR-021 B6：writable 任务在暂存副本里执行、回收 patch（需配置开启）。
+    mode: str = Field(default="read_only", pattern="^(read_only|writable)$")
     max_turns: int = Field(ge=1)
     max_tool_calls: int = Field(ge=1)
     deadline_seconds: float = Field(gt=0)
@@ -49,7 +51,12 @@ class DelegationDispatcher:
             *definitions,
             {
                 "name": "delegate",
-                "description": "Delegate read-only analysis tasks",
+                "description": (
+                    "Delegate bounded child tasks. Default mode is read_only analysis; "
+                    "mode=writable runs the child in a staging copy and returns a "
+                    "reviewable patch instead of touching the workspace "
+                    "(requires writable delegation enabled; never auto-approved)."
+                ),
                 "parameters": DelegateArgs.model_json_schema(),
             },
         )
@@ -84,6 +91,7 @@ class DelegationDispatcher:
                         task.max_input_tokens_total,
                         task.max_output_tokens_total,
                     ),
+                    mode=task.mode,  # type: ignore[arg-type]
                 )
                 for index, task in enumerate(args.tasks)
             )

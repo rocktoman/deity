@@ -91,6 +91,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("/mcp", "/mcp", "查看并选择 MCP 工具（只影响下一条任务）"),
     Command("/resume", "/resume [运行ID]", "恢复中断的运行"),
     Command("/fork", "/fork <运行ID>", "从某运行的最新前沿分叉新运行"),
+    Command("/timeline", "/timeline <运行ID>", "查看某运行的证据时间线"),
     Command("/sessions", "/sessions", "列出并切换会话"),
     Command("/compact", "/compact", "查看上下文压缩状态"),
     Command("/clear", "/clear", "清屏（不删除 SQLite 历史）"),
@@ -147,6 +148,9 @@ async def dispatch(prompt: str, ctx: ChatContext) -> bool:
         return True
     if prompt == "/fork" or prompt.startswith("/fork "):
         await _handle_fork(prompt, ctx)
+        return True
+    if prompt == "/timeline" or prompt.startswith("/timeline "):
+        await _handle_timeline(prompt, ctx)
         return True
     if prompt == "/sessions":
         await _handle_sessions(ctx)
@@ -371,6 +375,26 @@ async def _handle_fork(prompt: str, ctx: ChatContext) -> None:
         highlight=False,
         markup=False,
     )
+
+
+async def _handle_timeline(prompt: str, ctx: ChatContext) -> None:
+    """执行 /timeline <run-id>：打印该运行的证据时间线（ADR-021，只读）。"""
+    parts = shlex.split(prompt)[1:]
+    db_path = getattr(ctx.service, "db_path", None)
+    if not parts or db_path is None:
+        ctx.console.print("用法：/timeline <run-id>")
+        return
+    from deity.application.timeline import format_timeline, run_timeline
+
+    repo = await SQLiteSessionRepository.open(db_path)
+    try:
+        text = format_timeline(await run_timeline(repo, parts[0]))
+    except (KeyError, ValueError, OSError) as exc:
+        ctx.console.print(f"时间线不可用：{exc}", style="red")
+        return
+    finally:
+        await repo.close()
+    ctx.console.print(text, highlight=False, markup=False)
 
 
 async def _handle_sessions(ctx: ChatContext) -> None:

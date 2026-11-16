@@ -191,6 +191,7 @@ Deity 现状（实读 `src/deity/core/context/reliable.py`）：压缩是**确�
 - **F4（= V2.0 主体）：差异化兑现**
 内容：B3（信任分级）+ B6（可写委派 patch 回收）+ 证据时间线 UI + /replay 产品化（均属既有 V2.0 条目，此处只排期不改义）+ B4/B7 视前端需求推进。
 验收：沿用路线图 V2.0 标准（README 第一屏换成证据时间线截图）。
+进展（2026-11-16）：B3/B6/证据时间线/replay 已实现（ADR-021；grade_delegation 三级分级 + 可写委派暂存隔离与 patch 回收 + application/timeline 聚合与 CLI/聊天双表面 + 顶层 deity replay），新增 17 个专项测试；B4/B7 无真实前端需求，按约不推进。README 第一屏截图一项待用户侧确认视觉素材后补。
 
 ---
 

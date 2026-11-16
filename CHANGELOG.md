@@ -15,6 +15,18 @@
 
 ### 新增
 
+- F4（融合计划 V2.0 主体，ADR-021）：可写委派 + patch 回收——
+  `[multi_agent] writable = true` 时，`delegate` 任务可声明
+  `mode: "writable"`，子 Run 在工作区暂存副本里执行（工具上限
+  读 + write_file/apply_patch），结束后把改动回收为 Deity patch
+  随结果返回父级，父级经自有 apply_patch（审批 + Git 守卫）应用；
+  真实工作区不被子 Run 触碰。回收记 `delegation_patch` 证据与
+  `DelegationPatchHarvested` 事件。
+- F4（ADR-021）：信任分级——委派批次按 standard/elevated/high
+  分级并随结果返回；可写委派永不自动放行，无审批通道时拒绝。
+- F4（ADR-021）：证据时间线——`deity timeline <run-id>` 与聊天
+  `/timeline` 按序呈现事件（含 turn_diff 文件明细）、证据、委派
+  与验证报告；新增顶层 `deity replay`（与 `eval replay` 同实现）。
 - F3（融合计划，ADR-020）：Linux bwrap 沙箱档——`[sandbox]
   backend = "bwrap"` 时 shell 经 bubblewrap 命名空间隔离执行
   （只读根、禁网、工作区按 `policy` 只读/可写绑定，staging 复制

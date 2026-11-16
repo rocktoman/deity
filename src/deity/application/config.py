@@ -130,6 +130,9 @@ class MultiAgentConfig:
     max_children: int = 4
     max_concurrency: int = 2
     max_result_chars: int = 4000
+    # ADR-021 B6：可写委派总开关（默认关）与回收 patch 字符上限。
+    writable: bool = False
+    max_patch_chars: int = 32000
 
 
 @dataclass(frozen=True)
@@ -481,6 +484,9 @@ def load_config(path: Path) -> Config:
             or multi_agent_config.max_children > 32
             or multi_agent_config.max_concurrency > multi_agent_config.max_children
             or multi_agent_config.max_result_chars > 16000
+            or type(multi_agent_config.writable) is not bool
+            or type(multi_agent_config.max_patch_chars) is not int
+            or not 1000 <= multi_agent_config.max_patch_chars <= 200000
         ):
             raise ValueError
         if set(tui) - {"enabled", "max_events_buffer"}:
