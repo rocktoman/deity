@@ -1,4 +1,4 @@
-"""诊断专用 conftest v3（仅 diag 分支）：失败用例以转义后的 ::error 注解输出。"""
+"""诊断专用 conftest v4（仅 diag 分支）：失败用例以转义后的 ::error 注解输出。"""
 
 _failures: list[str] = []
 
@@ -24,6 +24,7 @@ def pytest_sessionfinish(session: object, exitstatus: int) -> None:
     reporter = manager.get_plugin("terminalreporter") if manager else None
     if reporter is None:
         return
+    reporter.write_line("")
     for line in _failures[:40]:
         reporter.write_line(f"::error title=DIAGFAIL::{_escape(line)}")
     reporter.write_line(f"::error title=DIAGSUMMARY::failures={len(_failures)}")
