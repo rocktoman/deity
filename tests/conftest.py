@@ -1,6 +1,10 @@
-"""诊断专用 conftest（仅 diag 分支）：把失败用例以 ::error 注解输出。"""
+"""诊断专用 conftest v3（仅 diag 分支）：失败用例以转义后的 ::error 注解输出。"""
 
 _failures: list[str] = []
+
+
+def _escape(text: str) -> str:
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
 def pytest_runtest_logreport(report: object) -> None:
@@ -9,8 +13,9 @@ def pytest_runtest_logreport(report: object) -> None:
         "setup",
         "teardown",
     }:
-        text = str(getattr(report, "longrepr", ""))[-400:].replace("\n", " | ")
-        _failures.append(f"{getattr(report, 'nodeid', '?')} :: {text}")
+        nodeid = str(getattr(report, "nodeid", "?"))
+        text = str(getattr(report, "longrepr", "")).replace("\n", " | ")[-250:]
+        _failures.append(f"{nodeid} :: {text}")
 
 
 def pytest_sessionfinish(session: object, exitstatus: int) -> None:
@@ -20,5 +25,5 @@ def pytest_sessionfinish(session: object, exitstatus: int) -> None:
     if reporter is None:
         return
     for line in _failures[:40]:
-        reporter.write_line(f"::error title=DIAGFAIL::{line}")
+        reporter.write_line(f"::error title=DIAGFAIL::{_escape(line)}")
     reporter.write_line(f"::error title=DIAGSUMMARY::failures={len(_failures)}")
