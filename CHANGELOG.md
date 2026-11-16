@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### 修复
+
+- 子进程最小环境补齐平台必需变量（Windows 的 SYSTEMROOT/WINDIR/
+  TEMP 等、POSIX 的 HOME/TMPDIR）：此前 Windows 上任何联网 shell
+  命令都会因 Winsock WinError 10106 失败，F2 的 dev server 端到端
+  用例在 macOS/Windows CI 上即因此失败（macOS 侧另叠加慢 runner
+  时序因素，该用例已改为轮询等待式断言并在会话早死时带出输出）。
+
 ### 新增
 
 - F2（融合计划 V1.2 下半，ADR-019）：持久 shell 会话——shell 工具

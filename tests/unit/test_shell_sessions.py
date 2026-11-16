@@ -1,6 +1,7 @@
 """ADR-019 B1：持久 shell 会话——增量输出、stdin、跨调用存活与回收。"""
 
 import asyncio
+import os
 import socket
 import sys
 import time
@@ -228,6 +229,40 @@ async def test_idle_reap_on_next_start(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_subprocess_env_keeps_platform_essentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归（F2 CI macOS/Windows 失败根因）：最小环境必须保留平台必需变量。
+
+    Windows 缺 SYSTEMROOT 时 Winsock 报 WinError 10106、联网子进程全灭；
+    同时秘密类变量不得透传。一并覆盖一次性命令与持久会话两条路径。
+    """
+    essential = "SYSTEMROOT" if os.name == "nt" else "HOME"
+    if essential not in os.environ:
+        pytest.skip(f"{essential} not set in this environment")
+    monkeypatch.setenv("DEITY_TEST_SECRET", "must-not-leak")
+    probe = (
+        "import os\n"
+        f"print('essential', {essential!r} in os.environ)\n"
+        "print('secret', 'DEITY_TEST_SECRET' in os.environ)\n"
+    )
+    dispatcher = _dispatcher()
+    one_shot = await _shell(dispatcher, tmp_path, "e1", argv=[sys.executable, "-c", probe])
+    assert "essential True" in one_shot.output
+    assert "secret False" in one_shot.output
+    started = await _shell(
+        dispatcher,
+        tmp_path,
+        "e2",
+        argv=[sys.executable, "-c", probe],
+        session="envprobe",
+        yield_ms=3000,
+    )
+    assert "essential True" in started.output
+    assert "secret False" in started.output
+
+
+@pytest.mark.asyncio
 async def test_dev_server_end_to_end(tmp_path: Path) -> None:
     """验收：会话里跑 dev server，另一个一次性命令能读到它服务的内容。"""
     (tmp_path / "hello.txt").write_text("hello from session server", encoding="utf-8")
@@ -248,19 +283,28 @@ async def test_dev_server_end_to_end(tmp_path: Path) -> None:
         "import urllib.request\n"
         f"print(urllib.request.urlopen('http://127.0.0.1:{port}/hello.txt', timeout=5).read().decode())\n"
     )
+    # 轮询等待式断言：慢 runner 上解释器启动 + bind 可能数秒，20 秒内
+    # 持续重试真实 HTTP 取数；会话若已退出则立即失败并带出其输出。
     body = ""
-    deadline = time.monotonic() + 5
+    last_output = ""
+    deadline = time.monotonic() + 20
+    attempt = 0
     while time.monotonic() < deadline:
+        attempt += 1
         result = await _shell(
             dispatcher,
             tmp_path,
-            f"f{int(time.monotonic() * 10)}",
+            f"f{attempt}",
             argv=[sys.executable, "-c", fetch],
         )
+        last_output = result.output
         if result.status == "ok":
             body = result.output
             break
+        poll = await _shell(dispatcher, tmp_path, f"p{attempt}", session="web")
+        if "exited" in poll.output or "no session" in poll.output:
+            raise AssertionError(f"dev server session died early: {poll.output}")
         await asyncio.sleep(0.3)
-    assert "hello from session server" in body
+    assert "hello from session server" in body, f"fetch never succeeded: {last_output}"
     closed = await _shell(dispatcher, tmp_path, "c9", session="web", close=True)
     assert "closed" in closed.output

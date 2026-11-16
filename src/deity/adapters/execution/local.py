@@ -31,11 +31,27 @@ def _terminate_process_group(process: asyncio.subprocess.Process, *, force: bool
         pass
 
 
+#: 子进程最小环境必须保留的平台必需变量。Windows 缺 SYSTEMROOT 时 Winsock
+#: 无法加载服务提供者（WinError 10106），任何联网子进程都会在 socket()
+#: 处失败（F2 CI 在 macOS/Windows 上的 dev server 用例即因此失败）；
+#: POSIX 工具链普遍依赖 HOME/TMPDIR。秘密类变量仍一律不透传。
+_ESSENTIAL_ENV_KEYS: tuple[str, ...] = (
+    ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC", "PATHEXT")
+    if os.name == "nt"
+    else ("PATH", "LANG", "LC_ALL", "HOME", "TMPDIR")
+)
+
+
+def minimal_subprocess_env() -> dict[str, str]:
+    """父环境的子集：仅平台必需变量，不含任何凭据。"""
+    return {key: os.environ[key] for key in _ESSENTIAL_ENV_KEYS if key in os.environ}
+
+
 async def run_local_process(
     argv: tuple[str, ...], workspace: Path, timeout: float, output_cap: int
 ) -> tuple[str, int, bool]:
     """Execute argv with a minimal environment and bounded output and lifetime."""
-    env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ}
+    env = minimal_subprocess_env()
     process = await asyncio.create_subprocess_exec(
         *argv,
         cwd=workspace,
