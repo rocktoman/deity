@@ -35,21 +35,25 @@ class SandboxService:
     async def run(self, request: ExecutionRequest) -> tuple[ExecutionResult, ArtifactManifest]:
         capabilities = await self.backend.capabilities()
         if (
-            request.spec.backend not in {BackendKind.DOCKER, BackendKind.FAKE}
+            request.spec.backend not in {BackendKind.DOCKER, BackendKind.FAKE, BackendKind.BWRAP}
             or request.spec.backend != capabilities.kind
             or not capabilities.available
         ):
             raise SandboxUnavailable("sandbox unavailable")
-        if not all(
-            (
-                capabilities.process_isolation,
-                capabilities.read_only_rootfs,
-                capabilities.network_none,
+        # ADR-020：bwrap 不声称 CPU/内存/PID 配额，只要求隔离三项；
+        # Docker/Fake 维持原全量能力要求。
+        required: tuple[bool, ...] = (
+            capabilities.process_isolation,
+            capabilities.read_only_rootfs,
+            capabilities.network_none,
+        )
+        if request.spec.backend != BackendKind.BWRAP:
+            required += (
                 capabilities.cpu_limit,
                 capabilities.memory_limit,
                 capabilities.pids_limit,
             )
-        ):
+        if not all(required):
             raise SandboxUnavailable("sandbox capability missing")
         if not await self.backend.preflight(request):
             raise SandboxUnavailable("sandbox preflight failed")

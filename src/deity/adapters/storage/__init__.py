@@ -47,6 +47,7 @@ from deity.core.state import transition
 from .schema_v4 import backup_v3, migrate_v4
 from .schema_v5 import backup_v4, migrate_v5
 from .schema_v6 import backup_v5, migrate_v6
+from .schema_v7 import backup_v6, migrate_v7
 
 SCHEMA = """
 PRAGMA foreign_keys=ON;
@@ -211,6 +212,9 @@ class SQLiteSessionRepository:
         if existing:
             backup_v5(path)
         await migrate_v6(db)
+        if existing:
+            backup_v6(path)
+        await migrate_v7(db)
         async with repo._lock:
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -426,7 +430,7 @@ class SQLiteSessionRepository:
                 if parent is None or parent["status"] != RunStatus.INTERRUPTED.value:
                     raise ValueError("parent run is not interrupted")
                 async with self.db.execute(
-                    "SELECT 1 FROM run_lineage WHERE parent_run_id=? LIMIT 1",
+                    "SELECT 1 FROM run_lineage WHERE parent_run_id=? AND decision='resume' LIMIT 1",
                     (parent_run_id,),
                 ) as cursor:
                     if await cursor.fetchone() is not None:
@@ -1526,7 +1530,8 @@ class SQLiteSessionRepository:
             await self.db.execute("BEGIN IMMEDIATE")
             try:
                 await self.db.execute(
-                    "INSERT OR IGNORE INTO sessions VALUES (?, ?, datetime('now'), datetime('now'), NULL)",
+                    "INSERT OR IGNORE INTO sessions(id, workspace_root, created_at, updated_at, title) "
+                    "VALUES (?, ?, datetime('now'), datetime('now'), NULL)",
                     (request.session_id, request.workspace),
                 )
                 async with self.db.execute(
@@ -1535,6 +1540,13 @@ class SQLiteSessionRepository:
                     session_row = await cursor.fetchone()
                 if session_row is None or session_row[0] != request.workspace:
                     raise ValueError("session workspace mismatch")
+                # ADR-020 A6：首个任务的首行自动成为会话标题（已脱敏存储）。
+                title = _redact(request.user_text).splitlines()[0].strip()[:80]
+                if title:
+                    await self.db.execute(
+                        "UPDATE sessions SET title=? WHERE id=? AND (title IS NULL OR title='')",
+                        (title, request.session_id),
+                    )
                 await self.db.execute(
                     "INSERT OR IGNORE INTO tasks VALUES (?, ?, ?, datetime('now'))",
                     (request.task_id, request.session_id, _redact(request.user_text)),
@@ -2595,13 +2607,106 @@ class SQLiteSessionRepository:
         await self._publish(run_id, "VerificationRecorded")
         return evidence_id
 
-    async def sessions(self) -> list[dict[str, str]]:
-        """List known sessions newest first."""
-        async with self.db.execute(
-            "SELECT id, workspace_root FROM sessions ORDER BY created_at DESC"
-        ) as cursor:
+    async def sessions(self, *, include_archived: bool = False) -> list[dict[str, str]]:
+        """List known sessions newest first（ADR-020 A6：含标题，默认不含已归档）。"""
+        query = "SELECT id, workspace_root, title, archived FROM sessions"
+        if not include_archived:
+            query += " WHERE archived=0"
+        query += " ORDER BY created_at DESC"
+        async with self.db.execute(query) as cursor:
             rows = await cursor.fetchall()
-        return [{"id": row[0], "workspace": row[1]} for row in rows]
+        return [
+            {
+                "id": row[0],
+                "workspace": row[1],
+                "title": row[2] or "",
+                "archived": "1" if row[3] else "0",
+            }
+            for row in rows
+        ]
+
+    async def archive_session(self, session_id: str, *, archived: bool = True) -> None:
+        """切换会话归档标记（ADR-020 A6）：只改元数据，绝不删除历史。"""
+        async with self._lock:
+            cursor = await self.db.execute(
+                "UPDATE sessions SET archived=?, updated_at=datetime('now') WHERE id=?",
+                (1 if archived else 0, session_id),
+            )
+            if cursor.rowcount != 1:
+                await self.db.rollback()
+                raise KeyError(session_id)
+            await self.db.commit()
+
+    async def create_forked_run(self, parent_run_id: str) -> str:
+        """从父 run 的最新前沿分叉一个新 run（ADR-020 A6）。
+
+        分叉产物状态为 interrupted、lineage kind='fork'，持有独立复制的
+        context messages 与 checkpoint，可经 RunService.resume() 继续；
+        同一父 run 可多次分叉，各分叉互不影响。父 run 无消息时拒绝。
+        """
+        await self.run_info(parent_run_id)  # 未知 run 先抛 KeyError
+        checkpoint = await self.latest_checkpoint(parent_run_id)
+        if checkpoint is not None:
+            messages = list(checkpoint["messages"])
+        else:
+            messages = await self.context_messages(parent_run_id)
+        if not messages:
+            raise ValueError("parent run has no messages to fork")
+        budget: dict[str, Any] = dict(checkpoint["budget"]) if checkpoint else {}
+        new_run_id = str(uuid4())
+        checkpoint_id = str(uuid4())
+        async with self._lock:
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                async with self.db.execute(
+                    "SELECT task_id, model_provider, model_name, max_turns, max_tool_calls "
+                    "FROM runs WHERE id=?",
+                    (parent_run_id,),
+                ) as cursor:
+                    parent = await cursor.fetchone()
+                if parent is None:
+                    raise KeyError(parent_run_id)
+                await self.db.execute(
+                    "INSERT INTO runs VALUES (?, ?, 'interrupted', ?, ?, NULL, NULL, NULL, ?, ?)",
+                    (
+                        new_run_id,
+                        parent["task_id"],
+                        parent["model_provider"],
+                        parent["model_name"],
+                        parent["max_turns"],
+                        parent["max_tool_calls"],
+                    ),
+                )
+                payload = canonical_json(
+                    {"schema_version": 1, "messages": messages, "budget": budget}
+                )
+                await self.db.execute(
+                    "INSERT INTO checkpoints VALUES (?, ?, 1, 1, ?, ?, ?, datetime('now'))",
+                    (
+                        checkpoint_id,
+                        new_run_id,
+                        len(messages),
+                        payload,
+                        hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+                    ),
+                )
+                source_checkpoint = checkpoint["id"] if checkpoint else checkpoint_id
+                await self.db.execute(
+                    "INSERT INTO run_lineage VALUES (?, ?, ?, 'fork', datetime('now'))",
+                    (new_run_id, parent_run_id, source_checkpoint),
+                )
+                for index, message in enumerate(messages, 1):
+                    await self.db.execute(
+                        "INSERT INTO context_messages VALUES (?, ?, ?, 1)",
+                        (new_run_id, index, json.dumps(message, ensure_ascii=False)),
+                    )
+                await self._event(new_run_id, "RunForkedFrom", {"parent_run_id": parent_run_id})
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        await self._publish(new_run_id, "RunForkedFrom")
+        return new_run_id
 
     async def recent_runs(self, session_id: str, *, limit: int = 5) -> list[dict[str, str]]:
         """List recent runs of one session newest first (id, status, started_at).

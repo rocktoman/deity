@@ -15,6 +15,20 @@
 
 ### 新增
 
+- F3（融合计划，ADR-020）：Linux bwrap 沙箱档——`[sandbox]
+  backend = "bwrap"` 时 shell 经 bubblewrap 命名空间隔离执行
+  （只读根、禁网、工作区按 `policy` 只读/可写绑定，staging 复制
+  + 宿主侧哈希回收）；bwrap 不提供 CPU/内存/PID 配额，能力报告
+  如实标注；无 bwrap/非 Linux 时明确不可用，绝不回退宿主。
+- F3（ADR-020）：会话 UX——会话自动标题（首个任务首行）、归档
+  标记（`deity archive-session`，只改元数据）、从 run 最新前沿
+  分叉（`deity runs fork` / 聊天 `/fork`，可多次分叉独立演进，
+  经 resume 继续）；SQLite schema 升至 v7（迁移前备份 .v6.bak）。
+- F3（ADR-020）：`deity export <run-id>` 把 run 导出为 JSONL
+  （session_meta 首行 + 逐条事件 + summary），SQLite 仍是主存储。
+- F3（ADR-020）：项目约束层 `.deity/requirements.toml`——权限、
+  沙箱、上限与委派开关只能收紧不能放宽，对所有配置层（含命令行）
+  生效，`deity config show` 标注约束来源。
 - F2（融合计划 V1.2 下半，ADR-019）：持久 shell 会话——shell 工具
   新增 `session`/`stdin`/`close`/`yield_ms` 参数，可在一次运行内
   跨轮保活进程（dev server、watch、REPL），按游标增量取输出；

@@ -66,7 +66,8 @@ class VerificationConfig:
 class SandboxConfig:
     version: int = 1
     enabled: bool = False
-    backend: Literal["local", "docker"] = "local"
+    backend: Literal["local", "docker", "bwrap"] = "local"
+    policy: Literal["read-only", "workspace-write"] = "workspace-write"
     required: bool = False
     image: str = ""
     workspace_mode: Literal["copy"] = "copy"
@@ -391,14 +392,15 @@ def load_config(path: Path) -> Config:
             or sandbox_config.version != 1
             or type(sandbox_config.enabled) is not bool
             or type(sandbox_config.required) is not bool
-            or sandbox_config.backend not in {"local", "docker"}
+            or sandbox_config.backend not in {"local", "docker", "bwrap"}
+            or sandbox_config.policy not in {"read-only", "workspace-write"}
             or sandbox_config.workspace_mode != "copy"
             or type(sandbox_config.read_only_rootfs) is not bool
             or not sandbox_config.read_only_rootfs
             or type(sandbox_config.non_root) is not bool
             or not sandbox_config.non_root
             or sandbox_config.artifact_policy not in {"discard", "review"}
-            or (sandbox_config.required and sandbox_config.backend != "docker")
+            or (sandbox_config.required and sandbox_config.backend not in {"docker", "bwrap"})
             or (
                 sandbox_config.enabled
                 and sandbox_config.backend == "docker"
@@ -789,6 +791,13 @@ class ConfigResolver:
                     raise ValueError("配置无效：请检查 TOML 字段和权限设置")
             config = replace(config, **{section: replace(current, **values)})
             sources[section] = "cli"
+        # ADR-020 B5：项目约束层最后应用，只能收紧（含对命令行层）。
+        from deity.application.requirements import apply_requirements, load_requirements
+
+        requirements = load_requirements(project_path.parent / "requirements.toml")
+        if requirements is not None:
+            config = apply_requirements(config, requirements)
+            sources["requirements"] = "project"
         _validate_tui_doctor(config)
         _validate_chat(config)
         return config, sources

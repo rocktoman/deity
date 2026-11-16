@@ -282,18 +282,72 @@ def run(
 @app.command()
 def sessions(
     db: Annotated[Path | None, typer.Option("--db", help="SQLite 路径")] = None,
+    all_sessions: Annotated[bool, typer.Option("--all", help="包含已归档会话")] = False,
 ) -> None:
-    """List stored local sessions."""
+    """List stored local sessions（ADR-020 A6：带自动标题，默认不含已归档）。"""
 
     async def list_sessions() -> list[dict[str, str]]:
         repo = await SQLiteSessionRepository.open(db or Path.home() / ".local/share/deity/deity.db")
         try:
-            return await repo.sessions()
+            return await repo.sessions(include_archived=all_sessions)
         finally:
             await repo.close()
 
     for item in asyncio.run(list_sessions()):
-        typer.echo(f"{item['id']}  {item['workspace']}")
+        marker = " [已归档]" if item["archived"] == "1" else ""
+        title = f"  {item['title']}" if item["title"] else ""
+        typer.echo(f"{item['id']}  {item['workspace']}{title}{marker}")
+
+
+@app.command("archive-session")
+def archive_session(
+    session_id: str,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite 路径")] = None,
+    unarchive: Annotated[bool, typer.Option("--unarchive", help="取消归档")] = False,
+) -> None:
+    """归档/取消归档一个会话（ADR-020 A6：只改元数据，不删历史）。"""
+
+    async def apply() -> None:
+        repo = await SQLiteSessionRepository.open(db or Path.home() / ".local/share/deity/deity.db")
+        try:
+            await repo.archive_session(session_id, archived=not unarchive)
+        finally:
+            await repo.close()
+
+    try:
+        asyncio.run(apply())
+    except KeyError:
+        console.print(f"未知会话：{session_id}", style="red")
+        raise typer.Exit(code=2) from None
+    typer.echo(f"{'已取消归档' if unarchive else '已归档'}：{session_id}")
+
+
+@app.command()
+def export(
+    run_id: str,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite 路径")] = None,
+    out: Annotated[Path | None, typer.Option("--out", help="输出文件（默认 stdout）")] = None,
+) -> None:
+    """把一个 run 导出为 JSONL（ADR-020 A7：session_meta + 逐条事件 + summary）。"""
+    from deity.application.run_export import export_run_jsonl
+
+    async def produce() -> str:
+        repo = await SQLiteSessionRepository.open(db or Path.home() / ".local/share/deity/deity.db")
+        try:
+            return await export_run_jsonl(repo, run_id)
+        finally:
+            await repo.close()
+
+    try:
+        text = asyncio.run(produce())
+    except (KeyError, ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+    if out is not None:
+        out.write_text(text, encoding="utf-8")
+        typer.echo(f"已导出 {run_id} 到 {out}")
+    else:
+        typer.echo(text, nl=False)
 
 
 @runs_app.command("inspect")
@@ -319,6 +373,32 @@ def inspect_run(
     except (ValueError, OSError, KeyError) as exc:
         console.print(str(exc), style="red")
         raise typer.Exit(code=2) from None
+
+
+@runs_app.command("fork")
+def fork_run(
+    run_id: str,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """从一个 run 的最新前沿分叉新 run（ADR-020 A6），打印新 run id。
+
+    分叉产物处于 interrupted 状态，用 `deity resume <新id>` 继续执行；
+    同一父 run 可多次分叉，各分叉独立演进。
+    """
+
+    async def apply() -> str:
+        repo = await SQLiteSessionRepository.open(db or Path.home() / ".local/share/deity/deity.db")
+        try:
+            return await repo.create_forked_run(run_id)
+        finally:
+            await repo.close()
+
+    try:
+        new_id = asyncio.run(apply())
+    except (KeyError, ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+    typer.echo(new_id)
 
 
 @runs_app.command("tree")
