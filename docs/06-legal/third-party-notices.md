@@ -39,5 +39,11 @@ Deity 的实现均为自研；个别模块在设计与算法层面参照了开�
 - 本仓库对应实现：`src/deity/application/run_export.py`
   （ADR-020 A7；字段为 Deity 自有定义，SQLite 仍是主存储，
   JSONL 只作导出格式）。
+- 信任分级（F4 / ADR-021 B3）：Codex 的审批策略按风险分层、
+  高风险动作不自动放行的思路，作为 Deity 委派信任分级
+  （standard/elevated/high + 可写委派逐批审批）的模式参考；
+  分级规则与门的位置均为 Deity 独立设计与实现
+  （`src/deity/core/delegation/__init__.py`、
+  `src/deity/application/run_service.py`）。
 - 许可证全文：https://www.apache.org/licenses/LICENSE-2.0
   （Apache License, Version 2.0；Copyright OpenAI）。

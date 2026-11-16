@@ -7,6 +7,9 @@ from typing import Literal
 
 READ_ONLY_TOOLS = frozenset({"read_file", "list_files", "glob", "grep"})
 
+# ADR-021 B6：可写委派的工具上限——只在暂存副本里写，仍禁 shell/git。
+WRITABLE_DELEGATION_TOOLS = READ_ONLY_TOOLS | frozenset({"write_file", "apply_patch"})
+
 
 @dataclass(frozen=True)
 class DelegationBudget:
@@ -42,17 +45,21 @@ class DelegationRequest:
     budget: DelegationBudget
     expected_result: str = "summary_with_evidence"
     schema_version: int = 1
+    # ADR-021 B6：默认只读；writable 子 Run 只在暂存副本里执行并回收 patch。
+    mode: Literal["read_only", "writable"] = "read_only"
 
     def __post_init__(self) -> None:
+        tool_ceiling = WRITABLE_DELEGATION_TOOLS if self.mode == "writable" else READ_ONLY_TOOLS
         if (
             self.schema_version != 1
+            or self.mode not in ("read_only", "writable")
             or not self.delegation_id.strip()
             or not self.parent_run_id.strip()
             or not self.goal.strip()
             or len(self.goal) > 8000
             or not self.allowed_tools
             or len(set(self.allowed_tools)) != len(self.allowed_tools)
-            or not set(self.allowed_tools) <= READ_ONLY_TOOLS
+            or not set(self.allowed_tools) <= tool_ceiling
             or self.expected_result != "summary_with_evidence"
         ):
             raise ValueError("invalid delegation contract")
@@ -91,6 +98,9 @@ class SubAgentResult:
     status: Literal["completed", "failed", "cancelled", "interrupted"]
     summary: str
     evidence_ids: tuple[str, ...] = ()
+    # ADR-021 B6：可写子 Run 回收的 patch（父级经自有 apply_patch 应用）。
+    patch: str | None = None
+    patch_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

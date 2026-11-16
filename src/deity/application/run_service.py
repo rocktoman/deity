@@ -6,6 +6,7 @@ import importlib
 import inspect
 import json
 import os
+import shutil
 import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
@@ -19,6 +20,7 @@ from deity.adapters.code_intelligence import LexicalCodeSearch
 from deity.adapters.execution.artifacts import ArtifactApplier
 from deity.adapters.execution.bwrap import BwrapExecutionBackend
 from deity.adapters.execution.docker import DockerExecutionBackend
+from deity.adapters.execution.workspace import WorkspaceStager, collect_manifest, file_hashes
 from deity.adapters.git import GitWorkspaceAdapter
 from deity.adapters.mcp import McpCompositeDispatcher, McpServerConfig, McpSessionManager, McpTool
 from deity.adapters.model.anthropic import AnthropicProvider
@@ -30,6 +32,7 @@ from deity.adapters.tools.delegation import DelegationDispatcher
 from deity.adapters.tools.git_guard import GitGuardedDispatcher
 from deity.adapters.tools.read_only import ReadOnlyToolDispatcher
 from deity.adapters.tools.workspace import workspace_digest
+from deity.adapters.tools.writable_child import WritableChildDispatcher
 from deity.application.approval_rules import ApprovalRules
 from deity.application.config import (
     QWEN_DEFAULT_BASE_URL,
@@ -44,6 +47,7 @@ from deity.application.config import (
     SandboxConfig,
     VerificationConfig,
 )
+from deity.application.delegation_patch import build_patch
 from deity.application.event_bus import InProcessEventBus
 from deity.application.sandbox_service import SandboxService, SandboxUnavailable
 from deity.application.tool_pipeline import ToolPipeline
@@ -81,7 +85,7 @@ from deity.core.contracts.execution import (
     SandboxPolicy,
     SandboxSpec,
 )
-from deity.core.delegation import DelegationPolicy, ResultReducer
+from deity.core.delegation import DelegationPolicy, ResultReducer, grade_delegation
 from deity.core.hooks import HookRegistry, RegisteredHook
 from deity.core.runtime import AgentLoop, BudgetExceeded, ModelFailure, PolicyVeto, ProtocolError
 
@@ -358,6 +362,34 @@ class RunService:
             multi_agent=config.multi_agent,
         )
 
+    async def _approve_writable_delegation(
+        self, contracts: tuple[DelegationRequest, ...], parent: AgentRequest
+    ) -> bool:
+        """ADR-021 B3：可写委派永不自动放行，必须经显式审批通道表态。"""
+        summary: dict[str, Any] = {
+            "tasks": [
+                {
+                    "goal": contract.goal[:200],
+                    "tools": list(contract.allowed_tools),
+                    "mode": contract.mode,
+                }
+                for contract in contracts
+            ]
+        }
+        if self.approval_port is not None:
+            request = ApprovalRequest(
+                approval_id=approval_id_for("delegate", summary),
+                run_id=parent.run_id or "",
+                call_id="",
+                tool_name="delegate",
+                args=approval_args_summary(summary),
+            )
+            decided = await self.approval_port.request_approval(request)
+            return decided.status == "approved"
+        if self.approve is not None:
+            return bool(self.approve("delegate", summary))
+        return False
+
     async def _delegate(
         self, contracts: tuple[DelegationRequest, ...], parent: AgentRequest
     ) -> str:
@@ -373,6 +405,15 @@ class RunService:
                 self.multi_agent.max_result_chars,
             )
         ).validate_batch(contracts, parent)
+        grade = grade_delegation(contracts)
+        if any(contract.mode == "writable" for contract in contracts):
+            # ADR-021 B6/B3：可写委派需总开关开启、写策略未禁用，且逐批审批。
+            if not self.multi_agent.writable:
+                raise ValueError("writable delegation is disabled")
+            if self.permission.workspace_write == "deny":
+                raise ValueError("writable delegation denied by policy")
+            if not await self._approve_writable_delegation(contracts, parent):
+                raise ValueError("writable_delegation_requires_approval")
         repo = await SQLiteSessionRepository.open(self.db_path)
         children: list[tuple[DelegationRequest, AgentRequest, str]] = []
         try:
@@ -422,16 +463,39 @@ class RunService:
                 try:
                     async with semaphore:
                         child_repo = await SQLiteSessionRepository.open(self.db_path)
+                        # ADR-021 B6：可写子 Run 在工作区暂存副本里执行。
+                        stage_root: Path | None = None
+                        stage: Path | None = None
+                        baseline: dict[str, tuple[str, int]] | None = None
+                        run_request = child
+                        child_dispatcher: ReadOnlyToolDispatcher | WritableChildDispatcher
+                        if contract.mode == "writable":
+                            stage_root = Path(tempfile.mkdtemp(prefix="deity-delegation-"))
+                            stage = stage_root / "workspace"
+                            WorkspaceStager(
+                                self.workspace,
+                                stage,
+                                excluded_paths=(
+                                    self.db_path,
+                                    self.db_path.with_name(self.db_path.name + "-wal"),
+                                    self.db_path.with_name(self.db_path.name + "-shm"),
+                                ),
+                            ).copy()
+                            baseline = file_hashes(stage)
+                            run_request = replace(child, workspace=str(stage))
+                            child_dispatcher = WritableChildDispatcher(contract.allowed_tools)
+                        else:
+                            child_dispatcher = ReadOnlyToolDispatcher(contract.allowed_tools)
                         loop = AgentLoop(
                             model,
-                            ReadOnlyToolDispatcher(contract.allowed_tools),
+                            child_dispatcher,
                             repository=child_repo,
                             context=ContextBuilder(system_instructions=HARNESS_SYSTEM_INSTRUCTIONS),
                         )
                         self._active_children[child_id] = loop
                         try:
                             result = await loop.run_created(
-                                child,
+                                run_request,
                                 child_id,
                                 ContextBuilder(
                                     system_instructions=HARNESS_SYSTEM_INSTRUCTIONS
@@ -447,12 +511,54 @@ class RunService:
                                     )
                                 ]
                             )
+                            patch_text: str | None = None
+                            patch_files: tuple[str, ...] = ()
+                            summary_suffix = ""
+                            if stage is not None and baseline is not None:
+                                manifest = collect_manifest(child_id, baseline, file_hashes(stage))
+                                harvested = build_patch(
+                                    self.workspace,
+                                    stage,
+                                    manifest.entries,
+                                    max_chars=self.multi_agent.max_patch_chars,
+                                )
+                                patch_text = harvested.patch
+                                patch_files = harvested.files
+                                if harvested.skipped:
+                                    summary_suffix = (
+                                        f" [harvest skipped: {', '.join(harvested.skipped)}]"
+                                    )
+                                if harvested.patch is not None:
+                                    patch_evidence = await child_repo.record_evidence(
+                                        child_id,
+                                        "delegation_patch",
+                                        f"patch: {', '.join(harvested.files)}",
+                                        contract.delegation_id,
+                                    )
+                                    evidence_ids = (*evidence_ids, patch_evidence)
+                                    await repo.record_event(
+                                        parent.run_id or "",
+                                        "DelegationPatchHarvested",
+                                        {
+                                            "delegation_id": contract.delegation_id,
+                                            "child_run_id": child_id,
+                                            "files": list(harvested.files),
+                                            "skipped": list(harvested.skipped),
+                                            "chars": len(harvested.patch),
+                                            "sha256": hashlib.sha256(
+                                                harvested.patch.encode()
+                                            ).hexdigest(),
+                                        },
+                                    )
                             sub_result = SubAgentResult(
                                 contract.delegation_id,
                                 child_id,
                                 "completed",
-                                (result.final_text or "")[: self.multi_agent.max_result_chars],
+                                (result.final_text or "")[: self.multi_agent.max_result_chars]
+                                + summary_suffix,
                                 evidence_ids,
+                                patch_text,
+                                patch_files,
                             )
                         except asyncio.CancelledError:
                             raise
@@ -472,6 +578,8 @@ class RunService:
                             self._active_children.pop(child_id, None)
                             await self._tool_pipeline.close_sessions(child_repo)
                             await child_repo.close()
+                            if stage_root is not None:
+                                shutil.rmtree(stage_root, ignore_errors=True)
                         await repo.finish_delegation(sub_result)
                         results[index] = sub_result
                 finally:
@@ -522,7 +630,10 @@ class RunService:
                         await repo.finish_delegation(
                             SubAgentResult(contract.delegation_id, child_id, "cancelled", "")
                         )
-            return ResultReducer.reduce(tuple(result for result in results if result is not None))
+            return ResultReducer.reduce(
+                tuple(result for result in results if result is not None),
+                trust_grade=grade,
+            )
         finally:
             await repo.close()
 
