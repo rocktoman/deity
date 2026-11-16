@@ -10,12 +10,11 @@ run 级资源：运行内跨轮存活，运行结束由持有者 close_all 回�
 """
 
 import asyncio
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from deity.adapters.execution.local import _terminate_process_group
+from deity.adapters.execution.local import _terminate_process_group, minimal_subprocess_env
 
 MAX_BUFFER_CHARS = 128_000
 DEFAULT_IDLE_TIMEOUT_SECONDS = 900.0
@@ -105,7 +104,7 @@ class ShellSessionManager:
             if existing.running:
                 raise ValueError(f"session {name} already running")
             await self.close(name)
-        env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ}
+        env = minimal_subprocess_env()
         process = await asyncio.create_subprocess_exec(
             *argv,
             cwd=cwd,
