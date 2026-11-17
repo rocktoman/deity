@@ -372,6 +372,27 @@ def test_bare_deity_tty_routes_to_interactive(
     assert calls == ["interactive"]
 
 
+def test_run_command_tty_launch_failure_falls_back_with_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TTY 下工作台启动失败（如未装 Textual）：回落行式且输出明确提示。"""
+
+    def failing_launch(*args: object, **kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(cli_main, "_launch_interactive", failing_launch)
+    monkeypatch.setattr(cli_main, "_interactive_tty", lambda: True)
+    result = CliRunner().invoke(
+        cli_app,
+        ["run", "--config", str(_empty_config(tmp_path)), "--workspace", str(tmp_path)],
+        input="",
+    )
+    # 回落行式路径（无模型配置时退出码 2），且提示里说明了回落原因与装法。
+    assert result.exit_code == 2
+    assert "已回落行式模式" in result.output
+    assert "deity[tui]" in result.output
+
+
 def test_bare_deity_non_tty_keeps_line_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
