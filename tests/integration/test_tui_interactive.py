@@ -7,12 +7,15 @@
 """
 
 import asyncio
+import json
+import subprocess
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-from deity.application.config import PermissionConfig
+from deity import __version__
+from deity.application.config import CodingConfig, PermissionConfig
 from deity.application.run_service import RunService
 from deity.core.contracts import ModelEvent
 from deity.interfaces.cli import main as cli_main
@@ -62,6 +65,7 @@ def _make_app(
     *,
     context_window_tokens: int | None = None,
     initial_task: str | None = None,
+    plan_enabled: bool = False,
 ) -> InteractiveApp:
     bridge = TuiApprovalBridge(workspace=tmp_path)
     service = RunService(
@@ -71,6 +75,9 @@ def _make_app(
         approve=make_approve(bridge.controller),
         permission=PermissionConfig(shell="ask", workspace_write="ask"),
         context_window_tokens=context_window_tokens,
+        coding=(
+            CodingConfig(plan_build_enabled=True, git_guard_enabled=True) if plan_enabled else None
+        ),
     )
     return InteractiveApp(
         service,
@@ -453,4 +460,184 @@ async def test_interactive_busy_submit_is_rejected_with_note(tmp_path: Path) -> 
         assert "当前有 Run 在运行" in _conversation_text(app)
         await pilot.press("ctrl+c")
         await _wait_until(lambda: not app._run_active)
+        await pilot.press("ctrl+q")
+
+
+# -- Claude Code 观感对齐（ADR-022 修订）：欢迎头 / 输入区 / 模式循环 / 工具行 --
+
+
+@pytest.mark.asyncio
+async def test_interactive_welcome_header_has_emblem_version_model_workspace(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#welcome-header")
+        emblem = str(app.query_one("#welcome-emblem").render())
+        emblem_lines = [line for line in emblem.splitlines() if line.strip()]
+        # 徽记只断言存在性与规模（神之眼字符画不写死整幅）。
+        assert len(emblem_lines) >= 4
+        assert "◉" in emblem
+        text = _conversation_text(app)
+        assert f"Deity v{__version__}" in text
+        assert "模型：fake" in text
+        assert str(tmp_path) in text
+        # 与原一行欢迎消息合并，不重复两份欢迎。
+        assert text.count("欢迎来到 Deity") == 1
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_status_bar_sits_below_input(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        ordered_ids = [w.id for w in app.screen.walk_children(with_self=False) if w.id]
+        assert ordered_ids.index("status-bar") > ordered_ids.index("input")
+        bar = _status_bar(app)
+        assert "普通模式 (shift+tab 切换)" in bar
+        assert "fake" in bar
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_shift_tab_cycles_modes(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]), plan_enabled=True)
+    bridge = app._bridge
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "普通模式 (shift+tab 切换)" in _status_bar(app)
+        # 普通 → 计划（与 /plan 同一启用检查与状态转移）。
+        await pilot.press("shift+tab")
+        await _wait_until(lambda: app.state.plan_mode)
+        await pilot.pause()
+        assert "计划模式 (shift+tab 切换)" in _status_bar(app)
+        # 计划 → 自动接受：仍走审批桥显式确认，确认前模式不变。
+        await pilot.press("shift+tab")
+        await _wait_until(lambda: bridge.pending is not None)
+        await pilot.pause()
+        pending = bridge.pending
+        assert pending is not None and pending.kind == "confirm"
+        assert app.state.plan_mode  # 确认通过前仍留在计划模式
+        await pilot.click("#btn-confirm")
+        await _wait_until(lambda: bridge.controller.mode == "auto")
+        await pilot.pause()
+        assert not app.state.plan_mode  # 确认通过后才离开计划模式
+        assert "自动接受模式 (shift+tab 切换)" in _status_bar(app)
+        # 自动接受 → 普通：一轮循环回到起点。
+        await pilot.press("shift+tab")
+        await _wait_until(lambda: bridge.controller.mode != "auto")
+        await pilot.pause()
+        assert not app.state.plan_mode
+        assert "普通模式 (shift+tab 切换)" in _status_bar(app)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_shift_tab_auto_cancel_stays_in_plan(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]), plan_enabled=True)
+    bridge = app._bridge
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("shift+tab")
+        await _wait_until(lambda: app.state.plan_mode)
+        await pilot.press("shift+tab")
+        await _wait_until(lambda: bridge.pending is not None)
+        await pilot.pause()
+        # 取消自动接受确认：不进自动接受，仍留在计划模式（不静默绕过确认）。
+        await pilot.click("#btn-cancel")
+        await _wait_until(lambda: bridge.pending is None)
+        await pilot.pause()
+        assert bridge.controller.mode != "auto"
+        assert app.state.plan_mode
+        assert "计划模式 (shift+tab 切换)" in _status_bar(app)
+        await pilot.press("ctrl+q")
+
+
+def _plan_turns() -> list[list[ModelEvent]]:
+    payload = {
+        "schema_version": 1,
+        "goal": "实现功能",
+        "assumptions": [],
+        "steps": [
+            {
+                "ordinal": 1,
+                "title": "实现",
+                "description": "最小实现",
+                "files": ["feature.py"],
+                "verification": ["pytest"],
+            }
+        ],
+        "risks": [],
+        "verification": ["pytest -q"],
+    }
+    return [
+        [
+            ModelEvent("tool_call_started", call_id="p1", name="submit_plan"),
+            ModelEvent(
+                "tool_call_arguments_delta",
+                call_id="p1",
+                text=json.dumps(payload, ensure_ascii=False),
+            ),
+            ModelEvent("message_completed"),
+        ],
+        [ModelEvent("text_delta", text="计划已提交"), ModelEvent("message_completed")],
+    ]
+
+
+def _git_init_repo(root: Path) -> None:
+    """同步 git 助手：给计划模式用例准备一个带基线提交的工作区。"""
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=root, check=True)
+    (root / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "基线"], cwd=root, check=True)
+
+
+@pytest.mark.asyncio
+async def test_interactive_plan_mode_submit_uses_plan_flow(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    _git_init_repo(tmp_path)
+    app = _make_app(tmp_path, FakeModel(_plan_turns()), plan_enabled=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("shift+tab")
+        await _wait_until(lambda: app.state.plan_mode)
+        await _submit(app, pilot, "实现 feature")
+        # 计划路径：先展示计划并询问是否构建，而不是直接执行任务。
+        await _wait_until(lambda: "计划 ID：" in _conversation_text(app))
+        await _wait_until(lambda: app.query_one("#prompt-panel").has_class("show"))
+        await pilot.click("#btn-cancel")  # 保留草案，不构建
+        await _wait_until(lambda: not app._run_active)
+        await pilot.pause()
+        text = _conversation_text(app)
+        assert "已保留计划" in text
+        assert app.state.plan_mode
+        assert not (tmp_path / "feature.py").exists()
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_tool_lines_are_compact(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel(_write_turns("b.txt", "hello")))
+    bridge = app._bridge
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "写 b.txt")
+        await _wait_until(lambda: bridge.pending is not None)
+        await pilot.pause()
+        await pilot.click("#btn-allow-once")
+        await _wait_until(lambda: not app._run_active)
+        await pilot.pause()
+        text = _conversation_text(app)
+        # 一行式条目 + 缩进结果行；不再是旧的 ▸/▾ 面板式呈现。
+        assert "⏺ write_file(" in text
+        assert "⎿" in text
+        assert "▸ write_file" not in text
         await pilot.press("ctrl+q")
