@@ -1,7 +1,9 @@
-"""Textual TUI：视图状态独立于 Run 状态，经 ClientEvent 折叠渲染。
+"""Textual TUI 监视台：视图状态独立于 Run 状态，经 ClientEvent 折叠渲染。
 
-冻结（V1.1-M4）：本 TUI 只保留监视用途（看状态、批/拒、取消、恢复），
-不再新增功能；产品交互以 CLI 为准。解冻需新 ADR。
+定位（ADR-022）：本应用保留为「接入已有 Run 的监视台」（看状态、
+批/拒、取消、恢复），由 `deity tui --run-id` 进入；产品交互界面是
+interactive.py 的全屏交互工作台（原 V1.1-M4 冻结决策已被 ADR-022
+取代，本应用行为不变）。
 
 本模块需要 `tui` extra（Textual）；未安装时由 CLI 给出安装提示。
 

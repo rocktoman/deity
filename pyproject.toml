@@ -57,5 +57,9 @@ ignore_missing_imports = true
 # extras 缺失时，上述两个消费模块里由 Any 基类/装饰器派生的错误同样忽略；
 # extras 已安装（本地开发）时这些错误码本就不会触发，strict 其余检查不变。
 [[tool.mypy.overrides]]
-module = ["deity.interfaces.cli.chat_input", "deity.interfaces.tui.app"]
+module = [
+    "deity.interfaces.cli.chat_input",
+    "deity.interfaces.tui.app",
+    "deity.interfaces.tui.interactive",
+]
 disable_error_code = ["untyped-decorator", "misc"]

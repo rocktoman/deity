@@ -234,6 +234,16 @@ def run(
         settings = _resolve_config(config, workdir)
         db_path = db or Path.home() / ".local/share/deity/deity.db"
 
+        # ADR-022：无任务 + TTY + 工作台启用时进全屏交互工作台；
+        # Textual 未安装回落行式会话，非 TTY/管道保持行式（行为不变）。
+        if (
+            task is None
+            and settings.tui.enabled
+            and _interactive_tty()
+            and _launch_interactive(settings, workdir, db_path, config, session)
+        ):
+            return
+
         rules = ApprovalRules.load()
         approval = ApprovalController(workspace=workdir, console=console, rules=rules)
         service = RunService.from_config(
@@ -490,6 +500,51 @@ def delegation_tree(
         raise typer.Exit(code=2) from None
 
 
+def _interactive_tty() -> bool:
+    """当前标准输入/输出是否都是终端（工作台路由判定，独立成函数便于测试）。"""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _launch_interactive(
+    settings: Config,
+    workdir: Path,
+    db_path: Path,
+    config_path: Path | None,
+    session_id: str | None,
+    initial_task: str | None = None,
+) -> bool:
+    """启动全屏交互工作台（ADR-022）；Textual 未安装返回 False 由调用方回落。
+
+    服务装配与行式会话一致（同一 ApprovalRules、同一 from_config），
+    只是审批控制器换成接工作台面板的 TuiApprovalBridge 内的控制器。
+    """
+    try:
+        from deity.interfaces.tui.approval_bridge import TuiApprovalBridge
+        from deity.interfaces.tui.interactive import run_interactive
+    except ImportError:
+        return False
+    rules = ApprovalRules.load()
+    bridge = TuiApprovalBridge(workspace=workdir, rules=rules)
+    service = RunService.from_config(
+        settings,
+        db_path=db_path,
+        workspace=workdir,
+        approve=make_approve(bridge.controller),
+        rules=rules,
+    )
+    model_name = settings.model.name  # type: ignore[union-attr]
+    run_interactive(
+        service,
+        bridge=bridge,
+        model_name=model_name,
+        workspace=workdir,
+        session_id=session_id,
+        config_path=config_path,
+        initial_task=initial_task,
+    )
+    return True
+
+
 def _resolve_config(config: Path | None, workspace: Path) -> Config:
     """按 CLI > project > user > default 解析配置。"""
     settings, _sources = ConfigResolver.resolve(
@@ -619,13 +674,16 @@ def tui(
     task: Annotated[str | None, typer.Option("--task", help="启动新 Run 的任务")] = None,
     run_id: Annotated[str | None, typer.Option("--run-id", help="接入已有 Run")] = None,
 ) -> None:
-    """启动 Textual TUI（已冻结：仅监视用途，不再新增功能，见 V1.1-M4）。
+    """启动全屏交互工作台（ADR-022）；--run-id 时进入监视台接入已有 Run。
 
-    未安装 Textual 时提示安装方式并退出码 2。经 ClientService 订阅事件
-    喂给 TuiApp：a/d 批准/拒绝首个待决审批，c 取消当前 Run，r 恢复
-    当前/指定 Run。日常交互请用 CLI。
+    未安装 Textual 时提示安装方式并退出码 2。工作台：底部输入框提交
+    任务、流式对话、界面内审批、状态栏（与无子命令的 deity 同一界面）。
+    监视台（--run-id）：经 ClientService 订阅既有 Run，a/d 批准/拒绝
+    首个待决审批，c 取消，r 恢复。
     """
     try:
+        import textual  # noqa: F401 - 仅做存在性检查，缺失时走安装提示
+
         from deity.application.client_service import ClientService
         from deity.interfaces.tui.app import run_tui
     except ImportError:
@@ -639,18 +697,24 @@ def tui(
         settings = _resolve_config(config, workdir)
         if not settings.tui.enabled:
             console.print(
-                "TUI 未启用：请在配置中设置 [tui] enabled = true，或用纯 CLI 运行。",
+                "TUI 未启用：配置中 [tui] enabled = false；删除该设置或改回 true 后重试。",
                 style="red",
             )
             raise typer.Exit(code=2) from None
-        model_name = settings.model.name if settings.model is not None else "fake"
-        service = RunService.from_config(
-            settings,
-            db_path=Path.home() / ".local/share/deity/deity.db",
-            workspace=workdir,
-        )
-        client = ClientService(service)
-        run_tui(client_service=client, run_id=run_id, task=task, model_name=model_name)
+        db_path = Path.home() / ".local/share/deity/deity.db"
+        if run_id is not None:
+            model_name = settings.model.name if settings.model is not None else "fake"
+            service = RunService.from_config(settings, db_path=db_path, workspace=workdir)
+            client = ClientService(service)
+            run_tui(client_service=client, run_id=run_id, task=None, model_name=model_name)
+            return
+        if not _launch_interactive(settings, workdir, db_path, config, None, initial_task=task):
+            # 上面的 import 已确认 Textual 存在，这里只为类型收窄兜底。
+            console.print(
+                'TUI 需要安装 Textual：uv sync --extra tui 或 pip install "deity[tui]"',
+                style="red",
+            )
+            raise typer.Exit(code=2) from None
     except (ValueError, OSError) as exc:
         console.print(str(exc), style="red")
         raise typer.Exit(code=2) from None

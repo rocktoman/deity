@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 交互工作台（ADR-022，解冻并取代 V1.1-M4 的 TUI 冻结决策）：
+  全屏 Textual 界面成为 TTY 下的默认交互入口——无子命令的
+  `deity`、`deity run`（不带任务）与 `deity tui` 进入同一工作台：
+  底部输入框（Enter 提交、Ctrl+J 换行、输入历史）、流式对话区
+  （Markdown 文本块 + 可展开的工具节点）、界面内审批面板（经审批
+  桥复用既有 ApprovalController：允许一次/本次会话允许/shell
+  命令模式允许/永久允许存规则/拒绝，语义与 CLI 卡片一致）、
+  状态栏（模型、工作区、当前工具、上下文占用、Run 状态）与
+  斜杠命令子集（/status /cost /tools /clear /compact /plan
+  /build /normal /model /auto /sessions /resume /doctor）。
+  非 TTY/管道保持行式 REPL；`deity tui --run-id` 保留为接入已有
+  Run 的监视台（行为不变）。`[tui] enabled` 默认改为 true，
+  显式设 false 仍可整体关停（退出码 2 / TTY 路由回落行式）。
+
 ### 修复
 
 - 子进程最小环境补齐平台必需变量（Windows 的 SYSTEMROOT/WINDIR/

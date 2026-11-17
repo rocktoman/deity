@@ -140,16 +140,18 @@ deity sandbox run --workspace /path/to/repo --config /path/to/config.toml -- cat
 deity doctor --workspace /path/to/repo
 ```
 
-## TUI
+## TUI（全屏交互工作台）
 
-TUI 是可选功能，默认关闭；未安装 Textual 时 CLI 其余命令正常使用。
+ADR-022 起，TTY 下的默认交互界面是全屏工作台：运行 `deity`（无子命令）、`deity run`（不带任务）或 `deity tui` 直接进入——底部输入框提交任务、流式对话（Markdown + 工具节点）、界面内审批（与 CLI 卡片同一套语义：允许一次/本次会话允许/shell 命令模式允许/永久允许存规则/拒绝）、状态栏（模型、工作区、当前工具、上下文占用、Run 状态）。非 TTY/管道保持行式 REPL；未安装 Textual 时 TTY 入口回落行式，显式 `deity tui` 给出安装提示并退出码 2。配置 `[tui] enabled = false` 可整体关停工作台。
 
 ```bash
 uv sync --extra tui        # 安装 Textual（可选 extra，不进主依赖）
-deity tui                  # 启动 Textual TUI
+deity                      # 进入交互工作台
 ```
 
-键位：`q` 退出、`a` 批准首个待决审批、`d` 拒绝、`c` 取消当前 Run。TUI 与 CLI 共用同一 `ClientService` 与同一 Run 状态和证据；关闭 TUI（或配置 `[tui] enabled = false`）即回纯 CLI。详见 [V0.8 使用说明](docs/03-development/v0.8-usage.md)。
+工作台按键：`Enter` 提交、`Ctrl+J` 换行、首/末行 `↑`/`↓` 输入历史、`Ctrl+C`/`Esc` 取消当前 Run、`Ctrl+Q` 退出；斜杠命令支持 `/help /status /cost /tools /clear /compact /plan /build /normal /model /auto /sessions /resume /doctor /exit`（语义与行式一致），`/skill /mcp /fork /timeline` 请在行式 CLI 使用。
+
+监视台保留：`deity tui --run-id <id>` 经 `ClientService` 接入已有 Run（可跨进程），键位 `q` 退出、`a` 批准首个待决审批、`d` 拒绝、`c` 取消、`r` 恢复。详见 [ADR-022](docs/02-architecture/adr-022-interactive-workbench.md) 与 [V0.8 使用说明](docs/03-development/v0.8-usage.md)。
 
 进入 `deity` 的 `Deity> ` 提示符后，可输入 `/help` 查看交互命令。启用 Skills 后，`/skill` 显示当前工作区的用户与项目 Skill；用 ↑↓ 和回车选择后，**下一条任务**会提示模型加载该 Skill，实际是否加载以工具调用为准。`/skill <name>` 可直接选择。`/mcp` 先选择已配置的 server，再选择其工具；发现阶段不调用业务工具。配置中显式启用的 MCP server 会直接启动，其工具调用不再逐次审批。选中工具只会向模型附加下一条任务的使用提示，不限制运行时可用的其他已配置工具。Esc 返回，非终端输入可用编号选择。斜杠命令不会发给模型；任务运行失败后，选择也不会自动沿用。
 

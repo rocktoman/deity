@@ -93,7 +93,9 @@ class SandboxConfig:
 
 @dataclass(frozen=True)
 class TuiConfig:
-    enabled: bool = False
+    # ADR-022：全屏交互工作台是默认 TTY 界面，默认启用；显式设 false
+    # 是用户退出阀门（deity tui 退出码 2，TTY 路由回落行式 REPL）。
+    enabled: bool = True
     max_events_buffer: int = 1000
 
 
