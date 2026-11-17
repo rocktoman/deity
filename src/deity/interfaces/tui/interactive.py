@@ -8,7 +8,12 @@
 呈现与回填。监视既有 Run 是 interfaces/tui/app.py 的 TuiApp 的活。
 
 按键：Enter 提交、Ctrl+J/Shift+Enter 换行、首/末行 ↑/↓ 走输入历史、
-Ctrl+C 或 Esc 取消当前 Run、Ctrl+Q 退出。
+Shift+Tab 循环切换模式（普通 → 计划 → 自动接受）、Ctrl+C 或 Esc
+取消当前 Run、Ctrl+Q 退出。
+
+观感与交互对齐 Claude Code（ADR-022 修订，2026-11-17）：启动欢迎头
+（神之眼徽记 + 版本/模型/工作区，边框块）、带 ❯ 提示的边框输入框、
+输入框正下方的模式状态行、一行式工具条目 + 缩进结果行。
 """
 
 import asyncio
@@ -24,6 +29,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Button, Footer, Header, Markdown, Static, TextArea
 
+from deity import __version__
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.application.build_service import BuildService
 from deity.application.doctor import run_doctor
@@ -37,6 +43,9 @@ from deity.interfaces.cli.plan import build_approved, plan_lines
 from deity.interfaces.tui.approval_bridge import PendingPrompt, TuiApprovalBridge
 
 _CLI_ONLY_COMMANDS = ("/skill", "/mcp", "/fork", "/timeline")
+
+# 欢迎头徽记：神之眼（三角形 + 眼睛 + 光芒），字符绘制、对称极简。
+_WELCOME_EMBLEM = "   \\ | /\n    \\|/\n    / \\\n   / ◉ \\\n  /______\\"
 
 
 class ChatInput(TextArea):
@@ -52,6 +61,9 @@ class ChatInput(TextArea):
     class CancelRequested(Message):
         """输入框内按 Ctrl+C / Esc：请求取消当前 Run。"""
 
+    class ModeCycleRequested(Message):
+        """输入框内按 Shift+Tab：请求循环切换模式（普通/计划/自动接受）。"""
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._history: list[str] = []
@@ -59,6 +71,11 @@ class ChatInput(TextArea):
         self._draft = ""
 
     async def _on_key(self, event: Any) -> None:
+        if event.key == "shift+tab":
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.ModeCycleRequested())
+            return
         if event.key == "enter":
             event.prevent_default()
             event.stop()
@@ -127,17 +144,23 @@ class InteractiveApp(App[None]):
 
     CSS: ClassVar[str] = """
     #conversation { height: 1fr; padding: 0 1; }
+    #welcome-header { border: solid $primary; padding: 0 1; height: auto; margin-bottom: 1; }
+    #welcome-emblem { width: auto; padding-right: 2; color: $accent; text-style: bold; }
+    #welcome-text { width: 1fr; }
     #prompt-panel { display: none; border: solid $warning; padding: 0 1; }
     #prompt-panel.show { display: block; }
     #prompt-scroll { max-height: 14; }
+    #input-row { height: 5; border: solid $primary; }
+    #input-prompt { width: 2; padding: 1 0 0 1; color: $accent; text-style: bold; }
+    #input { border: none; height: 1fr; width: 1fr; }
     #status-bar { height: 1; background: $panel; padding: 0 1; }
-    #input { height: 5; border: solid $primary; }
     .msg-user { margin-top: 1; text-style: bold; }
     .msg-system { color: $text-muted; }
-    .msg-tool { border-left: thick $primary; padding-left: 1; }
+    .msg-tool { padding-left: 1; }
     """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
+        Binding("shift+tab", "cycle_mode", "切换模式"),
         Binding("ctrl+c", "cancel_run", "取消"),
         Binding("ctrl+q", "quit", "退出"),
     ]
@@ -191,8 +214,10 @@ class InteractiveApp(App[None]):
                 yield Button("拒绝", id="btn-deny", variant="error")
                 yield Button("确认", id="btn-confirm", variant="success")
                 yield Button("取消", id="btn-cancel")
+        with Horizontal(id="input-row"):
+            yield Static("❯", id="input-prompt")
+            yield ChatInput(id="input")
         yield Static("", id="status-bar")
-        yield ChatInput(id="input")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -200,9 +225,30 @@ class InteractiveApp(App[None]):
         self._hide_prompt()
         self._refresh_status()
         self.set_interval(0.5, self._refresh_status)
-        self._append_system("欢迎来到 Deity。输入任务开始，/help 查看命令，Ctrl+Q 退出。")
+        self._mount_welcome()
         if self._initial_task:
             self._submit(self._initial_task)
+
+    def _mount_welcome(self) -> None:
+        """欢迎头（ADR-022 修订）：神之眼徽记与版本/模型/工作区并排，边框块。
+
+        取代原先单独的一行系统欢迎消息，两者合并为这一块，不重复欢迎。
+        版本号取包的 __version__（与 pyproject 同步），不硬编码。
+        """
+        text = (
+            f"欢迎来到 Deity v{__version__}，我是你的编程助手。\n"
+            f"模型：{self.state.model_name}\n"
+            f"工作区：{self._workspace}\n"
+            "Enter 提交任务 · /help 查看命令\n"
+            "Shift+Tab 切换模式 · Ctrl+C 取消 · Ctrl+Q 退出"
+        )
+        header = Horizontal(
+            Static(_WELCOME_EMBLEM, id="welcome-emblem"),
+            Static(text, id="welcome-text"),
+            id="welcome-header",
+        )
+        self._conversation.mount(header)
+        self._conversation.scroll_end(animate=False)
 
     # -- 对话区 -----------------------------------------------------------
     @property
@@ -323,14 +369,20 @@ class InteractiveApp(App[None]):
             block.update(self._tool_line(node))
 
     def _tool_line(self, node: ToolNode) -> str:
-        status = node.status or "运行中"
-        elapsed = f" · {node.elapsed(time.monotonic):.1f}s" if node.finished_at else ""
-        if node.expanded:
-            return (
-                f"▾ {node.name}（{node.call_id}）· {status}{elapsed}\n参数：{node.args_text or '—'}"
-            )
+        """工具条目（ADR-022 修订，Claude Code 式紧凑排版）。
+
+        首行一行式：⏺ 工具名(参数摘要)；完成后结果以 ⎿ 缩进次行呈现
+        （状态 + 耗时）；运行中首行尾标「运行中」。展开时（/tools）在
+        结果行后追加完整参数与 call_id。
+        """
         summary = node.arguments_summary() or "—"
-        return f"▸ {node.name} · {status}{elapsed} · {summary}"
+        first = f"⏺ {node.name}({summary})"
+        if node.finished_at is None:
+            return f"{first} · 运行中"
+        result = f"  ⎿ {node.status or '完成'} · {node.elapsed(time.monotonic):.1f}s"
+        if node.expanded:
+            return f"{first}\n{result}\n参数：{node.args_text or '—'}（{node.call_id}）"
+        return f"{first}\n{result}"
 
     def _accumulate(self, view: ChatViewModel) -> None:
         """把一轮的计数并入会话级状态（/cost、/status、状态栏的口径）。"""
@@ -442,18 +494,65 @@ class InteractiveApp(App[None]):
             self.service.cancel(self._current_run_id)
         self.exit()
 
-    # -- 状态栏 -------------------------------------------------------------
+    # -- 模式与状态栏 ---------------------------------------------------------
+    def _mode_label(self) -> str:
+        """当前模式文案（状态栏、/status、Shift+Tab 循环共用同一口径）。"""
+        if self._bridge.controller.mode == "auto":
+            return "自动接受"
+        if self.state.plan_mode:
+            return "计划"
+        return "普通"
+
+    def _enter_plan(self) -> bool:
+        """进入计划模式（/plan 与 Shift+Tab 共用）：未启用时提示并保持原模式。"""
+        if not self.service.coding.plan_build_enabled or not self.service.coding.git_guard_enabled:
+            self._append_system(
+                "Plan/Build 未启用，请在配置中开启 plan_build_enabled 和 git_guard_enabled。"
+            )
+            return False
+        self.state.plan_mode = True
+        self._append_system("已进入计划模式。输入任务后将展示计划并询问是否构建。")
+        self._refresh_status()
+        return True
+
+    def _enter_normal(self) -> None:
+        """返回普通模式（/normal 与 Shift+Tab 共用）：退出计划与自动接受。"""
+        self.state.plan_mode = False
+        if self._bridge.controller.mode == "auto":
+            self._bridge.controller.exit_auto()
+            self._append_system("已退出自动接受模式，恢复 ask。")
+        self._append_system("已返回普通模式。")
+        self._refresh_status()
+
+    def on_chat_input_mode_cycle_requested(self, message: ChatInput.ModeCycleRequested) -> None:
+        self.action_cycle_mode()
+
+    def action_cycle_mode(self) -> None:
+        """Shift+Tab 循环切换模式：普通 → 计划 → 自动接受 → 普通。
+
+        状态转移与 /plan、/auto、/normal 完全共用，不另起语义：
+        进入计划走同一启用检查（未启用则留在普通并提示）；进入自动
+        接受仍走审批桥的显式确认——确认通过后才离开计划模式，取消
+        确认则留在计划模式，绝不静默绕过自动接受的安全确认；有待
+        决审批/确认时不切换，避免与审批面板争用。
+        """
+        if self._bridge.pending is not None or self._confirm_futures:
+            self._append_system("有待决审批或确认，先处理后再切换模式。")
+            return
+        label = self._mode_label()
+        if label == "自动接受":
+            self._enter_normal()
+        elif label == "计划":
+            self.run_worker(self._auto_worker(came_from_plan=True), group="prompt", exclusive=False)
+        else:
+            self._enter_plan()
+
     def _refresh_status(self) -> None:
         try:
             bar = self.query_one("#status-bar", Static)
         except Exception:  # noqa: BLE001 - 未挂载时刷新是空操作
             return
-        if self._bridge.controller.mode == "auto":
-            mode = "自动接受"
-        elif self.state.plan_mode:
-            mode = "计划"
-        else:
-            mode = "普通"
+        mode = self._mode_label()
         if self._run_active and self._view is not None:
             status = self._view.status
             current_tool = self._view.current_tool
@@ -469,6 +568,7 @@ class InteractiveApp(App[None]):
             run_state = "空闲"
         bar.update(
             f"{line} · {run_state} · 工作区 {self._workspace} · 会话 {self.state.session_id[:8]}"
+            f" · {mode}模式 (shift+tab 切换)"
         )
 
     # -- 计划模式 -----------------------------------------------------------
@@ -537,7 +637,8 @@ class InteractiveApp(App[None]):
             return
         if prompt == "/help":
             self._append_system(
-                HELP_TEXT + "\n工作台按键：Enter 提交 · Ctrl+J 换行 · Ctrl+C 取消 · Ctrl+Q 退出"
+                HELP_TEXT + "\n工作台按键：Enter 提交 · Ctrl+J 换行 · Shift+Tab 切换模式"
+                " · Ctrl+C 取消 · Ctrl+Q 退出"
             )
             return
         if prompt == "/status":
@@ -567,25 +668,10 @@ class InteractiveApp(App[None]):
                 )
             return
         if prompt == "/plan":
-            if (
-                not self.service.coding.plan_build_enabled
-                or not self.service.coding.git_guard_enabled
-            ):
-                self._append_system(
-                    "Plan/Build 未启用，请在配置中开启 plan_build_enabled 和 git_guard_enabled。"
-                )
-                return
-            self.state.plan_mode = True
-            self._append_system("已进入计划模式。输入任务后将展示计划并询问是否构建。")
-            self._refresh_status()
+            self._enter_plan()
             return
         if prompt == "/normal":
-            self.state.plan_mode = False
-            if self._bridge.controller.mode == "auto":
-                self._bridge.controller.exit_auto()
-                self._append_system("已退出自动接受模式，恢复 ask。")
-            self._append_system("已返回普通模式。")
-            self._refresh_status()
+            self._enter_normal()
             return
         if prompt == "/model" or prompt.startswith("/model "):
             requested = prompt.removeprefix("/model").strip()
@@ -625,12 +711,7 @@ class InteractiveApp(App[None]):
             return
 
     async def _command_status(self) -> None:
-        if self.state.plan_mode:
-            mode = "计划"
-        elif self._bridge.controller.mode == "auto":
-            mode = "自动接受"
-        else:
-            mode = "普通"
+        mode = self._mode_label()
         status = self.session_status
         lines = [
             f"模型：{self.state.model_name}",
@@ -680,9 +761,13 @@ class InteractiveApp(App[None]):
             return
         self.run_worker(self._auto_worker(), group="prompt", exclusive=False)
 
-    async def _auto_worker(self) -> None:
+    async def _auto_worker(self, *, came_from_plan: bool = False) -> None:
         accepted = await asyncio.to_thread(self._bridge.request_auto)
         if accepted:
+            if came_from_plan:
+                # Shift+Tab 自计划模式切入：显式确认通过后才离开计划
+                # 模式；取消确认时不进自动接受、仍留在计划模式。
+                self.state.plan_mode = False
             self._append_system("已进入自动接受模式。输入 /normal 退出并恢复 ask。")
         self._refresh_status()
 
