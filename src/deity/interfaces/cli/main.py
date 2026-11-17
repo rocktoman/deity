@@ -235,14 +235,16 @@ def run(
         db_path = db or Path.home() / ".local/share/deity/deity.db"
 
         # ADR-022：无任务 + TTY + 工作台启用时进全屏交互工作台；
-        # Textual 未安装回落行式会话，非 TTY/管道保持行式（行为不变）。
-        if (
-            task is None
-            and settings.tui.enabled
-            and _interactive_tty()
-            and _launch_interactive(settings, workdir, db_path, config, session)
-        ):
-            return
+        # Textual 未安装回落行式会话并明确提示（避免用户以为工作台不存在），
+        # 非 TTY/管道保持行式（行为不变）。
+        if task is None and settings.tui.enabled and _interactive_tty():
+            if _launch_interactive(settings, workdir, db_path, config, session):
+                return
+            console.print(
+                "未检测到 TUI 组件（Textual），已回落行式模式；"
+                '安装 pip install "deity\\[tui]" 后，deity 可进入全屏工作台。',
+                style="yellow",
+            )
 
         rules = ApprovalRules.load()
         approval = ApprovalController(workspace=workdir, console=console, rules=rules)
@@ -688,7 +690,7 @@ def tui(
         from deity.interfaces.tui.app import run_tui
     except ImportError:
         console.print(
-            'TUI 需要安装 Textual：uv sync --extra tui 或 pip install "deity[tui]"',
+            'TUI 需要安装 Textual：uv sync --extra tui 或 pip install "deity\\[tui]"',
             style="red",
         )
         raise typer.Exit(code=2) from None
@@ -711,7 +713,7 @@ def tui(
         if not _launch_interactive(settings, workdir, db_path, config, None, initial_task=task):
             # 上面的 import 已确认 Textual 存在，这里只为类型收窄兜底。
             console.print(
-                'TUI 需要安装 Textual：uv sync --extra tui 或 pip install "deity[tui]"',
+                'TUI 需要安装 Textual：uv sync --extra tui 或 pip install "deity\\[tui]"',
                 style="red",
             )
             raise typer.Exit(code=2) from None
