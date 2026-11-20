@@ -45,7 +45,7 @@ uv tool install --editable . # 以 deity 命令安装当前检出
 |---|---|---|
 | `tui` | `textual>=0.86` | Textual TUI；未安装时 CLI 正常使用 |
 | `chat` | `prompt_toolkit>=3.0.5,<4`（已锁定 3.0.53，BSD 许可证） | 交互输入增强（历史/多行/补全）；未安装时 CLI 回落到 `input()`，功能一致 |
-| `dev`（dependency-group） | pytest、pytest-asyncio、ruff、mypy | 仅开发/CI 用，不进运行时依赖 |
+| `dev`（dependency-group） | pytest、pytest-asyncio、ruff、mypy、prompt_toolkit、textual | 仅开发/CI 用，不进运行时依赖；覆盖可选 chat/TUI 模块的测试和类型检查 |
 
 ```bash
 pip install "deity[tui]"     # 带 TUI 的安装

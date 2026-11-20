@@ -100,7 +100,10 @@ def test_create_input_falls_back_on_dumb_terminal(
 
 
 @requires_prompt_toolkit
-def test_create_input_uses_prompt_toolkit_on_tty(tmp_path: Path) -> None:
+def test_create_input_uses_prompt_toolkit_on_tty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("TERM", "xterm-256color")
     history = tmp_path / "history"
     config = ChatConfig(history_file=str(history))
     created = create_chat_input(config, workspace=tmp_path, tty=True)
@@ -131,6 +134,43 @@ def test_prompt_toolkit_select_returns_stub_result(tmp_path: Path) -> None:
             return 1
 
     assert selected.select("标题", ["a", "b"], app_factory=StubApp) == 1
+
+
+@pytest.mark.asyncio
+async def test_prompt_toolkit_reads_without_starting_nested_loop(tmp_path: Path) -> None:
+    selected = PromptToolkitInput(
+        ChatConfig(history_file=str(tmp_path / "history")), workspace=tmp_path
+    )
+
+    class StubSession:
+        async def prompt_async(self, prompt_text: str) -> str:
+            assert prompt_text == "Deity> "
+            return "/exit"
+
+        def prompt(self, prompt_text: str) -> str:
+            raise AssertionError("同步 prompt 不应在事件循环内调用")
+
+    selected._session = StubSession()
+    assert await selected.read_line_async("Deity> ") == "/exit"
+
+
+@pytest.mark.asyncio
+async def test_prompt_toolkit_selects_without_starting_nested_loop(tmp_path: Path) -> None:
+    selected = PromptToolkitInput(
+        ChatConfig(history_file=str(tmp_path / "history")), workspace=tmp_path
+    )
+
+    class StubApp:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        async def run_async(self) -> int:
+            return 1
+
+        def run(self) -> int:
+            raise AssertionError("同步选择器不应在事件循环内调用")
+
+    assert await selected.select_async("标题", ["a", "b"], app_factory=StubApp) == 1
 
 
 def test_selector_text_marks_current_index() -> None:

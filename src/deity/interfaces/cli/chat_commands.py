@@ -138,7 +138,7 @@ async def dispatch(prompt: str, ctx: ChatContext) -> bool:
         await _handle_build(prompt, ctx)
         return True
     if prompt == "/skill" or prompt.startswith("/skill "):
-        _handle_skill(prompt, ctx)
+        await _handle_skill(prompt, ctx)
         return True
     if prompt == "/mcp":
         await _handle_mcp(ctx)
@@ -212,7 +212,7 @@ async def _handle_build(prompt: str, ctx: ChatContext) -> None:
         planner = PlanService(ctx.service)
         if plan_id is None:
             candidates = await planner.buildable(ctx.state.session_id)
-            selected = ctx.input.select(
+            selected = await ctx.input.select_async(
                 "当前会话待执行计划",
                 [f"{item.plan_id} {item.draft.goal}" for item in candidates],
             )
@@ -247,7 +247,7 @@ async def _handle_build(prompt: str, ctx: ChatContext) -> None:
         ctx.console.print(f"Build 失败：{run_error_message(exc)}", style="red")
 
 
-def _handle_skill(prompt: str, ctx: ChatContext) -> None:
+async def _handle_skill(prompt: str, ctx: ChatContext) -> None:
     """执行 /skill：选中结果只影响下一条任务。"""
     skills = ctx.service.skills_list()
     names = [item["name"] for item in skills]
@@ -255,7 +255,7 @@ def _handle_skill(prompt: str, ctx: ChatContext) -> None:
     selected = (
         names.index(requested)
         if requested in names
-        else ctx.input.select(
+        else await ctx.input.select_async(
             "可用 Skills", [f"{item['name']} [{item['source']}]" for item in skills]
         )
         if not requested
@@ -276,7 +276,7 @@ def _handle_skill(prompt: str, ctx: ChatContext) -> None:
 async def _handle_mcp(ctx: ChatContext) -> None:
     """执行 /mcp：只做发现，不调用业务工具；选中结果只影响下一条任务。"""
     servers = ctx.service.mcp_list()
-    selected = ctx.input.select("已配置的 MCP servers", servers)
+    selected = await ctx.input.select_async("已配置的 MCP servers", servers)
     if selected is None:
         return
     server_name = servers[selected].split()[0]
@@ -291,7 +291,7 @@ async def _handle_mcp(ctx: ChatContext) -> None:
     except Exception as exc:  # noqa: BLE001 - keep an external server failure in this menu
         ctx.console.print(f"MCP 检查失败：{type(exc).__name__}", style="red")
         return
-    tool_index = ctx.input.select(f"{server_name} 的工具（仅发现，未调用）", tools)
+    tool_index = await ctx.input.select_async(f"{server_name} 的工具（仅发现，未调用）", tools)
     if tool_index is not None:
         ctx.state.pending_mcp_tool = tools[tool_index]
         ctx.console.print(f"已选择 {ctx.state.pending_mcp_tool}。下一条任务将提示模型使用此工具。")
@@ -348,7 +348,7 @@ async def _handle_resume(prompt: str, ctx: ChatContext) -> None:
     if not resumable:
         ctx.console.print("最近运行均不可恢复。")
         return
-    selected = ctx.input.select(
+    selected = await ctx.input.select_async(
         "可恢复的运行", [f"{item['id'][:8]} · {item['status']}" for item in resumable]
     )
     if selected is not None:
@@ -411,7 +411,7 @@ async def _handle_sessions(ctx: ChatContext) -> None:
     if not sessions:
         ctx.console.print("暂无历史会话。")
         return
-    selected = ctx.input.select(
+    selected = await ctx.input.select_async(
         "历史会话",
         [f"{item['id'][:8]} · {item['title'] or item['workspace']}" for item in sessions],
     )

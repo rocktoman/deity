@@ -104,7 +104,12 @@ def test_plan_show_and_build_cli(tmp_path: Path) -> None:
         executable = shutil.which("deity")
         assert executable is not None
         database = tmp_path / "deity.db"
-        environment = {**os.environ, "DEITY_TEST_API_KEY": "fixture"}
+        environment = {
+            **os.environ,
+            "DEITY_TEST_API_KEY": "fixture",
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+        }
 
         def cli(*arguments: str, answer: str = "") -> str:
             completed = subprocess.run(
@@ -242,7 +247,12 @@ def test_build_can_fill_staged_empty_file(tmp_path: Path) -> None:
             text=True,
             encoding="utf-8",
             capture_output=True,
-            env={**os.environ, "DEITY_TEST_API_KEY": "fixture"},
+            env={
+                **os.environ,
+                "DEITY_TEST_API_KEY": "fixture",
+                "NO_PROXY": "127.0.0.1,localhost",
+                "no_proxy": "127.0.0.1,localhost",
+            },
             timeout=45,
             check=False,
         )

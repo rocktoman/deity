@@ -30,7 +30,14 @@ chat = ["prompt_toolkit>=3.0.5,<4"]
 deity = "deity.interfaces.cli.main:app"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.8", "mypy>=1.13"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "prompt_toolkit>=3.0.5,<4",
+    "textual>=0.86",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

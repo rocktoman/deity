@@ -242,7 +242,7 @@ def run(
                 return
             console.print(
                 "未检测到 TUI 组件（Textual），已回落行式模式；"
-                '安装 pip install "deity\\[tui]" 后，deity 可进入全屏工作台。',
+                '安装 pip install "deity\\[tui]" 或 uv sync --extra tui 后，deity 可进入全屏工作台。',
                 style="yellow",
             )
 
@@ -690,7 +690,7 @@ def tui(
         from deity.interfaces.tui.app import run_tui
     except ImportError:
         console.print(
-            'TUI 需要安装 Textual：uv sync --extra tui 或 pip install "deity\\[tui]"',
+            'TUI 需要安装 Textual：uv sync --extra tui && uv run deity tui 或 pip install ".\\[tui]" / "deity\\[tui]"',
             style="red",
         )
         raise typer.Exit(code=2) from None
@@ -713,7 +713,7 @@ def tui(
         if not _launch_interactive(settings, workdir, db_path, config, None, initial_task=task):
             # 上面的 import 已确认 Textual 存在，这里只为类型收窄兜底。
             console.print(
-                'TUI 需要安装 Textual：uv sync --extra tui 或 pip install "deity\\[tui]"',
+                'TUI 需要安装 Textual：uv sync --extra tui && uv run deity tui 或 pip install ".\\[tui]" / "deity\\[tui]"',
                 style="red",
             )
             raise typer.Exit(code=2) from None

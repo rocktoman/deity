@@ -41,7 +41,9 @@ async def _run_session(service: RunService, inputs: list[str], tmp_path: Path) -
     old_input = builtins.input
     builtins.input = lambda prompt_text="": next(script)  # type: ignore[assignment]
     try:
-        await session.run()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv("TERM", "xterm-256color")
+            await session.run()
     finally:
         builtins.input = old_input
     return buffer.getvalue()

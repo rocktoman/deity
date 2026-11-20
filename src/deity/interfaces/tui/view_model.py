@@ -34,9 +34,14 @@ class RunViewModel:
         self,
         run_id: str = "",
         *,
-        max_text_chars: int = 10_000,
-        max_tool_output_chars: int = 2_000,
+        max_text_chars: int | None = None,
+        max_tool_output_chars: int | None = None,
     ) -> None:
+        """默认不设字符上限：正文与工具输出都完整保留，用户能看到全文。
+
+        `max_text_chars` / `max_tool_output_chars` 仅在显式传入正整数时
+        启用截断（保留给测试与需要背压的调用方），传 None 表示不限。
+        """
         self.run_id = run_id
         self.max_text_chars = max_text_chars
         self.max_tool_output_chars = max_tool_output_chars
@@ -108,8 +113,10 @@ class RunViewModel:
                 if status in {"ok", "error", "denied", "timeout", "cancelled", "unknown"}
                 else "unknown"
             )
-            if len(output) > self.max_tool_output_chars:
-                output = output[: self.max_tool_output_chars] + "…"
+            tool_limit = self.max_tool_output_chars
+            if tool_limit is not None and len(output) > tool_limit:
+                self.dropped_chars += len(output) - tool_limit
+                output = output[:tool_limit] + "…"
             view.output = output
 
     def apply_approval(self, request: ApprovalRequest) -> bool:
@@ -165,13 +172,18 @@ class RunViewModel:
         }
 
     def _append_text(self, chunk: str) -> None:
+        """追加流式文本；未设上限时原样累积，不丢弃任何前缀。"""
         if not chunk:
             return
-        if len(chunk) > self.max_text_chars:
-            self.dropped_chars += len(chunk) - self.max_text_chars
-            chunk = chunk[: self.max_text_chars - 1] + "…"
+        limit = self.max_text_chars
+        if limit is None:
+            self.text += chunk
+            return
+        if len(chunk) > limit:
+            self.dropped_chars += len(chunk) - limit
+            chunk = chunk[: limit - 1] + "…"
         self.text += chunk
-        if len(self.text) > self.max_text_chars:
-            overflow = len(self.text) - self.max_text_chars + 1
+        if len(self.text) > limit:
+            overflow = len(self.text) - limit + 1
             self.text = self.text[overflow:] + "…"
             self.dropped_chars += overflow

@@ -406,6 +406,7 @@ def test_bare_deity_non_tty_keeps_line_mode(
     calls: list[str] = []
     _stub_launch(monkeypatch, calls)
     monkeypatch.setattr(cli_main, "_interactive_tty", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(cli_app, [], input="")
     assert result.exit_code == 2

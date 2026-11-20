@@ -37,7 +37,12 @@ def test_cli_runs_against_local_openai_protocol(tmp_path: Path) -> None:
             f'base_url="http://127.0.0.1:{server.server_port}/v1"\n'
             'api_key_env="DEITY_TEST_API_KEY"\n'
         )
-        env = {**os.environ, "DEITY_TEST_API_KEY": "test"}
+        env = {
+            **os.environ,
+            "DEITY_TEST_API_KEY": "test",
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+        }
         result = subprocess.run(
             [
                 sys.executable,

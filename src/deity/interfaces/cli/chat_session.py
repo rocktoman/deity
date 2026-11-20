@@ -132,8 +132,10 @@ class ChatSession:
         self.console.print("欢迎来到 Deity，我是你的编程助手。")
         while True:
             try:
-                prompt = self.input.read_line(
-                    "Deity[plan]> " if self.state.plan_mode else "Deity> "
+                prompt = (
+                    await self.input.read_line_async(
+                        "Deity[plan]> " if self.state.plan_mode else "Deity> "
+                    )
                 ).strip()
             except EOFError:
                 self.console.print()

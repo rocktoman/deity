@@ -90,7 +90,12 @@ def test_full_extension_cli_walkthrough(tmp_path: Path) -> None:
         )
         executable = shutil.which("deity")
         assert executable is not None
-        env = {**os.environ, "DEITY_TEST_API_KEY": "fixture"}
+        env = {
+            **os.environ,
+            "DEITY_TEST_API_KEY": "fixture",
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+        }
         db = tmp_path / "deity.db"
 
         def cli(*args: str, answer: str = "") -> str:

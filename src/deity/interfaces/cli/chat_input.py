@@ -98,6 +98,10 @@ class PlainInput:
         """读一行输入。"""
         return input(prompt_text)
 
+    async def read_line_async(self, prompt_text: str) -> str:
+        """在交互会话中读取普通输入。"""
+        return self.read_line(prompt_text)
+
     def select(self, title: str, items: list[str]) -> int | None:
         """编号选择；空列表或无效输入返回 None。"""
         if not items:
@@ -111,6 +115,10 @@ class PlainInput:
         except EOFError:
             return None
         return int(answer) - 1 if answer.isdigit() and 1 <= int(answer) <= len(items) else None
+
+    async def select_async(self, title: str, items: list[str]) -> int | None:
+        """在交互会话中使用编号选择。"""
+        return self.select(title, items)
 
 
 class PromptToolkitInput:
@@ -229,6 +237,10 @@ class PromptToolkitInput:
         """读一行输入（多行模式：Enter 提交，Alt+Enter 换行）。"""
         return str(self._get_session().prompt(prompt_text))
 
+    async def read_line_async(self, prompt_text: str) -> str:
+        """在现有事件循环内异步读入。"""
+        return str(await self._session.prompt_async(prompt_text))
+
     def select(self, title: str, items: list[str], *, app_factory: Any | None = None) -> int | None:
         """选择一项：TTY 时用 prompt_toolkit 应用，否则走编号。"""
         if not items:
@@ -238,10 +250,29 @@ class PromptToolkitInput:
             return PlainInput().select(title, items)
         return self._select_with_app(title, items, app_factory=app_factory)
 
+    async def select_async(
+        self, title: str, items: list[str], *, app_factory: Any | None = None
+    ) -> int | None:
+        """在现有事件循环内异步选择。"""
+        if not items:
+            print(f"{title}：无可用项")
+            return None
+        if not self._tty:
+            return PlainInput().select(title, items)
+        return await self._build_select_app(  # type: ignore[no-any-return]
+            title, items, app_factory=app_factory
+        ).run_async()
+
     def _select_with_app(
         self, title: str, items: list[str], *, app_factory: Any | None = None
     ) -> int | None:
         """prompt_toolkit 选择器：↑↓ 回绕、Enter 确认、Esc 返回。"""
+        return self._build_select_app(title, items, app_factory=app_factory).run()  # type: ignore[no-any-return]
+
+    def _build_select_app(
+        self, title: str, items: list[str], *, app_factory: Any | None = None
+    ) -> Any:
+        """构建供同步或异步入口运行的选择器。"""
         assert Application is not None
         assert KeyBindings is not None
         assert Layout is not None
@@ -272,7 +303,7 @@ class PromptToolkitInput:
         factory = app_factory or Application
         app: Any = factory(layout=Layout(Window(content=control)), key_bindings=bindings)
         state["app"] = app
-        return app.run()  # type: ignore[no-any-return]
+        return app
 
 
 def create_chat_input(

@@ -11,7 +11,6 @@ from rich.console import Console
 from deity.application.config import ChatConfig, PermissionConfig
 from deity.application.run_service import RunService
 from deity.core.contracts import ModelEvent
-from deity.interfaces.cli import chat_input
 from deity.interfaces.cli.chat_input import PlainInput, PromptToolkitInput, create_chat_input
 from deity.interfaces.cli.chat_session import ChatSession
 
@@ -112,9 +111,6 @@ async def test_recorded_replay_is_deterministic_and_side_effect_free(
     assert names == {"a.txt", "rec.db", "replay.db"}
 
 
-@pytest.mark.skipif(
-    not chat_input._HAS_PROMPT_TOOLKIT, reason="prompt_toolkit 未安装（chat extras）"
-)
 def test_chat_disabled_falls_back_to_plain_input(tmp_path: Path) -> None:
     disabled = create_chat_input(ChatConfig(enabled=False), workspace=tmp_path, tty=True)
     assert isinstance(disabled, PlainInput)

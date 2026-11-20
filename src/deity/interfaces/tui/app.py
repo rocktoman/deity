@@ -21,6 +21,7 @@ from typing import Any, ClassVar, Literal
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Static
 from textual.worker import Worker
 
@@ -29,7 +30,19 @@ from deity.interfaces.tui.view_model import RunViewModel
 
 
 class TuiApp(App[None]):
-    """模型流式文本、工具调用树、审批列表与状态的 TUI。"""
+    """模型流式文本、工具调用树、审批列表与状态的现代分栏监视台。"""
+
+    CSS: ClassVar[str] = """
+    #monitor-container { height: 1fr; }
+    #monitor-header { height: 3; border: solid $primary; padding: 0 1; }
+    #monitor-body { height: 1fr; }
+    #monitor-sidebar { width: 38; border-right: solid $primary; padding: 0 1; }
+    #monitor-main { width: 1fr; padding: 0 1; }
+    #run-status { width: 1fr; text-style: bold; }
+    #run-approvals-box { border: solid $warning; margin-bottom: 1; padding: 0 1; max-height: 10; }
+    #run-tools-box { height: 1fr; border: solid $primary; padding: 0 1; }
+    .box-title { text-style: bold; color: $accent; margin-bottom: 1; }
+    """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("q", "quit", "退出"),
@@ -68,10 +81,19 @@ class TuiApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static("", id="run-status")
-        yield Static("", id="run-text")
-        yield Static("", id="run-tools")
-        yield Static("", id="run-approvals")
+        with Vertical(id="monitor-container"):
+            with Horizontal(id="monitor-header"):
+                yield Static("", id="run-status")
+            with Horizontal(id="monitor-body"):
+                with Vertical(id="monitor-sidebar"):
+                    with Vertical(id="run-approvals-box"):
+                        yield Static("待决审批 [a 批准 / d 拒绝]:", classes="box-title")
+                        yield Static("", id="run-approvals")
+                    with VerticalScroll(id="run-tools-box"):
+                        yield Static("工具调用流水线:", classes="box-title")
+                        yield Static("", id="run-tools")
+                with VerticalScroll(id="monitor-main"):
+                    yield Static("", id="run-text")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -159,15 +181,18 @@ class TuiApp(App[None]):
     def _refresh(self) -> None:
         snapshot = self.view_model.snapshot()
         try:
-            self.query_one("#run-status", Static).update(f"状态：{snapshot['status']}")
+            status_text = snapshot["status"]
+            self.query_one("#run-status", Static).update(
+                f"运行 ID：{snapshot['run_id'] or '未分配'}  |  状态：{status_text}  |  已接收事件：{self.view_model.events_seen}"
+            )
             self.query_one("#run-text", Static).update(str(snapshot["text"]))
             tools = "\n".join(
-                f"{item['call_id']} {item['name']} [{item['status']}]"
+                f"{'✓' if item['status'] == 'ok' else '✗' if item['status'] == 'error' else '⎿'} {item['call_id'][:8]} {item['name']} [{item['status']}]"
                 for item in snapshot["tool_calls"]
             )
             self.query_one("#run-tools", Static).update(tools or "（无工具调用）")
             approvals = "\n".join(
-                f"{item['approval_id']} {item['tool_name']} [{item['status']}]"
+                f"• {item['approval_id'][:8]} {item['tool_name']} [{item['status']}]"
                 for item in snapshot["approvals"]
             )
             self.query_one("#run-approvals", Static).update(approvals or "（无待审批）")

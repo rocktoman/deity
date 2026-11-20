@@ -36,3 +36,5 @@ def test_tui_command_without_textual_exits_2(monkeypatch: pytest.MonkeyPatch) ->
     assert result.exit_code == 2
     assert "Traceback" not in result.output
     assert "textual" in result.output.lower() or "Textual" in result.output
+    assert "uv run deity tui" in " ".join(result.output.split())
+    assert ".[tui]" in result.output

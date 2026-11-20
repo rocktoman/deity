@@ -332,9 +332,11 @@ tui = [
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "prompt-toolkit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
+    { name = "textual" },
 ]
 
 [package.metadata]
@@ -356,9 +358,11 @@ provides-extras = ["tui", "chat"]
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy", specifier = ">=1.13" },
+    { name = "prompt-toolkit", specifier = ">=3.0.5,<4" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.8" },
+    { name = "textual", specifier = ">=0.86" },
 ]
 
 [[package]]

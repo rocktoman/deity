@@ -33,6 +33,30 @@ def test_long_text_truncated_with_backpressure_count() -> None:
     assert snapshot["text"].endswith("…")
 
 
+def test_text_is_not_truncated_by_default() -> None:
+    """默认不设上限：长回答必须完整保留，不能丢开头。"""
+    model = RunViewModel(run_id="r1")
+    model.apply(_event(1, "text_delta", {"text": "HEAD"}))
+    model.apply(_event(2, "text_delta", {"text": "x" * 50_000}))
+    snapshot = model.snapshot()
+    assert snapshot["text"].startswith("HEAD")
+    assert len(snapshot["text"]) == 4 + 50_000
+    assert snapshot["dropped_chars"] == 0
+    assert "…" not in snapshot["text"]
+
+
+def test_tool_output_is_not_truncated_by_default() -> None:
+    """默认不设上限：工具输出完整保留。"""
+    model = RunViewModel(run_id="r1")
+    model.apply(_event(1, "tool_call_started", {"call_id": "c1", "name": "shell"}))
+    model.apply(
+        _event(2, "ToolCompleted", {"call_id": "c1", "status": "ok", "output": "y" * 9_000})
+    )
+    output = model.snapshot()["tool_calls"][0]["output"]
+    assert len(output) == 9_000
+    assert not output.endswith("…")
+
+
 def test_tool_tree_dedups_same_call_id() -> None:
     model = RunViewModel(run_id="r1")
     model.apply(_event(1, "tool_call_started", {"call_id": "c1", "name": "write_file"}))

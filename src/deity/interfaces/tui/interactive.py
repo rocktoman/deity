@@ -19,6 +19,7 @@ Shift+Tab 循环切换模式（普通 → 计划 → 自动接受）、Ctrl+C �
 import asyncio
 import shlex
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 from uuid import uuid4
@@ -42,14 +43,34 @@ from deity.interfaces.cli.chat_view_model import ChatViewModel, ToolNode
 from deity.interfaces.cli.plan import build_approved, plan_lines
 from deity.interfaces.tui.approval_bridge import PendingPrompt, TuiApprovalBridge
 
-_CLI_ONLY_COMMANDS = ("/skill", "/mcp", "/fork", "/timeline")
+_CLI_ONLY_COMMANDS = ("/fork", "/timeline")
 
 # 欢迎头徽记：神之眼（三角形 + 眼睛 + 光芒），字符绘制、对称极简。
 _WELCOME_EMBLEM = "   \\ | /\n    \\|/\n    / \\\n   / ◉ \\\n  /______\\"
 
+AVAILABLE_SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("/help", "查看命令帮助与工作台按键"),
+    ("/plan", "进入计划模式（建计划 → 审批 → 构建）"),
+    ("/build", "执行已批准的计划"),
+    ("/normal", "返回普通交互模式"),
+    ("/auto", "进入自动接受模式（免审批）"),
+    ("/model", "查看或切换当前模型"),
+    ("/status", "查看会话状态与 Token 统计"),
+    ("/cost", "查看当前会话 Token 消耗详情"),
+    ("/tools", "展开或切换工具调用详情"),
+    ("/skills", "查看已配置与已启用的 Skills"),
+    ("/mcp", "查看已配置的 MCP 工具服务器"),
+    ("/sessions", "列出历史会话或切换会话"),
+    ("/resume", "从最近检查点恢复 Run"),
+    ("/doctor", "运行环境与配置检查"),
+    ("/clear", "清屏对话区"),
+    ("/compact", "查看上下文压缩配置状态"),
+    ("/exit", "退出 Deity 工作台"),
+]
+
 
 class ChatInput(TextArea):
-    """工作台输入框：Enter 提交、Ctrl+J 换行、首/末行方向键走历史。"""
+    """工作台输入框：Enter 提交、Ctrl+J 换行、Tab 命令补全、首/末行方向键走历史。"""
 
     class Submitted(Message):
         """用户提交了一段输入（Enter）；文本是否采纳由 App 决定。"""
@@ -64,13 +85,41 @@ class ChatInput(TextArea):
     class ModeCycleRequested(Message):
         """输入框内按 Shift+Tab：请求循环切换模式（普通/计划/自动接受）。"""
 
+    class CommandHintUpdated(Message):
+        """输入框内的斜杠命令联想更新。"""
+
+        def __init__(self, matches: list[tuple[str, str]]) -> None:
+            super().__init__()
+            self.matches = matches
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._history: list[str] = []
         self._history_index: int | None = None
         self._draft = ""
 
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        text = self.text
+        if text.startswith("/") and not text.startswith("//"):
+            prefix = text.split()[0] if text else ""
+            matches = [
+                (cmd, desc) for cmd, desc in AVAILABLE_SLASH_COMMANDS if cmd.startswith(prefix)
+            ]
+            self.post_message(self.CommandHintUpdated(matches))
+        else:
+            self.post_message(self.CommandHintUpdated([]))
+
     async def _on_key(self, event: Any) -> None:
+        if (
+            self.app is not None
+            and getattr(self.app, "_prompt_handler", None) is not None
+            and hasattr(self.app, "handle_prompt_key")
+            and self.app.handle_prompt_key(event.key)
+        ):
+            event.prevent_default()
+            event.stop()
+            return
+
         if event.key == "shift+tab":
             event.prevent_default()
             event.stop()
@@ -84,6 +133,36 @@ class ChatInput(TextArea):
                 self._push_history(text)
             self.post_message(self.Submitted(text))
             return
+        if event.key == "tab":
+            text = self.text
+            if text.startswith("/"):
+                prefix = text.split()[0] if text else ""
+                matches = [cmd for cmd, _ in AVAILABLE_SLASH_COMMANDS if cmd.startswith(prefix)]
+                if matches:
+                    event.prevent_default()
+                    event.stop()
+                    if len(matches) == 1:
+                        self.text = matches[0] + " "
+                        self.move_cursor((0, len(self.text)))
+                        self.post_message(self.CommandHintUpdated([]))
+                    else:
+                        common = matches[0]
+                        for m in matches[1:]:
+                            while not m.startswith(common):
+                                common = common[:-1]
+                        if len(common) > len(prefix):
+                            self.text = common
+                            self.move_cursor((0, len(self.text)))
+                        self.post_message(
+                            self.CommandHintUpdated(
+                                [
+                                    (cmd, desc)
+                                    for cmd, desc in AVAILABLE_SLASH_COMMANDS
+                                    if cmd in matches
+                                ]
+                            )
+                        )
+                    return
         if event.key in ("ctrl+j", "shift+enter"):
             event.prevent_default()
             event.stop()
@@ -139,6 +218,28 @@ class ChatInput(TextArea):
             self._set_text(self._draft)
 
 
+class ToolBlock(Static):
+    """可交互工具条目：支持点击切换展开/折叠完整参数与输出。"""
+
+    def __init__(
+        self,
+        node: ToolNode,
+        on_toggle: Callable[[str], None],
+        formatter: Callable[[ToolNode], str],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(formatter(node), **kwargs)
+        self.node = node
+        self._on_toggle = on_toggle
+        self._formatter = formatter
+
+    def on_click(self) -> None:
+        self._on_toggle(self.node.call_id)
+
+    def refresh_node(self) -> None:
+        self.update(self._formatter(self.node))
+
+
 class InteractiveApp(App[None]):
     """Codex / Claude Code 式交互界面：对话区 + 审批面板 + 状态栏 + 输入框。"""
 
@@ -150,13 +251,16 @@ class InteractiveApp(App[None]):
     #prompt-panel { display: none; border: solid $warning; padding: 0 1; }
     #prompt-panel.show { display: block; }
     #prompt-scroll { max-height: 14; }
-    #input-row { height: 5; border: solid $primary; }
+    #cmd-hint { display: none; height: auto; max-height: 5; background: $panel; border: solid $primary; padding: 0 1; margin-bottom: 1; }
+    #cmd-hint.show { display: block; }
+    #input-row { min-height: 3; max-height: 8; height: auto; border: solid $primary; }
     #input-prompt { width: 2; padding: 1 0 0 1; color: $accent; text-style: bold; }
-    #input { border: none; height: 1fr; width: 1fr; }
+    #input { border: none; min-height: 1; max-height: 6; height: auto; width: 1fr; }
     #status-bar { height: 1; background: $panel; padding: 0 1; }
     .msg-user { margin-top: 1; text-style: bold; }
     .msg-system { color: $text-muted; }
     .msg-tool { padding-left: 1; }
+    .msg-tool:hover { background: $boost; }
     """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
@@ -208,12 +312,13 @@ class InteractiveApp(App[None]):
             with VerticalScroll(id="prompt-scroll"):
                 yield Static("", id="prompt-text")
             with Horizontal(id="prompt-buttons"):
-                yield Button("允许一次", id="btn-allow-once", variant="success")
-                yield Button("本次会话都允许", id="btn-allow-session")
-                yield Button("永久允许（保存为规则）", id="btn-allow-always")
-                yield Button("拒绝", id="btn-deny", variant="error")
-                yield Button("确认", id="btn-confirm", variant="success")
-                yield Button("取消", id="btn-cancel")
+                yield Button("[1] 允许一次", id="btn-allow-once", variant="success")
+                yield Button("[2] 本次会话都允许", id="btn-allow-session")
+                yield Button("[4] 永久允许（保存为规则）", id="btn-allow-always")
+                yield Button("[3/Esc] 拒绝", id="btn-deny", variant="error")
+                yield Button("[y/Enter] 确认", id="btn-confirm", variant="success")
+                yield Button("[n/Esc] 取消", id="btn-cancel")
+        yield Static("", id="cmd-hint")
         with Horizontal(id="input-row"):
             yield Static("❯", id="input-prompt")
             yield ChatInput(id="input")
@@ -269,6 +374,23 @@ class InteractiveApp(App[None]):
         self._conversation.scroll_end(animate=False)
 
     # -- 提交与执行 ---------------------------------------------------------
+    def on_chat_input_command_hint_updated(self, message: ChatInput.CommandHintUpdated) -> None:
+        try:
+            hint_box = self.query_one("#cmd-hint", Static)
+        except Exception:  # noqa: BLE001 - 未挂载时刷新是空操作
+            return
+        if not message.matches or self._run_active:
+            hint_box.remove_class("show")
+            hint_box.update("")
+            return
+        lines = ["[bold cyan]可用命令 (Tab 补全):[/bold cyan]"]
+        for cmd, desc in message.matches[:5]:
+            lines.append(f"  [bold]{cmd}[/bold] - {desc}")
+        if len(message.matches) > 5:
+            lines.append(f"  [dim]...还有 {len(message.matches) - 5} 个命令[/dim]")
+        hint_box.update("\n".join(lines))
+        hint_box.add_class("show")
+
     def on_chat_input_submitted(self, message: ChatInput.Submitted) -> None:
         self._submit(message.text)
 
@@ -276,6 +398,12 @@ class InteractiveApp(App[None]):
         self.action_cancel_run()
 
     def _submit(self, raw: str) -> None:
+        try:
+            hint_box = self.query_one("#cmd-hint", Static)
+            hint_box.remove_class("show")
+            hint_box.update("")
+        except Exception:  # noqa: BLE001, S110 - 未挂载时是空操作
+            pass
         text = raw.strip()
         if not text:
             return
@@ -358,7 +486,12 @@ class InteractiveApp(App[None]):
             await self._append_assistant_final(view.final_text)
 
     def _mount_tool_block(self, node: ToolNode) -> None:
-        block = Static(self._tool_line(node), classes="msg-tool")
+        block = ToolBlock(
+            node,
+            on_toggle=self._toggle_tool_node,
+            formatter=self._tool_line,
+            classes="msg-tool",
+        )
         self._tool_blocks[node.call_id] = block
         self._conversation.mount(block)
         self._conversation.scroll_end(animate=False)
@@ -366,7 +499,20 @@ class InteractiveApp(App[None]):
     def _update_tool_block(self, node: ToolNode) -> None:
         block = self._tool_blocks.get(node.call_id)
         if block is not None:
-            block.update(self._tool_line(node))
+            if isinstance(block, ToolBlock):
+                block.refresh_node()
+            else:
+                block.update(self._tool_line(node))
+
+    def _toggle_tool_node(self, call_id: str) -> None:
+        if self._view is not None and call_id in self._view.tools:
+            self._view.toggle_expanded(call_id)
+            block = self._tool_blocks.get(call_id)
+            if block is not None:
+                if isinstance(block, ToolBlock):
+                    block.refresh_node()
+                else:
+                    block.update(self._tool_line(self._view.tools[call_id]))
 
     def _tool_line(self, node: ToolNode) -> str:
         """工具条目（ADR-022 修订，Claude Code 式紧凑排版）。
@@ -398,9 +544,54 @@ class InteractiveApp(App[None]):
         target.elapsed_seconds += source.elapsed_seconds
 
     # -- 审批/确认面板 ------------------------------------------------------
+    def handle_prompt_key(self, key: str) -> bool:
+        """极速单键审批处理：面板激活时直达放行/拒绝。"""
+        if self._prompt_handler is None:
+            return False
+        panel = self.query_one("#prompt-panel")
+        if "show" not in panel.classes:
+            return False
+        kind = getattr(self, "_current_pending_kind", "approval")
+        if kind == "approval":
+            mapping = {
+                "1": "btn-allow-once",
+                "2": "btn-allow-session",
+                "4": "btn-allow-always",
+                "3": "btn-deny",
+                "escape": "btn-deny",
+            }
+            if key in mapping:
+                bid = mapping[key]
+                handler = self._prompt_handler
+                self._prompt_handler = None
+                handler(bid)
+                return True
+        elif kind == "confirm":
+            mapping = {
+                "y": "btn-confirm",
+                "Y": "btn-confirm",
+                "enter": "btn-confirm",
+                "n": "btn-cancel",
+                "N": "btn-cancel",
+                "escape": "btn-cancel",
+            }
+            if key in mapping:
+                bid = mapping[key]
+                handler = self._prompt_handler
+                self._prompt_handler = None
+                handler(bid)
+                return True
+        return False
+
+    def on_key(self, event: Any) -> None:
+        if self.handle_prompt_key(event.key):
+            event.prevent_default()
+            event.stop()
+
     def _present_prompt(self, pending: PendingPrompt) -> None:
         """呈现审批卡片或确认（桥从工作线程经 call_from_thread 调入）。"""
         self.query_one("#prompt-text", Static).update(pending.text or "（无内容）")
+        self._current_pending_kind = pending.kind
         if pending.kind == "approval":
             mapping = {
                 "btn-allow-once": "1",
@@ -411,18 +602,21 @@ class InteractiveApp(App[None]):
             visible = {"btn-allow-once", "btn-allow-session", "btn-deny"}
             if pending.allow_permanent:
                 visible.add("btn-allow-always")
+            self.query_one("#btn-allow-once", Button).label = "[1] 允许一次"
             session_button = self.query_one("#btn-allow-session", Button)
             if pending.pattern:
-                session_button.label = f"本次会话允许同类命令（{pending.pattern}）"
+                session_button.label = f"[2] 本次会话允许同类命令（{pending.pattern}）"
             else:
-                session_button.label = "本次会话都允许"
+                session_button.label = "[2] 本次会话都允许"
+            self.query_one("#btn-allow-always", Button).label = "[4] 永久允许（保存为规则）"
+            self.query_one("#btn-deny", Button).label = "[3/Esc] 拒绝"
             self._set_prompt_buttons(visible)
             self._prompt_handler = lambda bid: self._bridge.submit(mapping.get(bid, "3"))
             focus_id = "btn-allow-once"
         else:
             mapping = {"btn-confirm": "yes", "btn-cancel": ""}
-            self.query_one("#btn-confirm", Button).label = "确认"
-            self.query_one("#btn-cancel", Button).label = "取消"
+            self.query_one("#btn-confirm", Button).label = "[y/Enter] 确认"
+            self.query_one("#btn-cancel", Button).label = "[n/Esc] 取消"
             self._set_prompt_buttons({"btn-confirm", "btn-cancel"})
             self._prompt_handler = lambda bid: self._bridge.submit(mapping.get(bid, ""))
             focus_id = "btn-confirm"
@@ -452,9 +646,10 @@ class InteractiveApp(App[None]):
         """界面内二选一确认（计划构建、脏文件授权用）；退出时按取消收口。"""
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._confirm_futures.append(future)
+        self._current_pending_kind = "confirm"
         self.query_one("#prompt-text", Static).update(text)
-        self.query_one("#btn-confirm", Button).label = confirm_label
-        self.query_one("#btn-cancel", Button).label = cancel_label
+        self.query_one("#btn-confirm", Button).label = f"[y/Enter] {confirm_label}"
+        self.query_one("#btn-cancel", Button).label = f"[n/Esc] {cancel_label}"
         self._set_prompt_buttons({"btn-confirm", "btn-cancel"})
 
         def handler(bid: str) -> None:
@@ -703,6 +898,46 @@ class InteractiveApp(App[None]):
         if prompt == "/resume" or prompt.startswith("/resume "):
             await self._command_resume(prompt)
             return
+        if prompt in {"/skills", "/skill"} or prompt.startswith(("/skills ", "/skill ")):
+            try:
+                skills = self.service.skills_list()
+                errors = self.service.skills_errors()
+                if not skills and not errors:
+                    self._append_system(
+                        "未发现配置的 Skills。可在 .deity/skills 或 ~/.config/deity/skills 中添加。"
+                    )
+                else:
+                    lines = ["[bold]已配置的 Skills:[/bold]"]
+                    for item in skills:
+                        lines.append(
+                            f"• [cyan]{item['name']}[/cyan] [{item['source']}]: {item['description']}"
+                        )
+                    for err in errors:
+                        lines.append(f"[red]错误: {err}[/red]")
+                    self._append_system("\n".join(lines))
+            except Exception as exc:  # noqa: BLE001
+                self._append_system(f"获取 Skills 失败：{exc}")
+            return
+        if prompt == "/mcp" or prompt.startswith("/mcp "):
+            try:
+                mcp_servers = getattr(self.service, "mcp_servers", {})
+                if not mcp_servers:
+                    self._append_system(
+                        "未配置 MCP 服务器。可在配置文件的 [mcp.servers.*] 段中添加。"
+                    )
+                else:
+                    lines = ["[bold]已配置的 MCP 服务器:[/bold]"]
+                    for name, srv in mcp_servers.items():
+                        cmd_str = (
+                            f"{srv.command} {' '.join(srv.args)}"
+                            if hasattr(srv, "command")
+                            else str(srv)
+                        )
+                        lines.append(f"• [cyan]{name}[/cyan]: {cmd_str}")
+                    self._append_system("\n".join(lines))
+            except Exception as exc:  # noqa: BLE001
+                self._append_system(f"获取 MCP 配置失败：{exc}")
+            return
         if prompt.split(maxsplit=1)[0] in _CLI_ONLY_COMMANDS:
             self._append_system("该命令请在行式 CLI 中使用（非 TTY 或 deity run 的行式界面）。")
             return
@@ -746,10 +981,7 @@ class InteractiveApp(App[None]):
             self._append_system(f"未找到工具调用：{parts[1].strip()}")
             return
         for node in targets:
-            view.toggle_expanded(node.call_id)
-            block = self._tool_blocks.get(node.call_id)
-            if block is not None:
-                block.update(self._tool_line(node))
+            self._toggle_tool_node(node.call_id)
 
     def _command_auto(self) -> None:
         """进入/退出自动接受模式；进入走桥的显式确认（confirm 面板）。"""
