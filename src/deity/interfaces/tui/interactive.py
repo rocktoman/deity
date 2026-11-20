@@ -244,23 +244,117 @@ class InteractiveApp(App[None]):
     """Codex / Claude Code 式交互界面：对话区 + 审批面板 + 状态栏 + 输入框。"""
 
     CSS: ClassVar[str] = """
-    #conversation { height: 1fr; padding: 0 1; }
-    #welcome-header { border: solid $primary; padding: 0 1; height: auto; margin-bottom: 1; }
-    #welcome-emblem { width: auto; padding-right: 2; color: $accent; text-style: bold; }
-    #welcome-text { width: 1fr; }
-    #prompt-panel { display: none; border: solid $warning; padding: 0 1; }
-    #prompt-panel.show { display: block; }
-    #prompt-scroll { max-height: 14; }
-    #cmd-hint { display: none; height: auto; max-height: 5; background: $panel; border: solid $primary; padding: 0 1; margin-bottom: 1; }
-    #cmd-hint.show { display: block; }
-    #input-row { min-height: 3; max-height: 8; height: auto; border: solid $primary; }
-    #input-prompt { width: 2; padding: 1 0 0 1; color: $accent; text-style: bold; }
-    #input { border: none; min-height: 1; max-height: 6; height: auto; width: 1fr; }
-    #status-bar { height: 1; background: $panel; padding: 0 1; }
-    .msg-user { margin-top: 1; text-style: bold; }
-    .msg-system { color: $text-muted; }
-    .msg-tool { padding-left: 1; }
-    .msg-tool:hover { background: $boost; }
+    Screen {
+        background: #0f1117;
+    }
+    #conversation {
+        height: 1fr;
+        padding: 0 1;
+        background: transparent;
+    }
+    #welcome-header {
+        border: round #3b82f6;
+        background: #181c27;
+        padding: 1 2;
+        margin: 1 1 2 1;
+        max-width: 96;
+        height: auto;
+    }
+    #welcome-emblem {
+        width: 14;
+        color: #60a5fa;
+        text-style: bold;
+        padding: 0 1;
+    }
+    #welcome-text {
+        width: 1fr;
+        padding-left: 1;
+        color: #e2e8f0;
+    }
+    #prompt-panel {
+        display: none;
+        border: round #f59e0b;
+        background: #1c1d27;
+        padding: 1 2;
+        margin: 0 1 1 1;
+    }
+    #prompt-panel.show {
+        display: block;
+    }
+    #prompt-scroll {
+        max-height: 14;
+    }
+    #prompt-buttons {
+        margin-top: 1;
+        height: auto;
+    }
+    #prompt-buttons Button {
+        margin-right: 1;
+    }
+    #cmd-hint {
+        display: none;
+        height: auto;
+        max-height: 6;
+        background: #181c27;
+        border: round #38bdf8;
+        padding: 0 1;
+        margin: 0 1 1 1;
+    }
+    #cmd-hint.show {
+        display: block;
+    }
+    #input-row {
+        min-height: 3;
+        max-height: 8;
+        height: auto;
+        border: round #3b82f6;
+        background: #181c27;
+        padding: 0 1;
+        margin: 0 1 1 1;
+    }
+    #input-prompt {
+        width: 2;
+        padding: 1 0 0 0;
+        color: #38bdf8;
+        text-style: bold;
+    }
+    #input {
+        border: none;
+        background: transparent;
+        min-height: 1;
+        max-height: 6;
+        height: auto;
+        width: 1fr;
+    }
+    #status-bar {
+        height: 1;
+        background: #12151e;
+        color: #94a3b8;
+        padding: 0 1;
+    }
+    .msg-user {
+        background: #181c27;
+        border-left: thick #38bdf8;
+        padding: 0 1;
+        margin: 1 1;
+        color: #f1f5f9;
+    }
+    .msg-system {
+        color: #94a3b8;
+        margin: 1 1;
+        padding: 0 1;
+    }
+    .msg-assistant {
+        padding: 0 1;
+        margin: 1 1;
+    }
+    .msg-tool {
+        padding: 0 1;
+        margin: 0 1;
+    }
+    .msg-tool:hover {
+        background: #1e2333;
+    }
     """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
@@ -341,11 +435,12 @@ class InteractiveApp(App[None]):
         版本号取包的 __version__（与 pyproject 同步），不硬编码。
         """
         text = (
-            f"欢迎来到 Deity v{__version__}，我是你的编程助手。\n"
-            f"模型：{self.state.model_name}\n"
-            f"工作区：{self._workspace}\n"
-            "Enter 提交任务 · /help 查看命令\n"
-            "Shift+Tab 切换模式 · Ctrl+C 取消 · Ctrl+Q 退出"
+            f"[bold white]欢迎来到[/bold white] [bold cyan]Deity v{__version__}[/bold cyan][bold white]，我是你的编程助手。[/bold white]\n"
+            f"[dim]•[/dim] [bold]模型：[/bold][cyan]{self.state.model_name}[/cyan]\n"
+            f"[dim]•[/dim] [bold]工作区：[/bold][dim]{self._workspace}[/dim]\n"
+            f"[dim]────────────────────────────────────────────────[/dim]\n"
+            f"[bold green]Enter[/bold green] [dim]提交任务[/dim] · [bold green]/help[/bold green] [dim]查看命令[/dim] · "
+            f"[bold green]Shift+Tab[/bold green] [dim]切换模式[/dim] · [bold green]Ctrl+C[/bold green] [dim]取消[/dim] · [bold green]Ctrl+Q[/bold green] [dim]退出[/dim]"
         )
         header = Horizontal(
             Static(_WELCOME_EMBLEM, id="welcome-emblem"),
@@ -748,6 +843,12 @@ class InteractiveApp(App[None]):
         except Exception:  # noqa: BLE001 - 未挂载时刷新是空操作
             return
         mode = self._mode_label()
+        badge_style = {
+            "普通": "[bold black on #4ade80] 普通 [/]",
+            "计划": "[bold black on #facc15] 计划 [/]",
+            "自动接受": "[bold white on #ef4444] 自动接受 [/]",
+        }.get(mode, f"[{mode}]")
+
         if self._run_active and self._view is not None:
             status = self._view.status
             current_tool = self._view.current_tool
@@ -757,13 +858,13 @@ class InteractiveApp(App[None]):
                 current_tool=current_tool.name if current_tool is not None else None,
             )
             dots = "." * (int(time.monotonic() * 2) % 4)
-            run_state = f"运行中{dots}"
+            run_state = f"[bold cyan]⟳ 运行中{dots}[/]"
         else:
             line = self.session_status.summary_line(model_name=self.state.model_name, mode=mode)
-            run_state = "空闲"
+            run_state = "[bold green]● 空闲[/]"
+
         bar.update(
-            f"{line} · {run_state} · 工作区 {self._workspace} · 会话 {self.state.session_id[:8]}"
-            f" · {mode}模式 (shift+tab 切换)"
+            f"{badge_style} {run_state}  │  {line}  │  [dim]工作区:[/] [white]{self._workspace}[/]  │  [dim]会话:[/] [white]{self.state.session_id[:8]}[/]  │  [dim]{mode}模式 (shift+tab 切换)[/dim]"
         )
 
     # -- 计划模式 -----------------------------------------------------------
