@@ -624,6 +624,56 @@ async def test_interactive_plan_mode_submit_uses_plan_flow(tmp_path: Path) -> No
         await pilot.press("ctrl+q")
 
 
+# -- Klee 风格对齐 P0：自定义主题 / 圆角边框 / Markdown 定制 --
+
+
+@pytest.mark.asyncio
+async def test_interactive_uses_deity_theme(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.theme in ("deity-dark", "deity-light")
+        theme = app.get_theme(app.theme)
+        assert theme is not None
+        # 品牌色：浅底 Klee 深绿原色、深底提亮变体（D1）。
+        assert theme.accent in ("#1E4C35", "#2E7D5B")
+        assert "text-quaternary" in theme.variables
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_round_borders(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for selector in ("#welcome-header", "#input-row", "#prompt-panel"):
+            border_type = app.query_one(selector).styles.border[0][0]
+            assert border_type == "round", selector
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_markdown_fence_rendered(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    reply = "# 标题\n\n```python\nprint('hi')\n```\n\n- 条目一\n"
+    app = _make_app(
+        tmp_path,
+        FakeModel([[ModelEvent("text_delta", text=reply), ModelEvent("message_completed")]]),
+    )
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "给我代码")
+        await _wait_until(lambda: not app._run_active)
+        await pilot.pause()
+        fences = app.query("MarkdownFence")
+        assert len(fences) == 1
+        # 代码块内容在 MarkdownFence.code 上（渲染为语法高亮，不走纯文本）。
+        assert "print('hi')" in fences[0].code  # type: ignore[attr-defined]
+        assert "标题" in _conversation_text(app)
+        await pilot.press("ctrl+q")
+
+
 @pytest.mark.asyncio
 async def test_interactive_tool_lines_are_compact(tmp_path: Path) -> None:
     pytest.importorskip("textual")
