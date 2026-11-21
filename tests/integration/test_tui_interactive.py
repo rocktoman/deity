@@ -274,6 +274,30 @@ async def test_interactive_cancel_stops_run(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_interactive_ctrl_c_quits_when_idle(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+    assert app.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_interactive_escape_does_not_quit_when_idle(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.is_running is True
+        await pilot.press("ctrl+q")
+    assert app.is_running is False
+
+
+@pytest.mark.asyncio
 async def test_interactive_status_command_shows_context_and_tokens(tmp_path: Path) -> None:
     """P2-5 状态栏瘦身后：token/上下文占用改由 /status 详情呈现。"""
     pytest.importorskip("textual")
