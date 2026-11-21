@@ -14,16 +14,22 @@ Shift+Tab 循环切换模式（普通 → 计划 → 自动接受）、Ctrl+C �
 观感与交互对齐 Claude Code（ADR-022 修订，2026-11-17）：启动欢迎头
 （神之眼徽记 + 版本/模型/工作区，边框块）、带 ❯ 提示的边框输入框、
 输入框正下方的模式状态行、一行式工具条目 + 缩进结果行。
+
+Klee 风格对齐（ADR-022 修订，2026-11-21）：自定义深浅两套主题
+（theme.py，品牌色取 Klee 深绿 #1E4C35、四级文字色层级）、边框
+圆角化、消息分级配色、Markdown 克制化样式、间距节奏统一。
 """
 
 import asyncio
 import shlex
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 from uuid import uuid4
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -42,6 +48,7 @@ from deity.interfaces.cli.chat_status import ChatStatus
 from deity.interfaces.cli.chat_view_model import ChatViewModel, ToolNode
 from deity.interfaces.cli.plan import build_approved, plan_lines
 from deity.interfaces.tui.approval_bridge import PendingPrompt, TuiApprovalBridge
+from deity.interfaces.tui.theme import apply_deity_theme, palette
 
 _CLI_ONLY_COMMANDS = ("/fork", "/timeline")
 
@@ -67,6 +74,63 @@ AVAILABLE_SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/compact", "查看上下文压缩配置状态"),
     ("/exit", "退出 Deity 工作台"),
 ]
+
+# 输入区下方免责行（Klee 风格对齐 P1-5）：deity 自己的文案。
+_DISCLAIMER = "Deity 是 AI，可能会出错；它会修改工作区文件，重要操作会先征求审批，请核对结果。"
+
+# 等待指示（P1-2）的三点动画帧：被激活的点依次轮动。
+_WAITING_FRAMES = ("●○○", "○●○", "○○●")
+
+
+def greeting_for_hour(hour: int) -> str:
+    """按小时给时间问候语（P1-6）：5–12 早上好、12–17 下午好、17–22 晚上好、其余夜深了。"""
+    if 5 <= hour < 12:
+        return "早上好"
+    if 12 <= hour < 17:
+        return "下午好"
+    if 17 <= hour < 22:
+        return "晚上好"
+    return "夜深了"
+
+
+class ScrollThrottler:
+    """流式滚动节流（P1-7）：间隔内的请求合并，到期由 flush_due 补滚。
+
+    纯逻辑、无 Textual 依赖（可单测）：request() 返回 True 表示应
+    立即滚动；返回 False 表示本次被合并、置 pending。调用方周期性
+    查 flush_due()，为 True 时执行一次尾随滚动并清 pending。
+    """
+
+    def __init__(self, interval: float = 0.15, clock: Callable[[], float] = time.monotonic) -> None:
+        self._interval = interval
+        self._clock = clock
+        self._last: float | None = None
+        self._pending = False
+
+    def request(self) -> bool:
+        now = self._clock()
+        if self._last is None or now - self._last >= self._interval:
+            self._last = now
+            self._pending = False
+            return True
+        self._pending = True
+        return False
+
+    def flush_due(self) -> bool:
+        if (
+            self._pending
+            and self._last is not None
+            and self._clock() - self._last >= self._interval
+        ):
+            self._last = self._clock()
+            self._pending = False
+            return True
+        return False
+
+    def force(self) -> None:
+        """终态强制滚动前调用：清 pending 并重置节流窗口。"""
+        self._last = self._clock()
+        self._pending = False
 
 
 class ChatInput(TextArea):
@@ -225,7 +289,7 @@ class ToolBlock(Static):
         self,
         node: ToolNode,
         on_toggle: Callable[[str], None],
-        formatter: Callable[[ToolNode], str],
+        formatter: Callable[[ToolNode], str | Text],
         **kwargs: Any,
     ) -> None:
         super().__init__(formatter(node), **kwargs)
@@ -244,117 +308,34 @@ class InteractiveApp(App[None]):
     """Codex / Claude Code 式交互界面：对话区 + 审批面板 + 状态栏 + 输入框。"""
 
     CSS: ClassVar[str] = """
-    Screen {
-        background: #0f1117;
-    }
-    #conversation {
-        height: 1fr;
-        padding: 0 1;
-        background: transparent;
-    }
-    #welcome-header {
-        border: round #3b82f6;
-        background: #181c27;
-        padding: 1 2;
-        margin: 1 1 2 1;
-        max-width: 96;
-        height: auto;
-    }
-    #welcome-emblem {
-        width: 14;
-        color: #60a5fa;
-        text-style: bold;
-        padding: 0 1;
-    }
-    #welcome-text {
-        width: 1fr;
-        padding-left: 1;
-        color: #e2e8f0;
-    }
-    #prompt-panel {
-        display: none;
-        border: round #f59e0b;
-        background: #1c1d27;
-        padding: 1 2;
-        margin: 0 1 1 1;
-    }
-    #prompt-panel.show {
-        display: block;
-    }
-    #prompt-scroll {
-        max-height: 14;
-    }
-    #prompt-buttons {
-        margin-top: 1;
-        height: auto;
-    }
-    #prompt-buttons Button {
-        margin-right: 1;
-    }
-    #cmd-hint {
-        display: none;
-        height: auto;
-        max-height: 6;
-        background: #181c27;
-        border: round #38bdf8;
-        padding: 0 1;
-        margin: 0 1 1 1;
-    }
-    #cmd-hint.show {
-        display: block;
-    }
-    #input-row {
-        min-height: 3;
-        max-height: 8;
-        height: auto;
-        border: round #3b82f6;
-        background: #181c27;
-        padding: 0 1;
-        margin: 0 1 1 1;
-    }
-    #input-prompt {
-        width: 2;
-        padding: 1 0 0 0;
-        color: #38bdf8;
-        text-style: bold;
-    }
-    #input {
-        border: none;
-        background: transparent;
-        min-height: 1;
-        max-height: 6;
-        height: auto;
-        width: 1fr;
-    }
-    #status-bar {
-        height: 1;
-        background: #12151e;
-        color: #94a3b8;
-        padding: 0 1;
-    }
-    .msg-user {
-        background: #181c27;
-        border-left: thick #38bdf8;
-        padding: 0 1;
-        margin: 1 1;
-        color: #f1f5f9;
-    }
-    .msg-system {
-        color: #94a3b8;
-        margin: 1 1;
-        padding: 0 1;
-    }
-    .msg-assistant {
-        padding: 0 1;
-        margin: 1 1;
-    }
-    .msg-tool {
-        padding: 0 1;
-        margin: 0 1;
-    }
-    .msg-tool:hover {
-        background: #1e2333;
-    }
+    #conversation { height: 1fr; padding: 0 1; }
+    #welcome-header { border: round $primary; padding: 0 1; height: auto; margin-bottom: 1; }
+    #welcome-emblem { width: auto; padding-right: 2; color: $accent; text-style: bold; }
+    #welcome-text { width: 1fr; }
+    #prompt-panel { display: none; border: round $warning; padding: 0 1; }
+    #prompt-panel.show { display: block; }
+    #prompt-scroll { max-height: 14; }
+    #prompt-buttons Button:hover { background: $hover-bg; }
+    #cmd-hint { display: none; height: auto; max-height: 5; background: $panel; border: round $primary; padding: 0 1; margin-bottom: 1; }
+    #cmd-hint.show { display: block; }
+    #input-row { min-height: 3; max-height: 8; height: auto; border: round $primary; }
+    #input-prompt { width: 2; padding: 1 0 0 1; color: $accent; text-style: bold; }
+    #input { border: none; min-height: 1; max-height: 6; height: auto; width: 1fr; }
+    #status-bar { height: 1; background: $panel; padding: 0 1; }
+    .msg-user { margin-top: 1; text-style: bold; background: $user-bg; padding: 0 1; }
+    .msg-system { color: $text-tertiary; }
+    .msg-error { color: $error; border: round $error; padding: 0 1; margin: 1 0; }
+    .msg-waiting { color: $text-secondary; padding-left: 1; }
+    .msg-metrics { color: $text-quaternary; }
+    .msg-tool { padding-left: 1; }
+    .msg-assistant { margin-bottom: 1; }
+    #input-row.streaming { border: round $text-tertiary; }
+    #input-hint { height: 1; padding: 0 1; color: $text-tertiary; }
+    #disclaimer { height: 1; padding: 0 1; color: $text-quaternary; }
+    .msg-tool:hover { background: $boost; }
+    MarkdownHeader { margin: 1 0 0 0; text-style: bold; }
+    MarkdownFence { background: $code-bg; border-left: solid $accent; margin: 1 0; }
+    MarkdownBlockQuote { color: $text-secondary; }
     """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
@@ -373,8 +354,12 @@ class InteractiveApp(App[None]):
         session_id: str | None = None,
         config_path: Path | None = None,
         initial_task: str | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         super().__init__()
+        theme_name = apply_deity_theme(self)
+        self._palette = palette(dark=theme_name == "deity-dark")
+        self._clock = clock or datetime.now
         self.service = service
         self._bridge = bridge
         self._workspace = workspace
@@ -391,6 +376,9 @@ class InteractiveApp(App[None]):
         self._text_block: Markdown | None = None
         self._rendered_text_len = 0
         self._tool_blocks: dict[str, Static] = {}
+        self._scroller = ScrollThrottler()
+        self._waiting_block: Static | None = None
+        self._waiting_frame = 0
         self._prompt_handler: Any = None
         self._confirm_futures: list[asyncio.Future[bool]] = []
         self.title = "Deity"
@@ -416,6 +404,8 @@ class InteractiveApp(App[None]):
         with Horizontal(id="input-row"):
             yield Static("❯", id="input-prompt")
             yield ChatInput(id="input")
+        yield Static("", id="input-hint")
+        yield Static(_DISCLAIMER, id="disclaimer")
         yield Static("", id="status-bar")
         yield Footer()
 
@@ -424,6 +414,8 @@ class InteractiveApp(App[None]):
         self._hide_prompt()
         self._refresh_status()
         self.set_interval(0.5, self._refresh_status)
+        self.set_interval(0.05, self._scroll_tick)
+        self.set_interval(0.35, self._tick_waiting)
         self._mount_welcome()
         if self._initial_task:
             self._submit(self._initial_task)
@@ -434,13 +426,14 @@ class InteractiveApp(App[None]):
         取代原先单独的一行系统欢迎消息，两者合并为这一块，不重复欢迎。
         版本号取包的 __version__（与 pyproject 同步），不硬编码。
         """
+        greeting = greeting_for_hour(self._clock().hour)
         text = (
-            f"[bold white]欢迎来到[/bold white] [bold cyan]Deity v{__version__}[/bold cyan][bold white]，我是你的编程助手。[/bold white]\n"
-            f"[dim]•[/dim] [bold]模型：[/bold][cyan]{self.state.model_name}[/cyan]\n"
-            f"[dim]•[/dim] [bold]工作区：[/bold][dim]{self._workspace}[/dim]\n"
-            f"[dim]────────────────────────────────────────────────[/dim]\n"
-            f"[bold green]Enter[/bold green] [dim]提交任务[/dim] · [bold green]/help[/bold green] [dim]查看命令[/dim] · "
-            f"[bold green]Shift+Tab[/bold green] [dim]切换模式[/dim] · [bold green]Ctrl+C[/bold green] [dim]取消[/dim] · [bold green]Ctrl+Q[/bold green] [dim]退出[/dim]"
+            f"{greeting}，欢迎来到 Deity v{__version__}，我是你的编程助手。\n"
+            f"模型：{self.state.model_name}\n"
+            f"工作区：{self._workspace}\n"
+            "今天想让我帮你做什么？\n"
+            "Enter 提交任务 · /help 查看命令\n"
+            "Shift+Tab 切换模式 · Ctrl+C 取消 · Ctrl+Q 退出"
         )
         header = Horizontal(
             Static(_WELCOME_EMBLEM, id="welcome-emblem"),
@@ -448,25 +441,93 @@ class InteractiveApp(App[None]):
             id="welcome-header",
         )
         self._conversation.mount(header)
-        self._conversation.scroll_end(animate=False)
+        self._scroll_end(force=True)
 
     # -- 对话区 -----------------------------------------------------------
     @property
     def _conversation(self) -> VerticalScroll:
         return self.query_one("#conversation", VerticalScroll)
 
+    def _scroll_end(self, *, force: bool = False) -> None:
+        """滚动跟随（P1-7 节流版）：流式期合并高频请求，终态强制到底。
+
+        用户手动上滚超过一屏时不抢位置（等其滚回底部附近再恢复
+        跟随）；force 用于终态/用户刚提交等必须到底的时点。
+        """
+        conversation = self._conversation
+        if force:
+            self._scroller.force()
+            conversation.scroll_end(animate=False)
+            return
+        if conversation.max_scroll_y - conversation.scroll_y > conversation.size.height:
+            return
+        if self._scroller.request():
+            conversation.scroll_end(animate=False)
+
+    def _scroll_tick(self) -> None:
+        """节流尾随滚动：被合并的请求到期后补滚一次（仍尊重上滚）。"""
+        if self._scroller.flush_due():
+            conversation = self._conversation
+            if conversation.max_scroll_y - conversation.scroll_y <= conversation.size.height:
+                conversation.scroll_end(animate=False)
+
     def _append_system(self, text: str) -> None:
         self._conversation.mount(Static(text, classes="msg-system"))
-        self._conversation.scroll_end(animate=False)
+        self._scroll_end()
+
+    def _append_error(self, text: str) -> None:
+        """错误块（P1-3）：error 色圆角边框独立成级，不混系统消息。"""
+        self._conversation.mount(Static(text, classes="msg-error"))
+        self._scroll_end(force=True)
 
     def _append_user(self, text: str) -> None:
         self._conversation.mount(Static(f"❯ {text}", classes="msg-user"))
-        self._conversation.scroll_end(animate=False)
+        self._scroll_end(force=True)
 
     async def _append_assistant_final(self, text: str) -> None:
         block = Markdown(text, classes="msg-assistant")
         await self._conversation.mount(block)
-        self._conversation.scroll_end(animate=False)
+        self._scroll_end(force=True)
+
+    # -- 等待指示（P1-2） ---------------------------------------------------
+    def _show_waiting(self) -> None:
+        """插入等待行：三点轮动 + Thinking...，首个增量到达即撤下。
+
+        注意：事件流没有真实 thinking 内容（P1-0 核查结论），这行
+        只是等待态呈现，不冒充思考原文，与 Klee 的等待态药丸对应。
+        """
+        if self._waiting_block is not None:
+            return
+        self._waiting_frame = 0
+        block = Static(f"{_WAITING_FRAMES[0]} Thinking...", id="waiting-row", classes="msg-waiting")
+        self._waiting_block = block
+        self._conversation.mount(block)
+        self._scroll_end()
+
+    def _tick_waiting(self) -> None:
+        if self._waiting_block is None:
+            return
+        self._waiting_frame = (self._waiting_frame + 1) % len(_WAITING_FRAMES)
+        self._waiting_block.update(f"{_WAITING_FRAMES[self._waiting_frame]} Thinking...")
+
+    def _hide_waiting(self) -> None:
+        if self._waiting_block is not None:
+            self._waiting_block.remove()
+            self._waiting_block = None
+
+    def _append_metrics(self, view: ChatViewModel) -> None:
+        """每轮性能指标行（P1-4）：⚡ 耗时 · 输出 tokens · 工具次数。
+
+        数据取本轮 ViewModel 的状态聚合；usage 缺失时省略 tokens
+        段（降级格式，不编造），与 Klee 的两档格式对应。
+        """
+        status = view.status
+        parts = [f"⚡ {status.elapsed_seconds:.1f}s"]
+        if status.output_tokens is not None:
+            parts.append(f"{status.output_tokens} tokens")
+        parts.append(f"工具 {status.tool_calls} 次")
+        self._conversation.mount(Static(" · ".join(parts), classes="msg-metrics"))
+        self._scroll_end(force=True)
 
     # -- 提交与执行 ---------------------------------------------------------
     def on_chat_input_command_hint_updated(self, message: ChatInput.CommandHintUpdated) -> None:
@@ -522,6 +583,7 @@ class InteractiveApp(App[None]):
         """跑一轮任务：run_stream 事件喂 ChatViewModel 并增量建块。"""
         self._run_active = True
         self._append_user(text)
+        self._show_waiting()
         view = ChatViewModel()
         view.status.context_window_tokens = self.service.context_window_tokens
         self._view = view
@@ -535,6 +597,8 @@ class InteractiveApp(App[None]):
             async for event in stream:
                 self._current_run_id = event.run_id
                 delta = view.apply(event)
+                if delta.text_appended or delta.tool_started is not None:
+                    self._hide_waiting()
                 if delta.text_appended:
                     await self._sync_text_block(view)
                 if delta.tool_started is not None:
@@ -544,10 +608,12 @@ class InteractiveApp(App[None]):
                     self._update_tool_block(delta.tool_completed)
                 if delta.terminal:
                     await self._finish_text_block(view)
+                    self._append_metrics(view)
                 self._refresh_status()
         except (ModelFailure, ProtocolError, BudgetExceeded, ValueError, OSError) as exc:
-            self._append_system(f"运行失败：{run_error_message(exc)}")
+            self._append_error(f"运行失败：{run_error_message(exc)}")
         finally:
+            self._hide_waiting()
             if self._current_run_id is not None:
                 self._last_run_id = self._current_run_id
             self._current_run_id = None
@@ -563,7 +629,7 @@ class InteractiveApp(App[None]):
             self._text_block = Markdown("", classes="msg-assistant")
             await self._conversation.mount(self._text_block)
         await self._text_block.update(segment)
-        self._conversation.scroll_end(animate=False)
+        self._scroll_end()
 
     def _close_text_block(self, view: ChatViewModel) -> None:
         if self._text_block is not None:
@@ -589,7 +655,7 @@ class InteractiveApp(App[None]):
         )
         self._tool_blocks[node.call_id] = block
         self._conversation.mount(block)
-        self._conversation.scroll_end(animate=False)
+        self._scroll_end()
 
     def _update_tool_block(self, node: ToolNode) -> None:
         block = self._tool_blocks.get(node.call_id)
@@ -609,21 +675,40 @@ class InteractiveApp(App[None]):
                 else:
                     block.update(self._tool_line(self._view.tools[call_id]))
 
-    def _tool_line(self, node: ToolNode) -> str:
-        """工具条目（ADR-022 修订，Claude Code 式紧凑排版）。
+    def _tool_line(self, node: ToolNode) -> Text:
+        """工具条目（ADR-022 修订，Claude Code 式紧凑排版；P0 分级配色）。
 
         首行一行式：⏺ 工具名(参数摘要)；完成后结果以 ⎿ 缩进次行呈现
         （状态 + 耗时）；运行中首行尾标「运行中」。展开时（/tools）在
-        结果行后追加完整参数与 call_id。
+        结果行后追加完整参数与 call_id。配色走 theme.palette()：
+        ⏺ 与工具名用品牌绿，⎿ 行用次级色，状态词按结果着色
+        （ok=success、error=error、denied/timeout=warning）。
         """
+        colors = self._palette
         summary = node.arguments_summary() or "—"
-        first = f"⏺ {node.name}({summary})"
+        line = Text()
+        line.append("⏺ ", style=f"bold {colors['accent']}")
+        line.append(node.name, style="bold")
+        line.append(f"({summary})")
         if node.finished_at is None:
-            return f"{first} · 运行中"
-        result = f"  ⎿ {node.status or '完成'} · {node.elapsed(time.monotonic):.1f}s"
+            line.append(" · 运行中", style=colors["tertiary"])
+            return line
+        status = node.status or "完成"
+        status_style = {
+            "ok": colors["success"],
+            "error": colors["error"],
+            "denied": colors["warning"],
+            "timeout": colors["warning"],
+        }.get(status, colors["secondary"])
+        line.append("\n")
+        line.append("  ⎿ ", style=colors["tertiary"])
+        line.append(status, style=status_style)
+        line.append(f" · {node.elapsed(time.monotonic):.1f}s", style=colors["secondary"])
         if node.expanded:
-            return f"{first}\n{result}\n参数：{node.args_text or '—'}（{node.call_id}）"
-        return f"{first}\n{result}"
+            line.append(
+                f"\n参数：{node.args_text or '—'}（{node.call_id}）", style=colors["secondary"]
+            )
+        return line
 
     def _accumulate(self, view: ChatViewModel) -> None:
         """把一轮的计数并入会话级状态（/cost、/status、状态栏的口径）。"""
@@ -837,18 +922,30 @@ class InteractiveApp(App[None]):
         else:
             self._enter_plan()
 
+    def _hint_text(self) -> str:
+        """输入区状态提示（P1-5）：随待审批/运行/模式三类状态切换文案。"""
+        if self._bridge.pending is not None or self._confirm_futures:
+            return "有待决审批 · 请先在上方面板中处理"
+        if self._run_active:
+            return "生成中 · Ctrl+C 停止"
+        mode = self._mode_label()
+        if mode == "计划":
+            return "计划模式 · 输入任务将先生成计划"
+        if mode == "自动接受":
+            return "自动接受模式 · 工具调用将自动批准 · /normal 退出"
+        return "输入任务开始 · Enter 提交 · /help 查看命令"
+
     def _refresh_status(self) -> None:
         try:
             bar = self.query_one("#status-bar", Static)
         except Exception:  # noqa: BLE001 - 未挂载时刷新是空操作
             return
+        try:
+            self.query_one("#input-hint", Static).update(self._hint_text())
+            self.query_one("#input-row").set_class(self._run_active, "streaming")
+        except Exception:  # noqa: BLE001, S110 - 未挂载时刷新是空操作
+            pass
         mode = self._mode_label()
-        badge_style = {
-            "普通": "[bold black on #4ade80] 普通 [/]",
-            "计划": "[bold black on #facc15] 计划 [/]",
-            "自动接受": "[bold white on #ef4444] 自动接受 [/]",
-        }.get(mode, f"[{mode}]")
-
         if self._run_active and self._view is not None:
             status = self._view.status
             current_tool = self._view.current_tool
@@ -858,13 +955,13 @@ class InteractiveApp(App[None]):
                 current_tool=current_tool.name if current_tool is not None else None,
             )
             dots = "." * (int(time.monotonic() * 2) % 4)
-            run_state = f"[bold cyan]⟳ 运行中{dots}[/]"
+            run_state = f"运行中{dots}"
         else:
             line = self.session_status.summary_line(model_name=self.state.model_name, mode=mode)
-            run_state = "[bold green]● 空闲[/]"
-
+            run_state = "空闲"
         bar.update(
-            f"{badge_style} {run_state}  │  {line}  │  [dim]工作区:[/] [white]{self._workspace}[/]  │  [dim]会话:[/] [white]{self.state.session_id[:8]}[/]  │  [dim]{mode}模式 (shift+tab 切换)[/dim]"
+            f"{line} · {run_state} · 工作区 {self._workspace} · 会话 {self.state.session_id[:8]}"
+            f" · {mode}模式 (shift+tab 切换)"
         )
 
     # -- 计划模式 -----------------------------------------------------------
@@ -872,11 +969,13 @@ class InteractiveApp(App[None]):
         """计划模式提交：建计划 → 界面确认 → 脏文件确认 → Build。"""
         self._run_active = True
         self._append_user(text)
+        self._show_waiting()
         self._refresh_status()
         try:
             artifact = await PlanService(self.service).create(
                 text, model_name=self.state.model_name, session_id=self.state.session_id
             )
+            self._hide_waiting()
             self._last_plan_id = artifact.plan_id
             plan_text = "\n".join(plan_lines(artifact, ()))
             self._append_system(f"计划 ID：{artifact.plan_id}\n{plan_text}")
@@ -891,8 +990,9 @@ class InteractiveApp(App[None]):
             result = await build_approved(self.service, artifact.plan_id, allowed)
             await self._append_assistant_final(result.final_text or "无最终回答")
         except (ModelFailure, ProtocolError, BudgetExceeded, ValueError, OSError) as exc:
-            self._append_system(f"运行失败：{run_error_message(exc)}")
+            self._append_error(f"运行失败：{run_error_message(exc)}")
         finally:
+            self._hide_waiting()
             self._run_active = False
             self._refresh_status()
 
@@ -1167,7 +1267,7 @@ class InteractiveApp(App[None]):
                 result = await build_approved(self.service, plan_id, allowed)
                 await self._append_assistant_final(result.final_text or "无最终回答")
             except (ModelFailure, ProtocolError, BudgetExceeded, ValueError, OSError) as exc:
-                self._append_system(f"运行失败：{run_error_message(exc)}")
+                self._append_error(f"运行失败：{run_error_message(exc)}")
             finally:
                 self._run_active = False
                 self._refresh_status()
@@ -1202,7 +1302,7 @@ class InteractiveApp(App[None]):
                 OSError,
                 KeyError,
             ) as exc:
-                self._append_system(f"运行失败：{run_error_message(exc)}")
+                self._append_error(f"运行失败：{run_error_message(exc)}")
             finally:
                 self._current_run_id = None
                 self._run_active = False
