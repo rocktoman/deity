@@ -308,6 +308,15 @@ class InteractiveApp(App[None]):
     """Codex / Claude Code 式交互界面：对话区 + 审批面板 + 状态栏 + 输入框。"""
 
     CSS: ClassVar[str] = """
+    #main-row { height: 1fr; }
+    #sidebar { width: 36; display: none; border: round $primary; padding: 0 1; }
+    #sidebar.show { display: block; }
+    #sidebar-title { text-style: bold; color: $accent; }
+    #sidebar-sessions { height: 1fr; }
+    .session-row { width: 1fr; }
+    .session-row:hover { background: $hover-bg; }
+    .session-row.current { color: $accent; }
+    #sidebar-model { color: $text-tertiary; }
     #conversation { height: 1fr; padding: 0 1; }
     #welcome-header { border: round $primary; padding: 0 1; height: auto; margin-bottom: 1; }
     #welcome-emblem { width: auto; padding-right: 2; color: $accent; text-style: bold; }
@@ -340,6 +349,7 @@ class InteractiveApp(App[None]):
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("shift+tab", "cycle_mode", "切换模式"),
+        Binding("ctrl+b", "toggle_sidebar", "会话侧栏"),
         Binding("ctrl+c", "cancel_run", "取消"),
         Binding("ctrl+q", "quit", "退出"),
     ]
@@ -376,6 +386,7 @@ class InteractiveApp(App[None]):
         self._text_block: Markdown | None = None
         self._rendered_text_len = 0
         self._tool_blocks: dict[str, Static] = {}
+        self._sidebar_map: dict[str, str] = {}
         self._scroller = ScrollThrottler()
         self._waiting_block: Static | None = None
         self._waiting_frame = 0
@@ -389,7 +400,13 @@ class InteractiveApp(App[None]):
     # -- 布局 -------------------------------------------------------------
     def compose(self) -> ComposeResult:
         yield Header()
-        yield VerticalScroll(id="conversation")
+        with Horizontal(id="main-row"):
+            with Vertical(id="sidebar"):
+                yield Static("会话", id="sidebar-title")
+                yield VerticalScroll(id="sidebar-sessions")
+                yield Static("", id="sidebar-model")
+                yield Button("运行 doctor", id="btn-sidebar-doctor")
+            yield VerticalScroll(id="conversation")
         with Vertical(id="prompt-panel"):
             with VerticalScroll(id="prompt-scroll"):
                 yield Static("", id="prompt-text")
@@ -816,9 +833,66 @@ class InteractiveApp(App[None]):
             self.query_one("#input", ChatInput).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id
+        # 侧栏按钮优先于审批 handler 路由：侧栏开着时误触不能当成审批答案。
+        if bid is not None and bid in self._sidebar_map:
+            self._sidebar_click(self._sidebar_map[bid])
+            return
+        if bid == "btn-sidebar-doctor":
+            self.run_worker(self._dispatch_command("/doctor"), group="command", exclusive=False)
+            return
         handler = self._prompt_handler
-        if handler is not None and event.button.id is not None:
-            handler(event.button.id)
+        if handler is not None and bid is not None:
+            handler(bid)
+
+    # -- 会话侧栏（P2-2 / D3：默认隐藏、Ctrl+B 呼出） ------------------------
+    def action_toggle_sidebar(self) -> None:
+        sidebar = self.query_one("#sidebar")
+        if sidebar.has_class("show"):
+            sidebar.remove_class("show")
+            return
+        if self.size.width < 100:
+            self._append_system(
+                "窗口太窄（需 ≥100 列），无法打开会话侧栏；可用 /sessions 查看与切换会话。"
+            )
+            return
+        sidebar.add_class("show")
+        self.run_worker(self._fill_sidebar(), group="sidebar", exclusive=False)
+
+    async def _fill_sidebar(self) -> None:
+        container = self.query_one("#sidebar-sessions", VerticalScroll)
+        await container.remove_children()
+        self._sidebar_map = {}
+        repo = await SQLiteSessionRepository.open(self.service.db_path)
+        try:
+            items = await repo.sessions(include_archived=True)
+        finally:
+            await repo.close()
+        if not items:
+            container.mount(Static("（暂无已存储会话）直接输入任务即可开始新会话。"))
+        for index, item in enumerate(items):
+            current = item["id"] == self.state.session_id
+            title = f" {item['title'][:16]}" if item["title"] else ""
+            button = Button(
+                f"{'● ' if current else ''}{item['id'][:8]}{title}",
+                id=f"session-row-{index}",
+                classes="session-row current" if current else "session-row",
+            )
+            self._sidebar_map[f"session-row-{index}"] = item["id"]
+            container.mount(button)
+        self.query_one("#sidebar-model", Static).update(f"模型：{self.state.model_name}")
+
+    def _sidebar_click(self, target: str) -> None:
+        if self._run_active:
+            self._append_system("有 Run 在运行，结束后再切换会话。")
+            return
+        self._apply_session_switch(target)
+        self.run_worker(self._fill_sidebar(), group="sidebar", exclusive=False)
+
+    def _apply_session_switch(self, target: str) -> None:
+        self.state.session_id = target
+        self._append_system(f"已切换会话：{target[:8]}")
+        self._refresh_status()
 
     async def _confirm(
         self, text: str, *, confirm_label: str = "确认", cancel_label: str = "取消"
@@ -933,7 +1007,7 @@ class InteractiveApp(App[None]):
             return "计划模式 · 输入任务将先生成计划"
         if mode == "自动接受":
             return "自动接受模式 · 工具调用将自动批准 · /normal 退出"
-        return "输入任务开始 · Enter 提交 · /help 查看命令"
+        return "输入任务开始 · Enter 提交 · Shift+Tab 切换模式 · /help 查看命令"
 
     def _refresh_status(self) -> None:
         try:
@@ -946,23 +1020,14 @@ class InteractiveApp(App[None]):
         except Exception:  # noqa: BLE001, S110 - 未挂载时刷新是空操作
             pass
         mode = self._mode_label()
-        if self._run_active and self._view is not None:
-            status = self._view.status
-            current_tool = self._view.current_tool
-            line = status.summary_line(
-                model_name=self.state.model_name,
-                mode=mode,
-                current_tool=current_tool.name if current_tool is not None else None,
-            )
+        # 状态栏瘦身（P2-5 / D5）：只留 模型 · 模式 · 运行态 三项；
+        # token/上下文/工具/工作区/会话统计回归 /status 详情。
+        if self._run_active:
             dots = "." * (int(time.monotonic() * 2) % 4)
             run_state = f"运行中{dots}"
         else:
-            line = self.session_status.summary_line(model_name=self.state.model_name, mode=mode)
             run_state = "空闲"
-        bar.update(
-            f"{line} · {run_state} · 工作区 {self._workspace} · 会话 {self.state.session_id[:8]}"
-            f" · {mode}模式 (shift+tab 切换)"
-        )
+        bar.update(f"模型 {self.state.model_name} · {mode}模式 · {run_state}")
 
     # -- 计划模式 -----------------------------------------------------------
     async def _plan_flow(self, text: str) -> None:
@@ -1158,6 +1223,11 @@ class InteractiveApp(App[None]):
             f"Token：{status.token_text()}",
             f"耗时：{status.elapsed_seconds:.1f}s",
         ]
+        context_text = status.context_text()
+        if context_text is not None:
+            # 上下文占用自状态栏瘦身后回归 /status 详情（P2-5）；
+            # context_text 自带「上下文 x/y」文案，直接入列。
+            lines.append(context_text)
         repo = await SQLiteSessionRepository.open(self.service.db_path)
         try:
             messages = await repo.messages(self.state.session_id)
@@ -1170,7 +1240,9 @@ class InteractiveApp(App[None]):
     def _command_tools(self, prompt: str) -> None:
         view = self._view
         if view is None or not view.tools:
-            self._append_system("上一轮没有工具调用记录。")
+            self._append_system(
+                "上一轮没有工具调用记录。先完成一轮会用到工具的任务，再用 /tools 查看。"
+            )
             return
         parts = prompt.split(maxsplit=1)
         targets = (
@@ -1219,12 +1291,10 @@ class InteractiveApp(App[None]):
             if not any(item["id"] == target for item in items):
                 self._append_system(f"未知会话：{target}")
                 return
-            self.state.session_id = target
-            self._append_system(f"已切换会话：{target[:8]}")
-            self._refresh_status()
+            self._apply_session_switch(target)
             return
         if not items:
-            self._append_system("（暂无已存储会话）")
+            self._append_system("（暂无已存储会话）直接在下方输入任务即可开始新会话。")
             return
         lines = []
         for item in items:

@@ -131,7 +131,8 @@ async def test_interactive_starts_and_quits(tmp_path: Path) -> None:
         assert "欢迎来到 Deity" in _conversation_text(app)
         bar = _status_bar(app)
         assert "fake" in bar
-        assert str(tmp_path) in bar
+        # 工作区随状态栏瘦身移出状态栏（P2-5）；欢迎头里仍有（见欢迎头用例）。
+        assert str(tmp_path) not in bar
         assert "空闲" in bar
         await pilot.press("ctrl+q")
     assert app.is_running is False
@@ -273,7 +274,8 @@ async def test_interactive_cancel_stops_run(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_interactive_status_bar_shows_context_and_tokens(tmp_path: Path) -> None:
+async def test_interactive_status_command_shows_context_and_tokens(tmp_path: Path) -> None:
+    """P2-5 状态栏瘦身后：token/上下文占用改由 /status 详情呈现。"""
     pytest.importorskip("textual")
     turns = [
         [
@@ -288,8 +290,12 @@ async def test_interactive_status_bar_shows_context_and_tokens(tmp_path: Path) -
         await _wait_until(lambda: not app._run_active)
         await pilot.pause()
         bar = _status_bar(app)
-        assert "120/30 tokens" in bar, bar
-        assert "上下文 120/1000" in bar, bar
+        assert "tokens" not in bar
+        await _submit(app, pilot, "/status")
+        await pilot.pause()
+        text = _conversation_text(app)
+        assert "120/30 tokens" in text
+        assert "上下文 120/1000" in text
         await pilot.press("ctrl+q")
 
 
@@ -501,8 +507,10 @@ async def test_interactive_status_bar_sits_below_input(tmp_path: Path) -> None:
         ordered_ids = [w.id for w in app.screen.walk_children(with_self=False) if w.id]
         assert ordered_ids.index("status-bar") > ordered_ids.index("input")
         bar = _status_bar(app)
-        assert "普通模式 (shift+tab 切换)" in bar
+        assert "普通模式" in bar
         assert "fake" in bar
+        # (shift+tab 切换) 提示随瘦身移到输入区状态提示行（P2-5）。
+        assert "Shift+Tab 切换模式" in str(app.query_one("#input-hint").render())
         await pilot.press("ctrl+q")
 
 
@@ -513,12 +521,12 @@ async def test_interactive_shift_tab_cycles_modes(tmp_path: Path) -> None:
     bridge = app._bridge
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert "普通模式 (shift+tab 切换)" in _status_bar(app)
+        assert "普通模式" in _status_bar(app)
         # 普通 → 计划（与 /plan 同一启用检查与状态转移）。
         await pilot.press("shift+tab")
         await _wait_until(lambda: app.state.plan_mode)
         await pilot.pause()
-        assert "计划模式 (shift+tab 切换)" in _status_bar(app)
+        assert "计划模式" in _status_bar(app)
         # 计划 → 自动接受：仍走审批桥显式确认，确认前模式不变。
         await pilot.press("shift+tab")
         await _wait_until(lambda: bridge.pending is not None)
@@ -530,13 +538,13 @@ async def test_interactive_shift_tab_cycles_modes(tmp_path: Path) -> None:
         await _wait_until(lambda: bridge.controller.mode == "auto")
         await pilot.pause()
         assert not app.state.plan_mode  # 确认通过后才离开计划模式
-        assert "自动接受模式 (shift+tab 切换)" in _status_bar(app)
+        assert "自动接受模式" in _status_bar(app)
         # 自动接受 → 普通：一轮循环回到起点。
         await pilot.press("shift+tab")
         await _wait_until(lambda: bridge.controller.mode != "auto")
         await pilot.pause()
         assert not app.state.plan_mode
-        assert "普通模式 (shift+tab 切换)" in _status_bar(app)
+        assert "普通模式" in _status_bar(app)
         await pilot.press("ctrl+q")
 
 
@@ -558,7 +566,7 @@ async def test_interactive_shift_tab_auto_cancel_stays_in_plan(tmp_path: Path) -
         await pilot.pause()
         assert bridge.controller.mode != "auto"
         assert app.state.plan_mode
-        assert "计划模式 (shift+tab 切换)" in _status_bar(app)
+        assert "计划模式" in _status_bar(app)
         await pilot.press("ctrl+q")
 
 
@@ -782,6 +790,68 @@ async def test_interactive_welcome_greeting_by_clock(tmp_path: Path) -> None:
         text = _conversation_text(evening)
         assert "晚上好" in text
         assert "今天想让我帮你做什么？" in text
+        await pilot.press("ctrl+q")
+
+
+# -- Klee 风格对齐 P2：会话侧栏 --
+
+
+@pytest.mark.asyncio
+async def test_interactive_sidebar_toggle_and_current_session(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    turns = [[ModelEvent("text_delta", text="完成"), ModelEvent("message_completed")]]
+    app = _make_app(tmp_path, FakeModel(turns))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit(app, pilot, "建会话的任务")
+        await _wait_until(lambda: not app._run_active)
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar")
+        assert not sidebar.has_class("show")  # 默认隐藏（D3）
+        await pilot.press("ctrl+b")
+        await _wait_until(lambda: len(app.query(".session-row")) >= 1)
+        await pilot.pause()
+        assert sidebar.has_class("show")
+        rows = app.query(".session-row")
+        assert len(rows) == 1
+        assert rows[0].has_class("current")
+        assert "●" in str(rows[0].label)
+        assert app.state.session_id[:8] in str(rows[0].label)
+        assert "模型：fake" in str(app.query_one("#sidebar-model").render())
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert not sidebar.has_class("show")
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_sidebar_refused_when_narrow(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert not app.query_one("#sidebar").has_class("show")
+        assert "窗口太窄" in _conversation_text(app)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_sidebar_row_hover_feedback(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    turns = [[ModelEvent("text_delta", text="完成"), ModelEvent("message_completed")]]
+    app = _make_app(tmp_path, FakeModel(turns))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit(app, pilot, "建会话的任务")
+        await _wait_until(lambda: not app._run_active)
+        await pilot.press("ctrl+b")
+        await _wait_until(lambda: len(app.query(".session-row")) >= 1)
+        row = app.query(".session-row")[0]
+        before = row.styles.background
+        await pilot.hover(row)
+        await pilot.pause()
+        # hover 反馈（P2-1）：行背景切到主题 hover 底色。
+        assert row.styles.background != before
         await pilot.press("ctrl+q")
 
 
