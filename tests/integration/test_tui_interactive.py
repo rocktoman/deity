@@ -66,6 +66,7 @@ def _make_app(
     context_window_tokens: int | None = None,
     initial_task: str | None = None,
     plan_enabled: bool = False,
+    clock: object = None,
 ) -> InteractiveApp:
     bridge = TuiApprovalBridge(workspace=tmp_path)
     service = RunService(
@@ -85,6 +86,7 @@ def _make_app(
         model_name="fake",
         workspace=tmp_path,
         initial_task=initial_task,
+        clock=clock,  # type: ignore[arg-type]
     )
 
 
@@ -671,6 +673,115 @@ async def test_interactive_markdown_fence_rendered(tmp_path: Path) -> None:
         # 代码块内容在 MarkdownFence.code 上（渲染为语法高亮，不走纯文本）。
         assert "print('hi')" in fences[0].code  # type: ignore[attr-defined]
         assert "标题" in _conversation_text(app)
+        await pilot.press("ctrl+q")
+
+
+# -- Klee 风格对齐 P1：等待指示 / 错误块 / 指标行 / 输入提示 / 问候语 --
+
+
+class SlowStartModel:
+    """延迟后才吐第一个事件（等待指示测试用）。"""
+
+    def __init__(self, delay: float = 1.2) -> None:
+        self.delay = delay
+
+    async def stream(self, request: object):  # type: ignore[no-untyped-def]
+        await asyncio.sleep(self.delay)
+        yield ModelEvent("text_delta", text="慢启动完成")
+        yield ModelEvent("message_completed")
+
+
+@pytest.mark.asyncio
+async def test_interactive_waiting_indicator_lifecycle(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, SlowStartModel())
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "慢任务")
+        await _wait_until(lambda: len(app.query("#waiting-row")) == 1)
+        waiting = str(app.query_one("#waiting-row").render())
+        assert "Thinking..." in waiting
+        await _wait_until(lambda: not app._run_active)
+        await pilot.pause()
+        # 首个增量到达后等待行撤下，不留在消息流里。
+        assert len(app.query("#waiting-row")) == 0
+        assert "慢启动完成" in _conversation_text(app)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_error_block_for_unknown_resume(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "/resume no-such-run")
+        await _wait_until(lambda: len(app.query(".msg-error")) >= 1)
+        await pilot.pause()
+        error_text = str(app.query(".msg-error")[0].render())
+        assert "运行失败" in error_text
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_metrics_line_after_run(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    turns = [
+        [
+            ModelEvent("text_delta", text="回答"),
+            ModelEvent("usage", input_tokens=120, output_tokens=30),
+            ModelEvent("message_completed"),
+        ]
+    ]
+    app = _make_app(tmp_path, FakeModel(turns))
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "带用量的任务")
+        await _wait_until(lambda: not app._run_active)
+        await pilot.pause()
+        metrics = app.query(".msg-metrics")
+        assert len(metrics) == 1
+        line = str(metrics[0].render())
+        assert "⚡" in line
+        assert "30 tokens" in line
+        assert "工具 0 次" in line
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_input_hint_states(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, HangingModel())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        hint = str(app.query_one("#input-hint").render())
+        assert "输入任务开始" in hint
+        assert "可能会出错" in str(app.query_one("#disclaimer").render())
+        await _submit(app, pilot, "慢任务")
+        await _wait_until(lambda: app._run_active)
+        await pilot.pause()
+        app._refresh_status()
+        hint = str(app.query_one("#input-hint").render())
+        assert "生成中" in hint
+        assert app.query_one("#input-row").has_class("streaming")
+        await pilot.press("ctrl+c")
+        await _wait_until(lambda: not app._run_active)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_welcome_greeting_by_clock(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    from datetime import datetime
+
+    morning = _make_app(tmp_path, FakeModel([]), clock=lambda: datetime(2026, 1, 1, 9, 0))
+    async with morning.run_test() as pilot:
+        await pilot.pause()
+        assert "早上好" in _conversation_text(morning)
+        await pilot.press("ctrl+q")
+    evening = _make_app(tmp_path, FakeModel([]), clock=lambda: datetime(2026, 1, 1, 20, 0))
+    async with evening.run_test() as pilot:
+        await pilot.pause()
+        text = _conversation_text(evening)
+        assert "晚上好" in text
+        assert "今天想让我帮你做什么？" in text
         await pilot.press("ctrl+q")
 
 
