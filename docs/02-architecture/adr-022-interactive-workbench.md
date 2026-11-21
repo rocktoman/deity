@@ -58,3 +58,12 @@
 ## 2026-11-22 修订：Ctrl+C 空闲退出
 
 用户反馈：不希望用 Ctrl+Q 退出，希望 Ctrl+C 能退出。工作台 Ctrl+C 语义由「取消当前 Run、无 Run 时不误退」改为分级处理（`action_cancel_run`）：待决确认面板（计划构建/自动接受确认）打开时先取消确认；Run 进行中取消 Run（待决审批仍先拒绝并连带取消，与此前一致）；完全空闲时退出应用，清理与 `action_quit` 在空闲态等价。Esc 保持只取消不退出（输入框内 Esc 与 Ctrl+C 不再同路：`CancelRequested` 携带按键名分流）。Ctrl+Q 退出保留不变。欢迎头、/help 与 README 的按键提示同步更新为「Ctrl+C 取消/退出」。
+
+## 2026-11-22 修订：模型失败呈现诊断细节
+
+用户在真机使用中撞到可诊断性缺陷：模型调用失败时界面只显示失败代码（如 `model_http`），HTTP 状态码与服务端错误信息被适配器丢弃，用户无从自查是模型名写错、端点不对还是服务不可用。本修订给既有失败类型加可选诊断字段，不改事件协议、配置格式与 SQLite schema：
+
+1. `ModelFailure` 新增可选字段 `detail: str | None`（关键字参数，默认 None，构造兼容）；`str(exc)` 仍为 code 本身，依赖该语义的代码不变。
+2. 两个模型适配器（OpenAI 兼容 / Anthropic）统一填充 detail，提取与脱敏规则收敛在 `adapters/model/_errors.py` 单点实现：状态类错误（APIStatusError）取 `HTTP <状态码>` + 服务端消息摘要——消息只取 SDK 已从响应体提取的 message 字段，空白折叠（去换行）后截断至 200 字符；连接类错误（APIConnectionError / APITimeoutError）只取异常类型名，不取异常消息（传输层消息可能含代理/URL 等本地网络细节）。
+3. **sanitized 边界**：detail 绝不包含 API key、请求头、完整请求体；拿不准的字段宁可不取。服务端消息属于服务端返回文本，截断与折叠防止其撑爆界面或借换行伪造界面内容。
+4. 呈现：`run_error_message` 对带 detail 的 ModelFailure 返回 `代码（detail）`，TUI 与行式 CLI 共用同一出口；无 detail 时与此前完全一致。

@@ -6,6 +6,7 @@ from typing import Any, cast
 import httpx2
 from anthropic import APIConnectionError, APIStatusError, APITimeoutError, AsyncAnthropic
 
+from deity.adapters.model._errors import connection_error_detail, status_error_detail
 from deity.core.contracts import ModelCapabilities, ModelEvent, ModelRequest
 from deity.core.runtime import ModelFailure
 
@@ -84,9 +85,14 @@ class AnthropicProvider:
                 code,
                 retryable=status == 429 or status in {500, 502, 503, 504},
                 retry_after=retry_after,
+                detail=status_error_detail(status, exc.message),
             ) from None
-        except (APIConnectionError, APITimeoutError):
-            raise ModelFailure("model_connection", retryable=True) from None
+        except (APIConnectionError, APITimeoutError) as exc:
+            raise ModelFailure(
+                "model_connection",
+                retryable=True,
+                detail=connection_error_detail(exc),
+            ) from None
 
     @staticmethod
     def _messages(messages: tuple[dict[str, Any], ...]) -> tuple[list[dict[str, Any]], str]:

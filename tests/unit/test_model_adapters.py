@@ -2,8 +2,12 @@ from types import SimpleNamespace as NS
 
 import httpx2
 import pytest
+from anthropic import APIConnectionError as AnthropicConnectionError
 from anthropic import APIStatusError as AnthropicStatusError
+from anthropic import APITimeoutError as AnthropicTimeoutError
+from openai import APIConnectionError as OpenAIConnectionError
 from openai import APIStatusError as OpenAIStatusError
+from openai import APITimeoutError as OpenAITimeoutError
 
 from deity.adapters.model.anthropic import AnthropicProvider
 from deity.adapters.model.openai_compatible import OpenAICompatibleProvider
@@ -194,3 +198,99 @@ async def test_sdk_status_is_classified(protocol: str, status: int, retryable: b
         ]
     assert error.value.retryable is retryable
     assert "sample" not in str(error.value)
+
+
+def _provider_raising(protocol: str, error: Exception):
+    """构造一个 create() 恒抛指定异常的 provider（密钥用可辨识假值）。"""
+
+    async def create(**kwargs):
+        raise error
+
+    provider = (
+        OpenAICompatibleProvider(api_key="sk-test-secret", model="test")
+        if protocol == "openai"
+        else AnthropicProvider(api_key="sk-test-secret", model="test")
+    )
+    if protocol == "openai":
+        provider.client = NS(chat=NS(completions=NS(create=create)))
+    else:
+        provider.client = NS(messages=NS(create=create))
+    return provider
+
+
+async def _capture_failure(provider) -> ModelFailure:
+    with pytest.raises(ModelFailure) as captured:
+        [
+            event
+            async for event in provider.stream(
+                ModelRequest("test", ({"role": "user", "content": "hi"},))
+            )
+        ]
+    return captured.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+async def test_sdk_status_error_detail_has_status_and_server_message(protocol: str) -> None:
+    error_type = OpenAIStatusError if protocol == "openai" else AnthropicStatusError
+    response = httpx2.Response(404, request=httpx2.Request("POST", "https://example.test"))
+    server_message = "The model `deepseek-v4-flash` does not exist"
+    failure = await _capture_failure(
+        _provider_raising(
+            protocol,
+            error_type(
+                server_message,
+                response=response,
+                body={"error": {"message": server_message}},
+            ),
+        )
+    )
+    assert failure.code == "model_http"
+    assert str(failure) == "model_http"
+    assert failure.detail == f"HTTP 404: {server_message}"
+    assert "sk-test-secret" not in failure.detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+async def test_sdk_status_error_detail_is_sanitized(protocol: str) -> None:
+    error_type = OpenAIStatusError if protocol == "openai" else AnthropicStatusError
+    response = httpx2.Response(400, request=httpx2.Request("POST", "https://example.test"))
+    failure = await _capture_failure(
+        _provider_raising(
+            protocol,
+            error_type("bad\nrequest\r\n" + "x" * 500, response=response, body=None),
+        )
+    )
+    assert failure.code == "model_http"
+    assert failure.detail is not None
+    assert "\n" not in failure.detail
+    assert "\r" not in failure.detail
+    assert failure.detail.startswith("HTTP 400: bad request ")
+    assert len(failure.detail) <= len("HTTP 400: ") + 200
+    assert "sk-test-secret" not in failure.detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+@pytest.mark.parametrize("kind", ["connection", "timeout"])
+async def test_sdk_connection_error_detail_is_type_name(protocol: str, kind: str) -> None:
+    request = httpx2.Request("POST", "https://example.test")
+    if protocol == "openai":
+        error = (
+            OpenAIConnectionError(request=request)
+            if kind == "connection"
+            else OpenAITimeoutError(request=request)
+        )
+        expected = "APIConnectionError" if kind == "connection" else "APITimeoutError"
+    else:
+        error = (
+            AnthropicConnectionError(request=request)
+            if kind == "connection"
+            else AnthropicTimeoutError(request=request)
+        )
+        expected = "APIConnectionError" if kind == "connection" else "APITimeoutError"
+    failure = await _capture_failure(_provider_raising(protocol, error))
+    assert failure.code == "model_connection"
+    assert failure.detail == expected
+    assert "sk-test-secret" not in failure.detail
