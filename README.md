@@ -149,7 +149,7 @@ uv sync --extra tui        # 安装 Textual（可选 extra，不进主依赖）
 deity                      # 进入交互工作台
 ```
 
-工作台按键：`Enter` 提交、`Ctrl+J` 换行、首/末行 `↑`/`↓` 输入历史、`Shift+Tab` 循环切换模式（普通 → 计划 → 自动接受，输入框下方状态行实时显示当前模式）、`Ctrl+C`/`Esc` 取消当前 Run、`Ctrl+Q` 退出；斜杠命令支持 `/help /status /cost /tools /clear /compact /plan /build /normal /model /auto /sessions /resume /doctor /exit`（语义与行式一致），`/skill /mcp /fork /timeline` 请在行式 CLI 使用。
+工作台按键：`Enter` 提交、`Ctrl+J` 换行、首/末行 `↑`/`↓` 输入历史、`Shift+Tab` 循环切换模式（普通 → 计划 → 自动接受，输入框下方状态行实时显示当前模式）、`Ctrl+C` 取消当前 Run（空闲时按 `Ctrl+C` 退出）、`Esc` 取消当前 Run、`Ctrl+Q` 退出；斜杠命令支持 `/help /status /cost /tools /clear /compact /plan /build /normal /model /auto /sessions /resume /doctor /exit`（语义与行式一致），`/skill /mcp /fork /timeline` 请在行式 CLI 使用。
 
 监视台保留：`deity tui --run-id <id>` 经 `ClientService` 接入已有 Run（可跨进程），键位 `q` 退出、`a` 批准首个待决审批、`d` 拒绝、`c` 取消、`r` 恢复。详见 [ADR-022](docs/02-architecture/adr-022-interactive-workbench.md) 与 [V0.8 使用说明](docs/03-development/v0.8-usage.md)。
 

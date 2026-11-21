@@ -9,7 +9,7 @@
 
 按键：Enter 提交、Ctrl+J/Shift+Enter 换行、首/末行 ↑/↓ 走输入历史、
 Shift+Tab 循环切换模式（普通 → 计划 → 自动接受）、Ctrl+C 或 Esc
-取消当前 Run、Ctrl+Q 退出。
+取消当前 Run（空闲时退出）、Esc 取消当前 Run、Ctrl+Q 退出。
 
 观感与交互对齐 Claude Code（ADR-022 修订，2026-11-17）：启动欢迎头
 （神之眼徽记 + 版本/模型/工作区，边框块）、带 ❯ 提示的边框输入框、
@@ -144,7 +144,11 @@ class ChatInput(TextArea):
             self.text = text
 
     class CancelRequested(Message):
-        """输入框内按 Ctrl+C / Esc：请求取消当前 Run。"""
+        """输入框内按 Ctrl+C / Esc：请求取消当前 Run（Ctrl+C 空闲时退出）。"""
+
+        def __init__(self, key: str = "ctrl+c") -> None:
+            super().__init__()
+            self.key = key
 
     class ModeCycleRequested(Message):
         """输入框内按 Shift+Tab：请求循环切换模式（普通/计划/自动接受）。"""
@@ -235,7 +239,7 @@ class ChatInput(TextArea):
         if event.key in ("ctrl+c", "escape"):
             event.prevent_default()
             event.stop()
-            self.post_message(self.CancelRequested())
+            self.post_message(self.CancelRequested(event.key))
             return
         if event.key == "up" and self.cursor_location[0] == 0 and self._history:
             event.prevent_default()
@@ -350,7 +354,7 @@ class InteractiveApp(App[None]):
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("shift+tab", "cycle_mode", "切换模式"),
         Binding("ctrl+b", "toggle_sidebar", "会话侧栏"),
-        Binding("ctrl+c", "cancel_run", "取消"),
+        Binding("ctrl+c", "cancel_run", "取消/退出"),
         Binding("ctrl+q", "quit", "退出"),
     ]
 
@@ -450,7 +454,7 @@ class InteractiveApp(App[None]):
             f"工作区：{self._workspace}\n"
             "今天想让我帮你做什么？\n"
             "Enter 提交任务 · /help 查看命令\n"
-            "Shift+Tab 切换模式 · Ctrl+C 取消 · Ctrl+Q 退出"
+            "Shift+Tab 切换模式 · Ctrl+C 取消/退出 · Ctrl+Q 退出"
         )
         header = Horizontal(
             Static(_WELCOME_EMBLEM, id="welcome-emblem"),
@@ -568,7 +572,11 @@ class InteractiveApp(App[None]):
         self._submit(message.text)
 
     def on_chat_input_cancel_requested(self, message: ChatInput.CancelRequested) -> None:
-        self.action_cancel_run()
+        if message.key == "escape":
+            # Esc 只取消当前 Run，不退出（保持既有行为）。
+            self._cancel_current_run()
+        else:
+            self.action_cancel_run()
 
     def _submit(self, raw: str) -> None:
         try:
@@ -921,17 +929,38 @@ class InteractiveApp(App[None]):
 
     # -- 取消与退出 ---------------------------------------------------------
     def action_cancel_run(self) -> None:
-        """Ctrl+C：有待决审批先拒绝它，再取消当前 Run；无 Run 时不误退。"""
+        """Ctrl+C：确认面板先取消、Run 进行中取消 Run、空闲时退出应用。
+
+        待决审批由 _cancel_current_run 一并拒绝（拒绝后连带取消 Run）；
+        空闲退出与 action_quit 在空闲态的清理等价（无 Run、无待决确认）。
+        """
+        if self._confirm_futures:
+            for future in list(self._confirm_futures):
+                if not future.done():
+                    future.set_result(False)
+            return
+        if self._cancel_current_run():
+            return
+        self._bridge.abort()
+        self.exit()
+
+    def _cancel_current_run(self) -> bool:
+        """拒绝待决审批并取消当前 Run；无待决审批且无 Run 时返回 False。"""
+        acted = False
         if self._bridge.pending is not None:
             self._bridge.submit("3")
+            acted = True
         if self._run_active and self._current_run_id is not None:
             self.service.cancel(self._current_run_id)
             self._append_system("已请求取消当前 Run。")
+            acted = True
         elif self._run_active:
             # run_id 尚未随首个事件到达：取消消费 worker，run_stream 的
             # finally 会连带取消底层 Run。
             self.workers.cancel_group(self, "run")
             self._append_system("已请求取消当前 Run。")
+            acted = True
+        return acted
 
     async def action_quit(self) -> None:
         """退出：先 abort 审批桥与未决确认，再取消活动 Run，不留挂起。"""
@@ -1099,7 +1128,7 @@ class InteractiveApp(App[None]):
         if prompt == "/help":
             self._append_system(
                 HELP_TEXT + "\n工作台按键：Enter 提交 · Ctrl+J 换行 · Shift+Tab 切换模式"
-                " · Ctrl+C 取消 · Ctrl+Q 退出"
+                " · Ctrl+C 取消/退出 · Ctrl+Q 退出"
             )
             return
         if prompt == "/status":
