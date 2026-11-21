@@ -19,6 +19,7 @@ import inspect
 from collections.abc import Callable
 from typing import Any, ClassVar, Literal
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -26,21 +27,28 @@ from textual.widgets import Footer, Header, Static
 from textual.worker import Worker
 
 from deity.core.contracts.client import ClientEvent
+from deity.interfaces.tui.theme import apply_deity_theme
 from deity.interfaces.tui.view_model import RunViewModel
 
 
 class TuiApp(App[None]):
     """模型流式文本、工具调用树、审批列表与状态的现代分栏监视台。"""
 
+    # 布局取 53f329d 的分栏结构；观感对齐（D7）：边框圆角化 + 层级色，
+    # 不动任何行为与文案语义。两边原先各有一份 CSS，合并时并为一份
+    # （类属性同名时后者会整份覆盖前者，必须手动合并）。
     CSS: ClassVar[str] = """
     #monitor-container { height: 1fr; }
-    #monitor-header { height: 3; border: solid $primary; padding: 0 1; }
+    #monitor-header { height: 3; border: round $primary; padding: 0 1; }
     #monitor-body { height: 1fr; }
     #monitor-sidebar { width: 38; border-right: solid $primary; padding: 0 1; }
     #monitor-main { width: 1fr; padding: 0 1; }
     #run-status { width: 1fr; text-style: bold; }
-    #run-approvals-box { border: solid $warning; margin-bottom: 1; padding: 0 1; max-height: 10; }
-    #run-tools-box { height: 1fr; border: solid $primary; padding: 0 1; }
+    #run-text { padding: 0 1; }
+    #run-approvals-box { border: round $warning; margin-bottom: 1; padding: 0 1; max-height: 10; }
+    #run-approvals { color: $warning; }
+    #run-tools-box { height: 1fr; border: round $primary; padding: 0 1; }
+    #run-tools { color: $text-secondary; }
     .box-title { text-style: bold; color: $accent; margin-bottom: 1; }
     """
 
@@ -66,6 +74,8 @@ class TuiApp(App[None]):
         model_name: str = "fake",
     ) -> None:
         super().__init__()
+        # 与工作台共用 deity 主题（D7 观感对齐）；行为完全不变。
+        apply_deity_theme(self)
         self.view_model = view_model or RunViewModel(run_id=run_id or "")
         self._on_approve = on_approve
         self._on_deny = on_deny
@@ -186,16 +196,25 @@ class TuiApp(App[None]):
                 f"运行 ID：{snapshot['run_id'] or '未分配'}  |  状态：{status_text}  |  已接收事件：{self.view_model.events_seen}"
             )
             self.query_one("#run-text", Static).update(str(snapshot["text"]))
-            tools = "\n".join(
-                f"{'✓' if item['status'] == 'ok' else '✗' if item['status'] == 'error' else '⎿'} {item['call_id'][:8]} {item['name']} [{item['status']}]"
-                for item in snapshot["tool_calls"]
+            tool_lines: list[str] = []
+            for item in snapshot["tool_calls"]:
+                # 工具行格式与工作台统一（D7）：⏺ 名 [状态] + ⎿ 输出首行；
+                # 合并调和：保留 53f329d 新增的 call_id 短前缀信息（括号内），
+                # 其 ✓/✗ 状态图标与 [状态] 文本及 ⎿ 行重复，不再叠加。
+                tool_lines.append(f"⏺ {item['name']} [{item['status']}] ({item['call_id'][:8]})")
+                output = (item.get("output") or "").strip()
+                if output:
+                    tool_lines.append(f"  ⎿ {output.splitlines()[0]}")
+            # 传 Text 而非 str：[状态] 方括号会被 Rich markup 吞掉。
+            self.query_one("#run-tools", Static).update(
+                Text("\n".join(tool_lines) or "（无工具调用）")
             )
-            self.query_one("#run-tools", Static).update(tools or "（无工具调用）")
             approvals = "\n".join(
                 f"• {item['approval_id'][:8]} {item['tool_name']} [{item['status']}]"
                 for item in snapshot["approvals"]
             )
-            self.query_one("#run-approvals", Static).update(approvals or "（无待审批）")
+            # 同上：审批行也含 [状态] 方括号，一并传 Text 防 markup 吞掉。
+            self.query_one("#run-approvals", Static).update(Text(approvals or "（无待审批）"))
         except Exception:  # noqa: BLE001, S110 - 未挂载时刷新是空操作
             pass
 
