@@ -66,12 +66,16 @@ class ModelFailure(RuntimeError):
         retryable: bool,
         retry_after: float | None = None,
         semantic_output: bool = False,
+        detail: str | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
         self.retryable = retryable
         self.retry_after = retry_after
         self.semantic_output = semantic_output
+        # 可选诊断摘要（状态码 + 截断的服务端消息 / 连接异常类型名）；
+        # 由适配器按脱敏规则填充，绝不含密钥、请求头或请求体。
+        self.detail = detail
 
 
 class CancellationScope:

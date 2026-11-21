@@ -42,6 +42,8 @@ def run_error_message(exc: Exception) -> str:
     """Turn internal runtime limits into actionable CLI messages."""
     if isinstance(exc, BudgetExceeded) and str(exc) == "max_turns":
         return "已达到最大运行轮次，模型仍未给出最终结论；请缩小任务范围或提高 max_turns。"
+    if isinstance(exc, ModelFailure) and exc.detail:
+        return f"{exc.code}（{exc.detail}）"
     return str(exc)
 
 
