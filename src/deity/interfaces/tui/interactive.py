@@ -14,6 +14,10 @@ Shift+Tab 循环切换模式（普通 → 计划 → 自动接受）、Ctrl+C �
 观感与交互对齐 Claude Code（ADR-022 修订，2026-11-17）：启动欢迎头
 （神之眼徽记 + 版本/模型/工作区，边框块）、带 ❯ 提示的边框输入框、
 输入框正下方的模式状态行、一行式工具条目 + 缩进结果行。
+
+Klee 风格对齐（ADR-022 修订，2026-11-21）：自定义深浅两套主题
+（theme.py，品牌色取 Klee 深绿 #1E4C35、四级文字色层级）、边框
+圆角化、消息分级配色、Markdown 克制化样式、间距节奏统一。
 """
 
 import asyncio
@@ -24,6 +28,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from uuid import uuid4
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -42,6 +47,7 @@ from deity.interfaces.cli.chat_status import ChatStatus
 from deity.interfaces.cli.chat_view_model import ChatViewModel, ToolNode
 from deity.interfaces.cli.plan import build_approved, plan_lines
 from deity.interfaces.tui.approval_bridge import PendingPrompt, TuiApprovalBridge
+from deity.interfaces.tui.theme import apply_deity_theme, palette
 
 _CLI_ONLY_COMMANDS = ("/fork", "/timeline")
 
@@ -225,7 +231,7 @@ class ToolBlock(Static):
         self,
         node: ToolNode,
         on_toggle: Callable[[str], None],
-        formatter: Callable[[ToolNode], str],
+        formatter: Callable[[ToolNode], str | Text],
         **kwargs: Any,
     ) -> None:
         super().__init__(formatter(node), **kwargs)
@@ -245,22 +251,28 @@ class InteractiveApp(App[None]):
 
     CSS: ClassVar[str] = """
     #conversation { height: 1fr; padding: 0 1; }
-    #welcome-header { border: solid $primary; padding: 0 1; height: auto; margin-bottom: 1; }
+    #welcome-header { border: round $primary; padding: 0 1; height: auto; margin-bottom: 1; }
     #welcome-emblem { width: auto; padding-right: 2; color: $accent; text-style: bold; }
     #welcome-text { width: 1fr; }
-    #prompt-panel { display: none; border: solid $warning; padding: 0 1; }
+    #prompt-panel { display: none; border: round $warning; padding: 0 1; }
     #prompt-panel.show { display: block; }
     #prompt-scroll { max-height: 14; }
-    #cmd-hint { display: none; height: auto; max-height: 5; background: $panel; border: solid $primary; padding: 0 1; margin-bottom: 1; }
+    #prompt-buttons Button:hover { background: $hover-bg; }
+    #cmd-hint { display: none; height: auto; max-height: 5; background: $panel; border: round $primary; padding: 0 1; margin-bottom: 1; }
     #cmd-hint.show { display: block; }
-    #input-row { min-height: 3; max-height: 8; height: auto; border: solid $primary; }
+    #input-row { min-height: 3; max-height: 8; height: auto; border: round $primary; }
     #input-prompt { width: 2; padding: 1 0 0 1; color: $accent; text-style: bold; }
     #input { border: none; min-height: 1; max-height: 6; height: auto; width: 1fr; }
     #status-bar { height: 1; background: $panel; padding: 0 1; }
-    .msg-user { margin-top: 1; text-style: bold; }
-    .msg-system { color: $text-muted; }
+    .msg-user { margin-top: 1; text-style: bold; background: $user-bg; padding: 0 1; }
+    .msg-system { color: $text-tertiary; }
+    .msg-error { color: $error; border: round $error; padding: 0 1; margin: 1 0; }
     .msg-tool { padding-left: 1; }
+    .msg-assistant { margin-bottom: 1; }
     .msg-tool:hover { background: $boost; }
+    MarkdownHeader { margin: 1 0 0 0; text-style: bold; }
+    MarkdownFence { background: $code-bg; border-left: solid $accent; margin: 1 0; }
+    MarkdownBlockQuote { color: $text-secondary; }
     """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
@@ -281,6 +293,8 @@ class InteractiveApp(App[None]):
         initial_task: str | None = None,
     ) -> None:
         super().__init__()
+        theme_name = apply_deity_theme(self)
+        self._palette = palette(dark=theme_name == "deity-dark")
         self.service = service
         self._bridge = bridge
         self._workspace = workspace
@@ -514,21 +528,40 @@ class InteractiveApp(App[None]):
                 else:
                     block.update(self._tool_line(self._view.tools[call_id]))
 
-    def _tool_line(self, node: ToolNode) -> str:
-        """工具条目（ADR-022 修订，Claude Code 式紧凑排版）。
+    def _tool_line(self, node: ToolNode) -> Text:
+        """工具条目（ADR-022 修订，Claude Code 式紧凑排版；P0 分级配色）。
 
         首行一行式：⏺ 工具名(参数摘要)；完成后结果以 ⎿ 缩进次行呈现
         （状态 + 耗时）；运行中首行尾标「运行中」。展开时（/tools）在
-        结果行后追加完整参数与 call_id。
+        结果行后追加完整参数与 call_id。配色走 theme.palette()：
+        ⏺ 与工具名用品牌绿，⎿ 行用次级色，状态词按结果着色
+        （ok=success、error=error、denied/timeout=warning）。
         """
+        colors = self._palette
         summary = node.arguments_summary() or "—"
-        first = f"⏺ {node.name}({summary})"
+        line = Text()
+        line.append("⏺ ", style=f"bold {colors['accent']}")
+        line.append(node.name, style="bold")
+        line.append(f"({summary})")
         if node.finished_at is None:
-            return f"{first} · 运行中"
-        result = f"  ⎿ {node.status or '完成'} · {node.elapsed(time.monotonic):.1f}s"
+            line.append(" · 运行中", style=colors["tertiary"])
+            return line
+        status = node.status or "完成"
+        status_style = {
+            "ok": colors["success"],
+            "error": colors["error"],
+            "denied": colors["warning"],
+            "timeout": colors["warning"],
+        }.get(status, colors["secondary"])
+        line.append("\n")
+        line.append("  ⎿ ", style=colors["tertiary"])
+        line.append(status, style=status_style)
+        line.append(f" · {node.elapsed(time.monotonic):.1f}s", style=colors["secondary"])
         if node.expanded:
-            return f"{first}\n{result}\n参数：{node.args_text or '—'}（{node.call_id}）"
-        return f"{first}\n{result}"
+            line.append(
+                f"\n参数：{node.args_text or '—'}（{node.call_id}）", style=colors["secondary"]
+            )
+        return line
 
     def _accumulate(self, view: ChatViewModel) -> None:
         """把一轮的计数并入会话级状态（/cost、/status、状态栏的口径）。"""
