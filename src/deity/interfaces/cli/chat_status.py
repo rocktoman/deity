@@ -50,6 +50,12 @@ class ChatStatus:
             return None
         return f"上下文 {self.last_input_tokens}/{self.context_window_tokens}"
 
+    def context_ratio(self) -> float | None:
+        """上下文占用比例（最近输入 token / 窗口）；数据不全时返回 None。"""
+        if self.last_input_tokens is None or not self.context_window_tokens:
+            return None
+        return self.last_input_tokens / self.context_window_tokens
+
     def summary_line(
         self,
         *,

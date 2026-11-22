@@ -18,6 +18,12 @@ Shift+Tab 循环切换模式（普通 → 计划 → 自动接受）、Ctrl+C �
 Klee 风格对齐（ADR-022 修订，2026-11-21）：自定义深浅两套主题
 （theme.py，品牌色取 Klee 深绿 #1E4C35、四级文字色层级）、边框
 圆角化、消息分级配色、Markdown 克制化样式、间距节奏统一。
+
+Gemini 风格对齐（ADR-022 修订，2026-11-22）：输入框去框化（上下
+圆角细线 + 底色条）、输入框上方两行式 StatusRow（等待/提示行 +
+分隔线 + 模式行）、用户消息 `> ` 前缀、等待行左竖线、上下文占用
+着色、模式动态副提示、SectionHeader 顶线、审批时折叠输入区。
+神之眼徽记与 Klee 深绿品牌色保留，不引入 Gemini 品牌元素。
 """
 
 import asyncio
@@ -29,6 +35,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from uuid import uuid4
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -85,6 +92,29 @@ _DISCLAIMER = "Deity 是 AI，可能会出错；它会修改工作区文件，�
 
 # 等待指示（P1-2）的三点动画帧：被激活的点依次轮动。
 _WAITING_FRAMES = ("●○○", "○●○", "○○●")
+
+# StatusRow 等待态 spinner 帧（盲文点阵，单色 accent，不用彩虹渐变）。
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+# StatusRow 右侧轮换 Tip（每轮完成后推进一条，不在刷新间隔内轮换）。
+_TIPS = (
+    "Tip：输入 / 补全斜杠命令",
+    "Tip：Ctrl+B 打开会话侧栏",
+    "Tip：/model 查看或切换模型",
+    "Tip：/cost 查看本会话 Token",
+    "Tip：Ctrl+C 取消运行，空闲时退出",
+)
+
+# 上下文占用着色阈值：0.75 与压缩软限（core/context/reliable.py
+# soft_limit = 窗口 × 0.75）同值，满额（1.0）变红。
+_CONTEXT_WARN_RATIO = 0.75
+
+# 模式行动态副提示（Gemini 式）：按当前模式写下一步切换去向。
+_MODE_SUBHINT = {
+    "普通": "shift+tab 切换到计划",
+    "计划": "shift+tab 切换到自动接受",
+    "自动接受": "shift+tab 回到普通",
+}
 
 
 def greeting_for_hour(hour: int) -> str:
@@ -334,21 +364,28 @@ class InteractiveApp(App[None]):
     #prompt-panel.show { display: block; }
     #prompt-scroll { max-height: 14; }
     #prompt-buttons Button:hover { background: $hover-bg; }
+    .section-header { border-top: solid $text-tertiary; text-style: bold; }
     #cmd-hint { display: none; height: auto; max-height: 5; background: $panel; border: round $primary; padding: 0 1; margin-bottom: 1; }
     #cmd-hint.show { display: block; }
-    #input-row { min-height: 3; max-height: 8; height: auto; border: round $primary; }
+    #status-top { height: 1; }
+    #status-wait { width: 1fr; color: $text-secondary; }
+    #status-tip { width: auto; color: $text-tertiary; }
+    #status-divider { height: 1; border-top: solid $text-quaternary; }
+    #input-row { min-height: 3; max-height: 8; height: auto; border-top: round $primary; border-bottom: round $primary; background: $panel; }
+    #input-row.collapsed { display: none; }
     #input-prompt { width: 2; padding: 1 0 0 1; color: $accent; text-style: bold; }
-    #input { border: none; min-height: 1; max-height: 6; height: auto; width: 1fr; }
+    #input { border: none; min-height: 1; max-height: 6; height: auto; width: 1fr; background: $panel; }
     #status-bar { height: 1; background: $panel; padding: 0 1; }
     .msg-user { margin-top: 1; text-style: bold; background: $user-bg; padding: 0 1; }
     .msg-system { color: $text-tertiary; }
     .msg-error { color: $error; border: round $error; padding: 0 1; margin: 1 0; }
-    .msg-waiting { color: $text-secondary; padding-left: 1; }
+    .msg-waiting { color: $text-secondary; border-left: solid $text-tertiary; padding-left: 1; text-style: italic; }
     .msg-metrics { color: $text-quaternary; }
     .msg-tool { padding-left: 1; }
     .msg-assistant { margin-bottom: 1; }
-    #input-row.streaming { border: round $text-tertiary; }
+    #input-row.streaming { border-top: round $text-tertiary; border-bottom: round $text-tertiary; }
     #input-hint { height: 1; padding: 0 1; color: $text-tertiary; }
+    #input-hint.collapsed { display: none; }
     #disclaimer { height: 1; padding: 0 1; color: $text-quaternary; }
     .msg-tool:hover { background: $boost; }
     MarkdownHeader { margin: 1 0 0 0; text-style: bold; }
@@ -399,6 +436,9 @@ class InteractiveApp(App[None]):
         self._scroller = ScrollThrottler()
         self._waiting_block: Static | None = None
         self._waiting_frame = 0
+        self._spinner_frame = 0
+        self._tip_index = 0
+        self._was_run_active = False
         self._prompt_handler: Any = None
         self._confirm_futures: list[asyncio.Future[bool]] = []
         self.title = "Deity"
@@ -417,6 +457,7 @@ class InteractiveApp(App[None]):
                 yield Button("运行 doctor", id="btn-sidebar-doctor")
             yield VerticalScroll(id="conversation")
         with Vertical(id="prompt-panel"):
+            yield Static("", id="prompt-title", classes="section-header")
             with VerticalScroll(id="prompt-scroll"):
                 yield Static("", id="prompt-text")
             with Horizontal(id="prompt-buttons"):
@@ -427,12 +468,16 @@ class InteractiveApp(App[None]):
                 yield Button("[y/Enter] 确认", id="btn-confirm", variant="success")
                 yield Button("[n/Esc] 取消", id="btn-cancel")
         yield Static("", id="cmd-hint")
+        with Horizontal(id="status-top"):
+            yield Static("", id="status-wait")
+            yield Static("", id="status-tip")
+        yield Static("", id="status-divider")
+        yield Static("", id="status-bar")
         with Horizontal(id="input-row"):
             yield Static("❯", id="input-prompt")
             yield ChatInput(id="input")
         yield Static("", id="input-hint")
         yield Static(_DISCLAIMER, id="disclaimer")
-        yield Static("", id="status-bar")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -501,13 +546,26 @@ class InteractiveApp(App[None]):
         self._conversation.mount(Static(text, classes="msg-system"))
         self._scroll_end()
 
+    def _append_section_header(self, title: str, subtitle: str = "") -> None:
+        """SectionHeader（Gemini 式）：仅顶线 + 粗体标题 + 灰色副标题。"""
+        line = Text()
+        line.append(title, style="bold")
+        if subtitle:
+            line.append(f"  {subtitle}", style=self._palette["tertiary"])
+        self._conversation.mount(Static(line, classes="section-header"))
+        self._scroll_end()
+
     def _append_error(self, text: str) -> None:
         """错误块（P1-3）：error 色圆角边框独立成级，不混系统消息。"""
         self._conversation.mount(Static(text, classes="msg-error"))
         self._scroll_end(force=True)
 
     def _append_user(self, text: str) -> None:
-        self._conversation.mount(Static(f"❯ {text}", classes="msg-user"))
+        """用户消息（Gemini 式）：`> ` accent 前缀 + 既有底色块。"""
+        line = Text()
+        line.append("> ", style=f"bold {self._palette['accent']}")
+        line.append(text)
+        self._conversation.mount(Static(line, classes="msg-user"))
         self._scroll_end(force=True)
 
     async def _append_assistant_final(self, text: str) -> None:
@@ -531,10 +589,36 @@ class InteractiveApp(App[None]):
         self._scroll_end()
 
     def _tick_waiting(self) -> None:
-        if self._waiting_block is None:
+        self._spinner_frame = (self._spinner_frame + 1) % len(_SPINNER_FRAMES)
+        if self._waiting_block is not None:
+            self._waiting_frame = (self._waiting_frame + 1) % len(_WAITING_FRAMES)
+            self._waiting_block.update(f"{_WAITING_FRAMES[self._waiting_frame]} Thinking...")
+        self._update_status_top()
+
+    def _update_status_top(self) -> None:
+        """StatusRow 上行（Gemini 式）：左等待态、右 Tip。
+
+        等待审批时显示静态 ⠏；运行中显示盲文 spinner + 生成中；
+        空闲时左侧为空。Tip 在窄屏（<100 列）或与左侧碰撞时隐藏。
+        """
+        try:
+            wait = self.query_one("#status-wait", Static)
+            tip = self.query_one("#status-tip", Static)
+        except Exception:  # noqa: BLE001 - 未挂载时刷新是空操作
             return
-        self._waiting_frame = (self._waiting_frame + 1) % len(_WAITING_FRAMES)
-        self._waiting_block.update(f"{_WAITING_FRAMES[self._waiting_frame]} Thinking...")
+        if self._bridge.pending is not None or self._confirm_futures:
+            wait_text = "⠏ 等待审批…"
+        elif self._run_active:
+            wait_text = f"{_SPINNER_FRAMES[self._spinner_frame]} 生成中…"
+        else:
+            wait_text = ""
+        wait.update(wait_text)
+        width = self.size.width
+        tip_text = _TIPS[self._tip_index % len(_TIPS)]
+        if width < 100 or cell_len(wait_text) + cell_len(tip_text) + 10 > width:
+            tip.update("")
+        else:
+            tip.update(tip_text)
 
     def _hide_waiting(self) -> None:
         if self._waiting_block is not None:
@@ -798,10 +882,27 @@ class InteractiveApp(App[None]):
             event.prevent_default()
             event.stop()
 
+    def _collapse_input(self, collapse: bool) -> None:
+        """审批时折叠输入区（Gemini 式）：输入框与下方提示行暂时隐藏。"""
+        for selector in ("#input-row", "#input-hint"):
+            try:
+                self.query_one(selector).set_class(collapse, "collapsed")
+            except Exception:  # noqa: BLE001, S110 - 未挂载时是空操作
+                pass
+
     def _present_prompt(self, pending: PendingPrompt) -> None:
         """呈现审批卡片或确认（桥从工作线程经 call_from_thread 调入）。"""
         self.query_one("#prompt-text", Static).update(pending.text or "（无内容）")
         self._current_pending_kind = pending.kind
+        title, subtitle = (
+            ("审批", "工具调用需要你的确认") if pending.kind == "approval" else ("确认", "")
+        )
+        title_line = Text()
+        title_line.append(title, style="bold")
+        if subtitle:
+            title_line.append(f"  {subtitle}", style=self._palette["tertiary"])
+        self.query_one("#prompt-title", Static).update(title_line)
+        self._collapse_input(True)
         if pending.kind == "approval":
             mapping = {
                 "btn-allow-once": "1",
@@ -842,6 +943,7 @@ class InteractiveApp(App[None]):
     def _hide_prompt(self) -> None:
         self.query_one("#prompt-panel").remove_class("show")
         self._prompt_handler = None
+        self._collapse_input(False)
         if self.is_running:
             self.query_one("#input", ChatInput).focus()
 
@@ -915,6 +1017,8 @@ class InteractiveApp(App[None]):
         self._confirm_futures.append(future)
         self._current_pending_kind = "confirm"
         self.query_one("#prompt-text", Static).update(text)
+        self.query_one("#prompt-title", Static).update(Text("确认", style="bold"))
+        self._collapse_input(True)
         self.query_one("#btn-confirm", Button).label = f"[y/Enter] {confirm_label}"
         self.query_one("#btn-cancel", Button).label = f"[n/Esc] {cancel_label}"
         self._set_prompt_buttons({"btn-confirm", "btn-cancel"})
@@ -1043,6 +1147,32 @@ class InteractiveApp(App[None]):
             return "自动接受模式 · 工具调用将自动批准 · /normal 退出"
         return "输入任务开始 · Enter 提交 · Shift+Tab 切换模式 · /help 查看命令"
 
+    def _status_bar_text(self, left: str) -> Text:
+        """状态栏模式行：左模型 · 模式（动态副提示）· 运行态，右上下文占用。
+
+        上下文占用按比例着色（0.75 压缩软限变黄、满额变红；无 usage
+        数据时不显示）；窄屏只显示百分比；宽度不足时舍弃右侧，
+        保证左侧不被顶出。token/工具/工作区统计仍回归 /status 详情。
+        """
+        ratio = self.session_status.context_ratio()
+        text = Text(left)
+        if ratio is None:
+            return text
+        pct = round(ratio * 100)
+        right = f"{pct}%" if self.size.width < 100 else f"上下文 {pct}%"
+        if ratio >= 1:
+            style = self._palette["error"]
+        elif ratio >= _CONTEXT_WARN_RATIO:
+            style = self._palette["warning"]
+        else:
+            style = self._palette["secondary"]
+        gap = self.size.width - 2 - cell_len(left) - cell_len(right)
+        if gap < 2:
+            return text
+        text.append(" " * gap)
+        text.append(right, style=style)
+        return text
+
     def _refresh_status(self) -> None:
         try:
             bar = self.query_one("#status-bar", Static)
@@ -1053,15 +1183,19 @@ class InteractiveApp(App[None]):
             self.query_one("#input-row").set_class(self._run_active, "streaming")
         except Exception:  # noqa: BLE001, S110 - 未挂载时刷新是空操作
             pass
+        # Tip 轮换：每轮完成时推进一条（不在刷新间隔内轮换，避免闪烁）。
+        if self._was_run_active and not self._run_active:
+            self._tip_index += 1
+        self._was_run_active = self._run_active
+        self._update_status_top()
         mode = self._mode_label()
-        # 状态栏瘦身（P2-5 / D5）：只留 模型 · 模式 · 运行态 三项；
-        # token/上下文/工具/工作区/会话统计回归 /status 详情。
         if self._run_active:
             dots = "." * (int(time.monotonic() * 2) % 4)
             run_state = f"运行中{dots}"
         else:
             run_state = "空闲"
-        bar.update(f"模型 {self.state.model_name} · {mode}模式 · {run_state}")
+        left = f"模型 {self.state.model_name} · {mode}模式（{_MODE_SUBHINT[mode]}） · {run_state}"
+        bar.update(self._status_bar_text(left))
 
     # -- 计划模式 -----------------------------------------------------------
     async def _plan_flow(self, text: str) -> None:
@@ -1131,6 +1265,7 @@ class InteractiveApp(App[None]):
             await self.action_quit()
             return
         if prompt == "/help":
+            self._append_section_header("命令", "斜杠命令与工作台按键")
             self._append_system(
                 HELP_TEXT + "\n工作台按键：Enter 提交 · Ctrl+J 换行 · Shift+Tab 切换模式"
                 " · Ctrl+C 取消/退出 · Ctrl+Q 退出"
