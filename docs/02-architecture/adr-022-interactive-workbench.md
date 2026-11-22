@@ -71,3 +71,24 @@
 ## 2026-11-22 修订：/help 一行一命令与 /model 可选模型列表
 
 用户反馈：/help 输出是分号连成的整段、终端换行后难读；/model 只显示当前模型、看不到可选模型。改动：HELP_TEXT 改为由 COMMANDS 注册表逐条生成、每条命令占一行（行式与工作台共用同一文本，行式打印加 markup=False，避免用法里的 [call_id] 被 Rich 当样式吞掉）；新增 KNOWN_MODELS（qwen/anthropic 常用模型、openai_compatible 无固定列表），/model 无参数时展示当前模型 + 本提供方可选模型（当前项打 ● 标记），/model <名称> 仍只改会话内模型名、不换提供方。两处原按旧格式断言的整段输出测试随格式改写（非放宽）。
+
+## 2026-11-22 修订：Gemini 风格对齐（输入框去框化 + StatusRow 两行化）
+
+用户反馈工作台底部观感丑、希望参考 Gemini CLI 的界面。改动（以
+~/workspace/gemini-study/gemini-tui-reference.md 为唯一规格来源，
+基于 gemini-cli 浅克隆 eecccfc 的只读研究）：输入框去框化——仅上下
+两条圆角细线 + $panel 底色条，取代完整边框盒子；输入框上方新增
+两行式 StatusRow（等待/提示行：左 spinner/等待审批、右轮换 Tip，
+窄屏 <100 列或碰撞时隐藏 Tip；淡色分隔线；模式行：模型 · 模式
+（动态副提示 shift+tab 去向）· 运行态，右上下文占用按比例着色，
+0.75 压缩软限变黄、满额变红，窄屏只显示 %）；用户消息加 `> `
+accent 前缀（保留底色块）；等待行仅左竖线 + 斜体（仍不伪造思考
+内容，P1-0 结论不变）；SectionHeader 顶线样式用于 /help 与审批
+面板标题；审批时折叠输入区（输入框 + 下方提示行隐藏，确认/拒绝
+后恢复，焦点回输入框）。神之眼徽记与 Klee 深绿品牌色保留，不引入
+Gemini 品牌（名称、logo、✦、蓝紫玫红渐变、彩虹 spinner）；审批语义、
+工具可见性、Ctrl+C 分级退出、Shift+Tab 循环、Ctrl+B 侧栏、Ctrl+Q
+全部不变。`test_interactive_status_bar_sits_below_input` 随布局
+改为状态行在输入框上方；`test_interactive_round_borders` 随去框化
+改为上下圆角、左右无边框；`test_interactive_submit_completes_run`
+随用户消息前缀改为 `> `。监视台 app.py 未动。
