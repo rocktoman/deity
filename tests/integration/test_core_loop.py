@@ -10,6 +10,7 @@ from deity.core.contracts import (
     ToolCall,
     ToolResult,
 )
+from deity.core.contracts.client import ClientEvent
 from deity.core.runtime import AgentLoop
 
 
@@ -52,3 +53,35 @@ async def test_fake_model_tool_context_and_final_answer() -> None:
     assert model.requests[1].messages[-1]["call_id"] == "read-1"
     assert model.requests[1].messages[-1]["content"] == "print('hello')"
     assert model.requests[1].messages[-1]["status"] == "ok"
+
+
+# ADR-023：live tool_call_completed 事件带输出预览与退出码
+
+
+class _PreviewTool:
+    async def dispatch(self, call: ToolCall, context: AgentRequest) -> ToolResult:
+        return ToolResult(
+            call.call_id,
+            "failed",
+            "FAILED tests/test_x.py::test_a\nassert 1 == 2\n1 failed\n2 passed",
+            exit_code=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_tool_call_completed_event_carries_preview_and_exit_code() -> None:
+    model = ScriptedModel()
+    tool = _PreviewTool()
+    seen: list[ClientEvent] = []
+    result = await AgentLoop(model, tool).run(
+        AgentRequest("session-1", "task-1", "/fixture", "读取 a.py", "scripted"),
+        live_event_sink=seen.append,
+    )
+    assert result.status == RunStatus.COMPLETED
+    completed = [e for e in seen if e.kind == "tool_call_completed"]
+    assert len(completed) == 1
+    assert completed[0].payload["exit_code"] == 1
+    assert completed[0].payload["output_preview"].startswith("FAILED tests/test_x.py")
+    assert "1 failed" in completed[0].payload["output_preview"]
+    # 预览只取前 3 行，第 4 行不出现。
+    assert "2 passed" not in completed[0].payload["output_preview"]

@@ -2637,6 +2637,36 @@ class SQLiteSessionRepository:
                 raise KeyError(session_id)
             await self.db.commit()
 
+    async def rename_session(
+        self, session_id: str, title: str, *, workspace_root: str | None = None
+    ) -> None:
+        """重命名会话标题（ADR-023）：只改 sessions.title，不碰消息与运行历史。
+
+        标题去空白、截断 80 字符（与 F3/A6 自动标题同一口径）；行不存在
+        且给了 workspace_root 时 INSERT 一行（新会话尚未跑任务时也能改名）；
+        否则抛 KeyError；空标题抛 ValueError。
+        """
+        clean = title.strip()[:80]
+        if not clean:
+            raise ValueError("标题不能为空")
+        async with self._lock:
+            cursor = await self.db.execute(
+                "UPDATE sessions SET title=?, updated_at=datetime('now') WHERE id=?",
+                (clean, session_id),
+            )
+            if cursor.rowcount == 1:
+                await self.db.commit()
+                return
+            if workspace_root is None:
+                await self.db.rollback()
+                raise KeyError(session_id)
+            await self.db.execute(
+                "INSERT INTO sessions(id, workspace_root, created_at, updated_at, title) "
+                "VALUES (?, ?, datetime('now'), datetime('now'), ?)",
+                (session_id, workspace_root, clean),
+            )
+            await self.db.commit()
+
     async def create_forked_run(self, parent_run_id: str) -> str:
         """从父 run 的最新前沿分叉一个新 run（ADR-020 A6）。
 

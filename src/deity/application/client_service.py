@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from deity.adapters.events import TERMINAL_STATUSES, SQLiteEventSubscriber
 from deity.adapters.storage import SQLiteSessionRepository
+from deity.application.approval_diff import approval_diff
 from deity.application.event_bus import InProcessEventBus
 from deity.application.run_service import RunService
 from deity.core.contracts import AgentResult, RunStatus
@@ -142,6 +143,8 @@ class ClientService(ApprovalPort):
             call_id=call_id,
             tool_name=tool_name,
             args=approval_args_summary(args),
+            # ADR-023：改文件工具附上预期 diff（其余工具为 None）。
+            diff=approval_diff(tool_name, args, self._run_service.workspace),
         )
         self._approvals[approval_id] = request
         self._approval_events.setdefault(approval_id, asyncio.Event())

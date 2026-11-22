@@ -30,6 +30,18 @@
   只显示 %）；用户消息加 `> ` 前缀；等待行仅左竖线 + 斜体；/help
   与审批面板标题改用 SectionHeader 顶线样式；审批时折叠输入区。
   神之眼徽记与 Klee 深绿品牌色保留，不引入 Gemini 品牌元素。
+- Codex 行为移植第二轮（ADR-023）：工具输出预览带 (exit N)（live
+  `tool_call_completed` 事件新增可选 `output_preview`/`exit_code`
+  字段，Live-only、不落库、不改 SQLite 结构）；审批里看 diff（改文件
+  工具在审批请求上附预期 diff，行式卡片与工作台审批面板均彩色渲染，
+  新增行浅灰底、删除行红底）；/model 弹窗（工作台内列表 + 搜索/过滤，
+  从 KNOWN_MODELS 取数，选中切换本次会话模型；行式保持行内列表）；
+  /usage（本会话用量汇总：input/output tokens、轮次、工具次数、上下
+  文占用；无账号配额后端，只展示本地可得数据）；/rename <新标题>（重
+  命名当前会话，/sessions 与侧栏显示新标题）；/sandbox（查看沙箱后端/
+  策略/启用/网络/可用性，read-only/workspace-write 会话内切换；无
+  bwrap/非 Linux = 明确不可用，不回退宿主机执行）。出处见
+  docs/06-legal/third-party-notices.md 的 Codex 条目。
 - 斜杠命令帮助与模型切换（ADR-022 修订）：/help 改为每条命令占一行
   （由命令注册表生成，行式与工作台共用；行式打印禁用 markup，避免
   [call_id] 等方括号被 Rich 当样式吞掉）；/model 无参数时列出本提供方

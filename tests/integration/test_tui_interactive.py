@@ -1172,3 +1172,198 @@ async def test_codex_mention_completion_lists_and_completes_files(tmp_path: Path
         await pilot.pause()
         assert box.text == "看看 @feature.py "
         await pilot.press("ctrl+q")
+
+
+# -- Codex 行为移植第二轮（ADR-023）：/model 弹窗、/usage、/rename、/sandbox、
+#    审批 diff 预览、工具输出预览 + (exit N) --
+
+
+@pytest.mark.asyncio
+async def test_codex2_model_dialog_opens_filters_and_selects(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    from textual.widgets import Input
+
+    app = _make_app(tmp_path, FakeModel([]))
+    app.service.provider_id = "qwen"
+    app.state.model_name = "qwen3.8-omni-flash"
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/model")
+        await _wait_until(lambda: app.query_one("#model-dialog").has_class("show"))
+        assert app._model_dialog_open
+        rows = list(app.query(".model-row"))
+        assert len(rows) == 5
+        assert "● qwen3.8-omni-flash" in str(rows[0].render())
+        # 过滤框获得焦点，输入 qwen4 后只剩一个候选。
+        await _wait_until(lambda: isinstance(app.focused, Input))
+        await pilot.press("q", "w", "e", "n", "4")
+        await _wait_until(lambda: len(list(app.query(".model-row"))) == 1)
+        # 回车选中第一个可见候选。
+        await pilot.press("enter")
+        await _wait_until(lambda: app.state.model_name == "qwen4-max")
+        assert not app.query_one("#model-dialog").has_class("show")
+        assert "已切换模型：qwen4-max" in _conversation_text(app)
+        # Esc 关闭：重开后按 Esc，焦点回到输入框，模型不变。
+        await _submit(app, pilot, "/model")
+        await _wait_until(lambda: app.query_one("#model-dialog").has_class("show"))
+        await pilot.press("escape")
+        await _wait_until(lambda: not app.query_one("#model-dialog").has_class("show"))
+        assert isinstance(app.focused, ChatInput)
+        assert app.state.model_name == "qwen4-max"
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex2_model_dialog_click_selects_row(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    app.service.provider_id = "qwen"
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/model")
+        await _wait_until(lambda: app.query_one("#model-dialog").has_class("show"))
+        await pilot.click("#model-row-2")
+        await _wait_until(lambda: app.state.model_name == "qwen-max")
+        assert not app.query_one("#model-dialog").has_class("show")
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex2_model_dialog_falls_back_without_catalog(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/model")
+        await _wait_until(lambda: "无固定模型列表" in _conversation_text(app))
+        assert not app.query_one("#model-dialog").has_class("show")
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex2_usage_command_shows_session_summary(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/usage")
+        await _wait_until(lambda: "本会话用量" in _conversation_text(app))
+        assert "Token：未接通" in _conversation_text(app)
+        assert "无账号配额后端" in _conversation_text(app)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex2_rename_command_updates_title_and_sidebar(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    turns = [[ModelEvent("text_delta", text="完成"), ModelEvent("message_completed")]]
+    app = _make_app(tmp_path, FakeModel(turns))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit(app, pilot, "建会话的任务")
+        await _wait_until(lambda: not app._run_active)
+        await _submit(app, pilot, "/rename 我的会话")
+        await _wait_until(lambda: "已重命名当前会话为：我的会话" in _conversation_text(app))
+        await pilot.press("ctrl+b")
+        await _wait_until(lambda: len(app.query(".session-row")) >= 1)
+        await pilot.pause()
+        assert "我的会话" in str(app.query(".session-row")[0].label)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex2_sandbox_command_shows_status_and_switches(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    from deity.application.config import SandboxConfig
+
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/sandbox")
+        await _wait_until(lambda: "沙箱状态" in _conversation_text(app))
+        assert "启用：否" in _conversation_text(app)
+        await _submit(app, pilot, "/sandbox read-only")
+        await _wait_until(lambda: "切换失败" in _conversation_text(app))
+        # 启用 bwrap 后切换成功（仅本次会话内生效）。
+        app.service.sandbox = SandboxConfig(enabled=True, backend="bwrap", policy="workspace-write")
+        await _submit(app, pilot, "/sandbox read-only")
+        await _wait_until(lambda: "已切换沙箱策略为：read-only" in _conversation_text(app))
+        assert app.service.sandbox.policy == "read-only"
+        await _submit(app, pilot, "/sandbox full-access")
+        await _wait_until(lambda: "full-access 不可切换" in _conversation_text(app))
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex2_approval_panel_shows_diff_preview(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    (tmp_path / "b.txt").write_text("one\ntwo\n", encoding="utf-8")
+    # write_file 只建不覆盖：改已存在文件用 apply_patch（参数经 json.dumps，
+    # _write_turns 的 f-string 会把内容里的换行拼成非法 JSON）。
+    turns = [
+        [
+            ModelEvent("tool_call_started", call_id="c1", name="apply_patch"),
+            ModelEvent(
+                "tool_call_arguments_delta",
+                call_id="c1",
+                text=json.dumps(
+                    {
+                        "path": "b.txt",
+                        "old": "one\ntwo\n",
+                        "new": "one\nTWO\nthree\n",
+                    }
+                ),
+            ),
+            ModelEvent("message_completed"),
+        ],
+        [ModelEvent("text_delta", text="done"), ModelEvent("message_completed")],
+    ]
+    app = _make_app(tmp_path, FakeModel(turns))
+    bridge = app._bridge
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "改 b.txt")
+        await _wait_until(lambda: bridge.pending is not None)
+        await pilot.pause()
+        assert app.query_one("#prompt-panel").has_class("show")
+        # 原始 diff 在 pending 上；渲染后的 diff 块带行号（`2 - two` 格式）。
+        assert bridge.pending is not None and bridge.pending.diff is not None
+        assert "-two" in bridge.pending.diff
+        assert "+TWO" in bridge.pending.diff
+        diff_text = str(app.query_one("#prompt-diff").render())
+        assert "two" in diff_text and "TWO" in diff_text
+        assert "--- a/b.txt" not in str(app.query_one("#prompt-text").render())
+        await pilot.click("#btn-allow-once")
+        await _wait_until(lambda: not app._run_active)
+        assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "one\nTWO\nthree\n"
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex2_tool_line_shows_preview_and_exit_code(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    # shell 工具参数是 argv；用 sh -c 拿到确定的退出码 3 与输出行 oops。
+    turns = [
+        [
+            ModelEvent("tool_call_started", call_id="c1", name="shell"),
+            ModelEvent(
+                "tool_call_arguments_delta",
+                call_id="c1",
+                text=json.dumps({"argv": ["sh", "-c", "echo oops; exit 3"]}),
+            ),
+            ModelEvent("message_completed"),
+        ],
+        [ModelEvent("text_delta", text="done"), ModelEvent("message_completed")],
+    ]
+    app = _make_app(tmp_path, FakeModel(turns))
+    bridge = app._bridge
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "跑个失败命令")
+        await _wait_until(lambda: bridge.pending is not None)
+        await pilot.click("#btn-allow-once")
+        await _wait_until(lambda: not app._run_active)
+        await pilot.pause()
+        text = _conversation_text(app)
+        # 工具行带动词标签与 (exit N)；输出预览行挂在工具行下。
+        assert "$ sh" in text
+        assert "(exit 3)" in text
+        assert "oops" in text
+        await pilot.press("ctrl+q")

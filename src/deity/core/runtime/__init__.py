@@ -38,7 +38,7 @@ from deity.core.contracts import (
     ToolDispatcher,
     ToolResult,
 )
-from deity.core.contracts.client import ClientEvent
+from deity.core.contracts.client import ClientEvent, output_preview_for_event
 from deity.core.hooks import HookPoint, HookRegistry
 from deity.core.state import transition
 from deity.core.storage import InMemorySessionRepository
@@ -543,6 +543,10 @@ class AgentLoop:
                                 "call_id": call.call_id,
                                 "name": call.name,
                                 "status": result.status,
+                                # ADR-023：工具输出预览与退出码（live 事件专用；
+                                # 持久化侧 result_json/outcome_json 早已有对应数据）。
+                                "output_preview": output_preview_for_event(result.output),
+                                "exit_code": result.exit_code,
                             },
                         )
                     after_persist = getattr(self._tools, "after_persist", None)

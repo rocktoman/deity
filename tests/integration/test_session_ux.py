@@ -125,3 +125,23 @@ async def test_forked_run_resumes_through_run_service(tmp_path: Path) -> None:
         assert await repo.status(parent) == RunStatus.COMPLETED
     finally:
         await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_rename_session_updates_title_only(tmp_path: Path) -> None:
+    repo = await SQLiteSessionRepository.open(tmp_path / "deity.db")
+    try:
+        await repo.create_run(AgentRequest("s1", "t1", str(tmp_path), "修复登录页崩溃", "fake"))
+        await repo.rename_session("s1", "  新标题很长" + "x" * 100)
+        sessions = await repo.sessions()
+        assert sessions[0]["title"] == "新标题很长" + "x" * 75  # 截断 80 字符
+        # 行不存在且给 workspace_root 时 INSERT 一行。
+        await repo.rename_session("s2", "第二会话", workspace_root=str(tmp_path))
+        titles = {item["id"]: item["title"] for item in await repo.sessions()}
+        assert titles["s2"] == "第二会话"
+        with pytest.raises(KeyError):
+            await repo.rename_session("missing", "标题")
+        with pytest.raises(ValueError):
+            await repo.rename_session("s1", "   ")
+    finally:
+        await repo.close()

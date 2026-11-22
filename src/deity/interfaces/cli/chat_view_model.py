@@ -28,6 +28,9 @@ class ToolNode:
     finished_at: float | None = None
     status: str | None = None
     expanded: bool = False
+    # ADR-023：live tool_call_completed 事件带的输出预览与退出码。
+    output_preview: str = ""
+    exit_code: int | None = None
 
     @property
     def args_text(self) -> str:
@@ -194,6 +197,10 @@ class ChatViewModel:
                 self.tools[call_id] = completed_node
             completed_node.status = str(event.payload.get("status", ""))
             completed_node.finished_at = self._clock()
+            preview = event.payload.get("output_preview")
+            completed_node.output_preview = preview if isinstance(preview, str) else ""
+            exit_code = event.payload.get("exit_code")
+            completed_node.exit_code = exit_code if isinstance(exit_code, int) else None
             delta.tool_completed = completed_node
         elif event.kind == "message_completed" or event.kind == "usage":
             self.status.update(event)

@@ -175,3 +175,88 @@ def test_make_approve_delegates_to_controller(tmp_path: Path) -> None:
     controller = ApprovalController(workspace=tmp_path, console=console, input_fn=_choices("1"))
     approve = make_approve(controller)
     assert approve("shell", {"command": "ls"}) is True
+
+
+# ADR-023：审批预期 diff（Codex 移植第二轮）
+
+
+def test_approval_diff_apply_patch_old_form(tmp_path: Path) -> None:
+    from deity.application.approval_diff import approval_diff
+
+    # 工具 schema 的旧形态键名是 old/new；old_text/new_text 也兼容。
+    diff = approval_diff(
+        "apply_patch",
+        {"path": "a.txt", "old": "one\ntwo\n", "new": "one\nTWO\nthree\n"},
+        tmp_path,
+    )
+    assert diff is not None
+    assert "--- a/a.txt" in diff
+    assert "-two" in diff and "+TWO" in diff
+    legacy = approval_diff(
+        "apply_patch",
+        {"path": "a.txt", "old_text": "one\ntwo\n", "new_text": "one\nTWO\nthree\n"},
+        tmp_path,
+    )
+    assert legacy == diff
+
+
+def test_approval_diff_apply_patch_patch_form(tmp_path: Path) -> None:
+    from deity.application.approval_diff import approval_diff
+
+    patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch\n"
+    assert approval_diff("apply_patch", {"patch": patch}, tmp_path) == patch
+
+
+def test_approval_diff_write_file_reads_old_from_disk(tmp_path: Path) -> None:
+    from deity.application.approval_diff import approval_diff
+
+    (tmp_path / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    diff = approval_diff("write_file", {"path": "a.txt", "content": "one\nTWO\n"}, tmp_path)
+    assert diff is not None
+    assert "-two" in diff and "+TWO" in diff
+    # 新建文件无旧内容可比对，返回 None（卡片另有「新建文件。」文案）。
+    assert approval_diff("write_file", {"path": "b.txt", "content": "x\n"}, tmp_path) is None
+
+
+def test_approval_diff_delete_file_and_oversize(tmp_path: Path) -> None:
+    from deity.application.approval_diff import approval_diff
+
+    (tmp_path / "a.txt").write_text("keep\n", encoding="utf-8")
+    diff = approval_diff("delete_file", {"path": "a.txt"}, tmp_path)
+    assert diff is not None
+    assert "-keep" in diff
+    assert approval_diff("delete_file", {"path": "missing.txt"}, tmp_path) is None
+    assert approval_diff("read_file", {"path": "a.txt"}, tmp_path) is None
+    huge = "x" * 200_001
+    assert approval_diff("write_file", {"path": "a.txt", "content": huge}, tmp_path) is None
+
+
+def test_approval_card_diff_text_for_write_file(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    card = ApprovalCard(
+        "write_file", {"path": "a.txt", "content": "one\nTWO\n"}, workspace=tmp_path
+    )
+    diff = card.diff_text()
+    assert diff is not None
+    assert "-two" in diff and "+TWO" in diff
+
+
+def test_strip_diff_block_removes_panel_diff_lines() -> None:
+    from deity.interfaces.tui.approval_bridge import _strip_diff_block
+
+    text = (
+        "╭─ 审批 · apply_patch ─╮\n"
+        "│ 工具：apply_patch │\n"
+        "│ --- a/a.txt │\n"
+        "│ -two │\n"
+        "│ +TWO │\n"
+        "│ 风险：将修改工作区文件。 │\n"
+        "╰─╯\n"
+    )
+    stripped, found = _strip_diff_block(text)
+    assert found is True
+    assert "--- a/a.txt" not in stripped
+    assert "风险：" in stripped
+    # 无 diff 块时原文不动。
+    plain = "│ 工具：shell │\n│ 风险：… │\n"
+    assert _strip_diff_block(plain) == (plain, False)

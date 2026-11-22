@@ -52,3 +52,28 @@ def test_fmt_elapsed_compact() -> None:
     assert fmt_elapsed_compact(3599) == "59m 59s"
     assert fmt_elapsed_compact(3600) == "1h 00m 00s"
     assert fmt_elapsed_compact(3723) == "1h 02m 03s"
+
+
+# ADR-023：/usage 用量汇总（Codex 移植第二轮）
+
+
+def test_usage_text_with_usage_lists_tokens_and_context() -> None:
+    status = ChatStatus()
+    status.context_window_tokens = 100
+    status.update(_event(1, "tool_call_completed", call_id="c1", name="shell", status="ok"))
+    status.update(_event(2, "usage", input_tokens=10, output_tokens=4))
+    status.update(_event(3, "message_completed"))
+    text = status.usage_text()
+    assert "本会话用量" in text
+    assert "工具调用：1 次" in text
+    assert "输入 10" in text and "输出 4" in text and "合计 14" in text
+    assert "上下文占用：上下文 10/100" in text
+    assert "无账号配额后端" in text
+
+
+def test_usage_text_without_usage_says_not_connected() -> None:
+    status = ChatStatus()
+    status.update(_event(1, "message_completed"))
+    text = status.usage_text()
+    assert "Token：未接通" in text
+    assert "上下文占用：—" in text

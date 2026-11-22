@@ -229,3 +229,48 @@ async def test_approval_denied_completes_waiter(tmp_path: Path) -> None:
 async def test_cancel_unknown_run_returns_false(tmp_path: Path) -> None:
     client = _client(tmp_path)
     assert client.cancel("no-such-run") is False
+
+
+# ADR-023：工具输出预览与审批 diff 字段（Codex 移植第二轮）
+
+
+def test_output_preview_for_event_empty_and_short() -> None:
+    from deity.core.contracts.client import output_preview_for_event
+
+    assert output_preview_for_event("") == ""
+    assert output_preview_for_event("ok\n") == "ok"
+    assert output_preview_for_event("a\nb\nc") == "a\nb\nc"
+
+
+def test_output_preview_for_event_truncates_extra_lines() -> None:
+    from deity.core.contracts.client import output_preview_for_event
+
+    preview = output_preview_for_event("a\nb\nc\nd\ne")
+    assert preview == "a\nb\nc\n…（共 5 行，只显示前 3 行）"
+
+
+def test_output_preview_for_event_truncates_long_chars() -> None:
+    from deity.core.contracts.client import output_preview_for_event
+
+    preview = output_preview_for_event("x" * 600)
+    assert len(preview) == 500
+    assert preview.endswith("…")
+
+
+def test_approval_request_diff_defaults_none() -> None:
+    from deity.core.contracts.client import ApprovalRequest
+
+    request = ApprovalRequest(
+        approval_id="a1", run_id="r1", call_id="c1", tool_name="read_file", args={}
+    )
+    assert request.diff is None
+    with_diff = ApprovalRequest(
+        approval_id="a1",
+        run_id="r1",
+        call_id="c1",
+        tool_name="apply_patch",
+        args={},
+        diff="--- a/x\n+++ b/x\n",
+    )
+    assert with_diff.diff is not None
+    assert with_diff.diff.startswith("--- a/x")

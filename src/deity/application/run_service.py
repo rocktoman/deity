@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from deity.adapters.code_intelligence import LexicalCodeSearch
@@ -33,6 +33,7 @@ from deity.adapters.tools.git_guard import GitGuardedDispatcher
 from deity.adapters.tools.read_only import ReadOnlyToolDispatcher
 from deity.adapters.tools.workspace import workspace_digest
 from deity.adapters.tools.writable_child import WritableChildDispatcher
+from deity.application.approval_diff import approval_diff
 from deity.application.approval_rules import ApprovalRules
 from deity.application.config import (
     QWEN_DEFAULT_BASE_URL,
@@ -241,6 +242,8 @@ class RunService:
                 call_id="",
                 tool_name=name,
                 args=approval_args_summary(args),
+                # ADR-023：改文件工具附上预期 diff（其余工具为 None）。
+                diff=approval_diff(name, args, self.workspace),
             )
             future = asyncio.run_coroutine_threadsafe(
                 self.approval_port.request_approval(request), self._loop
@@ -636,6 +639,24 @@ class RunService:
             )
         finally:
             await repo.close()
+
+    def set_sandbox_policy(self, policy: str) -> None:
+        """切换本次会话后续运行的沙箱策略（ADR-023）：仅会话内生效。
+
+        只允许 read-only / workspace-write；full-access 永不经此切换
+        （deity 无 full-access 策略）；沙箱未启用或后端为 local 时拒绝
+        ——无隔离后端可切换。`_sandbox_shell` 每次调用都重读
+        `self.sandbox`，替换后无需重建执行管线；持久化仍走配置文件
+        `[sandbox] policy`。
+        """
+        if policy not in {"read-only", "workspace-write"}:
+            raise ValueError("沙箱策略只允许 read-only / workspace-write（full-access 不可切换）")
+        if not self.sandbox.enabled or self.sandbox.backend not in {"docker", "bwrap"}:
+            raise ValueError("沙箱未启用或后端为 local，无隔离后端可切换")
+        self.sandbox = replace(
+            self.sandbox,
+            policy=cast(Literal["read-only", "workspace-write"], policy),
+        )
 
     async def _sandbox_shell(
         self,

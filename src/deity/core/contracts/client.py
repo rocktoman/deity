@@ -60,6 +60,19 @@ def approval_id_for(tool_name: str, args: dict[str, Any]) -> str:
     return "appr-" + hashlib.sha256(encoded).hexdigest()[:16]
 
 
+def output_preview_for_event(output: str, *, max_lines: int = 3, max_chars: int = 500) -> str:
+    """工具输出预览（ADR-023）：取前 max_lines 行、总长 ≤max_chars，超限截断并提示。"""
+    if not output:
+        return ""
+    lines = output.splitlines()[:max_lines]
+    text = "\n".join(lines)
+    if len(output.splitlines()) > max_lines:
+        text += f"\n…（共 {len(output.splitlines())} 行，只显示前 {max_lines} 行）"
+    if len(text) > max_chars:
+        text = text[: max_chars - 1] + "…"
+    return text
+
+
 @dataclass(frozen=True)
 class ClientEvent:
     """一条可重放的客户端事件；seq 在同一 Run 内单调递增。"""
@@ -103,6 +116,8 @@ class ApprovalRequest:
     args: dict[str, Any] = field(default_factory=dict)
     status: ApprovalStatus = "pending"
     decided_at: str | None = None
+    # ADR-023：改文件工具的预期 unified diff（截断后文本）；非改文件工具为 None。
+    diff: str | None = None
 
     def decide(self, decision: ApprovalDecision) -> "ApprovalRequest":
         """首次决定生效并记录时间；重复决定由调用方按首次结果处理。"""

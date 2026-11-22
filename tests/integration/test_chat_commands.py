@@ -349,3 +349,81 @@ async def test_status_shows_branch_in_git_repo(tmp_path: Path) -> None:
     _git_repo(tmp_path)
     output, _ = await _run_session(FakeService(tmp_path), ["/status", "/exit"], tmp_path)
     assert "分支：" in output
+
+
+# ADR-023：/usage、/rename、/sandbox（Codex 移植第二轮）
+
+
+@pytest.mark.asyncio
+async def test_usage_shows_session_summary_without_usage(tmp_path: Path) -> None:
+    output, _ = await _run_session(FakeService(tmp_path), ["任务", "/usage", "/exit"], tmp_path)
+    assert "本会话用量" in output
+    assert "轮次：1" in output
+    assert "Token：未接通" in output
+    assert "无账号配额后端" in output
+
+
+@pytest.mark.asyncio
+async def test_rename_updates_session_title(tmp_path: Path) -> None:
+    output, session = await _run_session(
+        FakeService(tmp_path), ["/rename 我的会话", "/exit"], tmp_path
+    )
+    assert "已重命名当前会话为：我的会话" in output
+    repo = await SQLiteSessionRepository.open(tmp_path / "deity.db")
+    try:
+        items = await repo.sessions()
+    finally:
+        await repo.close()
+    assert any(item["title"] == "我的会话" for item in items)
+    assert session.state.session_id is not None
+
+
+@pytest.mark.asyncio
+async def test_rename_without_title_shows_usage(tmp_path: Path) -> None:
+    output, _ = await _run_session(FakeService(tmp_path), ["/rename", "/exit"], tmp_path)
+    assert "用法：/rename <新标题>" in output
+
+
+@pytest.mark.asyncio
+async def test_sandbox_status_without_config(tmp_path: Path) -> None:
+    output, _ = await _run_session(FakeService(tmp_path), ["/sandbox", "/exit"], tmp_path)
+    assert "沙箱：当前服务未提供沙箱配置。" in output
+    output, _ = await _run_session(FakeService(tmp_path), ["/sandbox read-only", "/exit"], tmp_path)
+    assert "当前服务不支持沙箱策略切换。" in output
+
+
+@pytest.mark.asyncio
+async def test_sandbox_status_and_switch_with_real_service(tmp_path: Path) -> None:
+    service = _real_service(tmp_path)
+    output, _ = await _run_session(service, ["/sandbox", "/exit"], tmp_path)
+    assert "启用：否" in output
+    assert "后端：local" in output
+    assert "local 后端无隔离" in output
+    # 沙箱未启用：拒绝切换。
+    output, _ = await _run_session(service, ["/sandbox read-only", "/exit"], tmp_path)
+    assert "切换失败：沙箱未启用或后端为 local" in output
+    # full-access 永不经命令切换。
+    output, _ = await _run_session(service, ["/sandbox full-access", "/exit"], tmp_path)
+    assert "切换失败：沙箱策略只允许 read-only / workspace-write" in output
+    # 未知策略同样拒绝。
+    output, _ = await _run_session(service, ["/sandbox bogus", "/exit"], tmp_path)
+    assert "切换失败" in output
+
+
+@pytest.mark.asyncio
+async def test_sandbox_switch_changes_session_policy(tmp_path: Path) -> None:
+    from deity.application.config import SandboxConfig
+
+    service = RunService(
+        db_path=tmp_path / "deity.db",
+        workspace=tmp_path,
+        model=FakeModel(),  # type: ignore[arg-type]
+        permission=PermissionConfig(shell="ask", workspace_write="ask"),
+        sandbox=SandboxConfig(enabled=True, backend="bwrap", policy="workspace-write"),
+    )
+    output, _ = await _run_session(service, ["/sandbox read-only", "/exit"], tmp_path)
+    assert "已切换沙箱策略为：read-only" in output
+    assert service.sandbox.policy == "read-only"
+    output, _ = await _run_session(service, ["/sandbox", "/exit"], tmp_path)
+    assert "策略：read-only" in output
+    assert "bwrap" in output
