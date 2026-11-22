@@ -7,6 +7,18 @@ from dataclasses import dataclass, field
 from deity.core.contracts.client import ClientEvent
 
 
+def fmt_elapsed_compact(elapsed_secs: int) -> str:
+    """紧凑耗时格式（Codex status_indicator 式）：`0s` / `1m 00s` / `1h 02m 03s`。"""
+    if elapsed_secs < 60:
+        return f"{elapsed_secs}s"
+    if elapsed_secs < 3600:
+        return f"{elapsed_secs // 60}m {elapsed_secs % 60:02d}s"
+    hours = elapsed_secs // 3600
+    minutes = (elapsed_secs % 3600) // 60
+    seconds = elapsed_secs % 60
+    return f"{hours}h {minutes:02d}m {seconds:02d}s"
+
+
 @dataclass
 class ChatStatus:
     """一轮/一会话的状态聚合：轮次、工具调用数、耗时、token（有 usage 才有）。"""

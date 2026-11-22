@@ -675,8 +675,8 @@ async def test_interactive_uses_deity_theme(tmp_path: Path) -> None:
         assert app.theme in ("deity-dark", "deity-light")
         theme = app.get_theme(app.theme)
         assert theme is not None
-        # 品牌色：浅底 Klee 深绿原色、深底提亮变体（D1）。
-        assert theme.accent in ("#1E4C35", "#2E7D5B")
+        # 品牌色：深底黑色主题中性强调色、浅底 Klee 深绿原色（2026-11-22 黑色主题）。
+        assert theme.accent in ("#E8EAE8", "#1E4C35")
         assert "text-quaternary" in theme.variables
         await pilot.press("ctrl+q")
 
@@ -904,7 +904,8 @@ async def test_interactive_tool_lines_are_compact(tmp_path: Path) -> None:
         await pilot.pause()
         text = _conversation_text(app)
         # 一行式条目 + 缩进结果行；不再是旧的 ▸/▾ 面板式呈现。
-        assert "⏺ write_file(" in text
+        # Codex 移植后工具行改动词标签：⏺ 写 b.txt（不再是 ⏺ write_file(…））。
+        assert "⏺ 写 b.txt" in text
         assert "⎿" in text
         assert "▸ write_file" not in text
         await pilot.press("ctrl+q")
@@ -1062,4 +1063,112 @@ async def test_interactive_approval_collapses_input(tmp_path: Path) -> None:
         assert app.query_one("#input-row").display
         assert isinstance(app.focused, ChatInput)
         assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "hello"
+        await pilot.press("ctrl+q")
+
+
+# -- Codex 行为移植：diff 块 / 耗时 / 动词标签 / /theme / /copy / /new / @ 补全 --
+
+
+@pytest.mark.asyncio
+async def test_codex_diff_block_mounts_on_turn_diff(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    from deity.interfaces.tui.interactive import DiffBlock
+
+    app = _make_app(tmp_path, FakeModel(_write_turns("feature.py", "print(1)")))
+    bridge = app._bridge
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "写 feature.py")
+        await _wait_until(lambda: bridge.pending is not None)
+        await pilot.click("#btn-allow-once")
+        await _wait_until(lambda: not app._run_active)
+        await pilot.pause()
+        assert (tmp_path / "feature.py").read_text(encoding="utf-8") == "print(1)"
+        blocks = list(app.query(DiffBlock))
+        assert len(blocks) >= 1
+        assert "feature.py" in str(blocks[0].render())
+        assert "print(1)" in str(blocks[0].render())
+        # 工具行动词标签（Codex ExecCell 式）：写 feature.py。
+        assert "写 feature.py" in _conversation_text(app)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex_working_indicator_shows_elapsed(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    import re
+
+    app = _make_app(tmp_path, HangingModel())
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "慢任务")
+        await _wait_until(lambda: app._run_active)
+        await _wait_until(lambda: "生成中" in str(app.query_one("#status-wait").render()))
+        text = str(app.query_one("#status-wait").render())
+        assert "生成中" in text
+        assert re.search(r"\(\d+s · Ctrl\+C 取消\)", text) is not None
+        await pilot.press("ctrl+c")
+        await _wait_until(lambda: not app._run_active)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex_theme_command_switches_theme(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/theme light")
+        await _wait_until(lambda: app.theme == "deity-light")
+        assert "已切换到浅色主题" in _conversation_text(app)
+        await _submit(app, pilot, "/theme")
+        await _wait_until(lambda: app.theme == "deity-dark")
+        assert app._palette["accent"] == "#E8EAE8"
+        assert "已切换到深色主题" in _conversation_text(app)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex_copy_command_copies_last_reply(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(
+        tmp_path,
+        FakeModel([[ModelEvent("text_delta", text="复制我"), ModelEvent("message_completed")]]),
+    )
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "说点什么")
+        await _wait_until(lambda: not app._run_active)
+        await _submit(app, pilot, "/copy")
+        await _wait_until(lambda: "已复制上一轮回答" in _conversation_text(app))
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex_new_command_starts_fresh_session(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        before = app.state.session_id
+        await _submit(app, pilot, "/new")
+        await _wait_until(lambda: "已开始新会话" in _conversation_text(app))
+        assert app.state.session_id != before
+        assert "欢迎来到 Deity" in _conversation_text(app)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_codex_mention_completion_lists_and_completes_files(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    (tmp_path / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        box = app.query_one("#input", ChatInput)
+        box.text = "看看 @fea"
+        box.focus()
+        await pilot.pause()
+        await _wait_until(lambda: "文件 (Tab 补全)" in str(app.query_one("#cmd-hint").render()))
+        assert "@feature.py" in str(app.query_one("#cmd-hint").render())
+        await pilot.press("tab")
+        await pilot.pause()
+        assert box.text == "看看 @feature.py "
         await pilot.press("ctrl+q")

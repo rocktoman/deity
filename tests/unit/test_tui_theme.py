@@ -1,4 +1,4 @@
-"""Deity TUI 自定义主题（Klee 风格 P0）：品牌绿、四级文字色、明暗默认。"""
+"""Deity TUI 自定义主题：黑色主题（深底中性色）、四级文字色、明暗默认。"""
 
 from deity.interfaces.tui.theme import (
     ACCENT_DARK,
@@ -16,11 +16,13 @@ def _luminance(hex_color: str) -> float:
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
-def test_accent_is_klee_deep_green_with_brighter_dark_variant() -> None:
-    # 浅底用 Klee 原色；深底变体同色相提亮，对比更足。
+def test_accent_is_neutral_black_theme() -> None:
+    # 黑色主题（2026-11-22）：深底强调色改为中性白/浅灰，界面无绿色；
+    # 浅底主题暂不动，仍用 Klee 深绿原色。
+    assert ACCENT_DARK == "#E8EAE8"
+    assert DEITY_DARK.accent == ACCENT_DARK
     assert ACCENT_LIGHT == "#1E4C35"
     assert DEITY_LIGHT.accent == ACCENT_LIGHT
-    assert DEITY_DARK.accent == ACCENT_DARK
     assert _luminance(ACCENT_DARK) > _luminance(ACCENT_LIGHT)
 
 

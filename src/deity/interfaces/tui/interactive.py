@@ -16,17 +16,25 @@ Shift+Tab 循环切换模式（普通 → 计划 → 自动接受）、Ctrl+C �
 输入框正下方的模式状态行、一行式工具条目 + 缩进结果行。
 
 Klee 风格对齐（ADR-022 修订，2026-11-21）：自定义深浅两套主题
-（theme.py，品牌色取 Klee 深绿 #1E4C35、四级文字色层级）、边框
-圆角化、消息分级配色、Markdown 克制化样式、间距节奏统一。
+（theme.py，四级文字色层级）、边框圆角化、消息分级配色、Markdown
+克制化样式、间距节奏统一。Klee 深绿品牌色已于 2026-11-22 废弃，
+深色主题改为黑色基底（见 theme.py）。
 
 Gemini 风格对齐（ADR-022 修订，2026-11-22）：输入框去框化（上下
 圆角细线 + 底色条）、输入框上方两行式 StatusRow（等待/提示行 +
 分隔线 + 模式行）、用户消息 `> ` 前缀、等待行左竖线、上下文占用
 着色、模式动态副提示、SectionHeader 顶线、审批时折叠输入区。
-神之眼徽记与 Klee 深绿品牌色保留，不引入 Gemini 品牌元素。
+神之眼徽记保留形状，不引入 Gemini 品牌元素。
+
+Codex 行为移植（ADR-022 修订，2026-11-22）：每轮末 diff 块、exec
+动词标签、工作耗时、斜杠命令 /diff /new /review /export /copy
+/theme /archive、@ 文件补全（见 docs/06-legal/third-party-notices.md
+的 Codex 条目；Python 重新实现，不复制 Rust 源码）。
 """
 
 import asyncio
+import os
+import re
 import shlex
 import time
 from collections.abc import Callable
@@ -52,13 +60,21 @@ from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
 from deity.interfaces.cli.chat_commands import (
     HELP_TEXT,
+    REVIEW_PROMPT,
     ChatState,
+    export_session_markdown,
     model_listing_lines,
     run_error_message,
 )
-from deity.interfaces.cli.chat_status import ChatStatus
+from deity.interfaces.cli.chat_status import ChatStatus, fmt_elapsed_compact
 from deity.interfaces.cli.chat_view_model import ChatViewModel, ToolNode
+from deity.interfaces.cli.diff_render import (
+    format_diff_text,
+    format_turn_diff,
+    format_turn_diff_summary,
+)
 from deity.interfaces.cli.plan import build_approved, plan_lines
+from deity.interfaces.cli.workspace_diff import git_branch, workspace_diff
 from deity.interfaces.tui.approval_bridge import PendingPrompt, TuiApprovalBridge
 from deity.interfaces.tui.theme import apply_deity_theme, palette
 
@@ -84,6 +100,13 @@ AVAILABLE_SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/doctor", "运行环境与配置检查"),
     ("/clear", "清屏对话区"),
     ("/compact", "查看上下文压缩配置状态"),
+    ("/diff", "查看工作区未提交改动"),
+    ("/new", "开始新会话"),
+    ("/review", "审查工作区未提交改动"),
+    ("/export", "导出当前会话为 Markdown 文件"),
+    ("/copy", "复制上一轮回答到剪贴板"),
+    ("/theme", "切换工作台深浅主题"),
+    ("/archive", "归档当前会话并开始新会话"),
     ("/exit", "退出 Deity 工作台"),
 ]
 
@@ -115,6 +138,25 @@ _MODE_SUBHINT = {
     "计划": "shift+tab 切换到自动接受",
     "自动接受": "shift+tab 回到普通",
 }
+
+# @ 文件补全（Codex mention 式）：行尾 @<片段> 触发，子串匹配。
+_MENTION_AT_END_RE = re.compile(r"@([^\s@]*)$")
+_MENTION_SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules"}
+
+
+def _workspace_files(workspace: Path, partial: str, *, limit: int = 200) -> list[str]:
+    """工作区文件相对路径：按 @ 后缀子串匹配（不区分大小写），排序后上限截断。"""
+    needle = partial.lower()
+    found: list[str] = []
+    for root, dirs, files in os.walk(workspace):
+        dirs[:] = [d for d in dirs if d not in _MENTION_SKIP_DIRS and not d.startswith(".")]
+        for name in files:
+            rel = str(Path(root, name).relative_to(workspace))
+            if needle in rel.lower():
+                found.append(rel)
+                if len(found) >= limit:
+                    return sorted(found)
+    return sorted(found)
 
 
 def greeting_for_hour(hour: int) -> str:
@@ -189,11 +231,12 @@ class ChatInput(TextArea):
         """输入框内按 Shift+Tab：请求循环切换模式（普通/计划/自动接受）。"""
 
     class CommandHintUpdated(Message):
-        """输入框内的斜杠命令联想更新。"""
+        """输入框内的联想更新：斜杠命令（kind="command"）或 @ 文件（kind="mention"）。"""
 
-        def __init__(self, matches: list[tuple[str, str]]) -> None:
+        def __init__(self, matches: list[tuple[str, str]], kind: str = "command") -> None:
             super().__init__()
             self.matches = matches
+            self.kind = kind
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -209,8 +252,16 @@ class ChatInput(TextArea):
                 (cmd, desc) for cmd, desc in AVAILABLE_SLASH_COMMANDS if cmd.startswith(prefix)
             ]
             self.post_message(self.CommandHintUpdated(matches))
-        else:
-            self.post_message(self.CommandHintUpdated([]))
+            return
+        mention = _MENTION_AT_END_RE.search(text)
+        workspace = getattr(getattr(self, "app", None), "_workspace", None)
+        if mention is not None and isinstance(workspace, Path):
+            matches = [
+                (f"@{path}", "文件") for path in _workspace_files(workspace, mention.group(1))
+            ][:5]
+            self.post_message(self.CommandHintUpdated(matches, kind="mention"))
+            return
+        self.post_message(self.CommandHintUpdated([]))
 
     async def _on_key(self, event: Any) -> None:
         if (
@@ -238,6 +289,24 @@ class ChatInput(TextArea):
             return
         if event.key == "tab":
             text = self.text
+            mention = _MENTION_AT_END_RE.search(text)
+            workspace = getattr(getattr(self, "app", None), "_workspace", None)
+            if mention is not None and isinstance(workspace, Path):
+                matches = _workspace_files(workspace, mention.group(1))
+                if matches:
+                    event.prevent_default()
+                    event.stop()
+                    if len(matches) == 1:
+                        completed = matches[0]
+                    else:
+                        completed = matches[0]
+                        for candidate in matches[1:]:
+                            while not candidate.startswith(completed):
+                                completed = completed[:-1]
+                    self.text = text[: mention.start()] + "@" + completed + " "
+                    self.move_cursor((0, len(self.text)))
+                    self.post_message(self.CommandHintUpdated([]))
+                    return
             if text.startswith("/"):
                 prefix = text.split()[0] if text else ""
                 matches = [cmd for cmd, _ in AVAILABLE_SLASH_COMMANDS if cmd.startswith(prefix)]
@@ -343,6 +412,44 @@ class ToolBlock(Static):
         self.update(self._formatter(self.node))
 
 
+class DiffBlock(Static):
+    """可折叠 diff 块（Codex PatchHistoryCell 式）：默认展开 hunks，点击折叠回摘要。
+
+    两种来源：turn_diff 事件 payload（files[]），或 /diff 的原始 unified diff 文本。
+    """
+
+    def __init__(
+        self,
+        payload: dict[str, Any] | None,
+        colors: dict[str, str],
+        *,
+        raw_text: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self._payload = payload
+        self._colors = colors
+        self._raw_text = raw_text
+        self._expanded = True
+        if raw_text is not None:
+            super().__init__(format_diff_text(raw_text, colors), **kwargs)
+        else:
+            super().__init__(format_turn_diff(payload or {}, colors), **kwargs)
+
+    def on_click(self) -> None:
+        self._expanded = not self._expanded
+        if self._raw_text is not None:
+            if self._expanded:
+                self.update(format_diff_text(self._raw_text, self._colors))
+            else:
+                preview = "\n".join(self._raw_text.splitlines()[:20])
+                self.update(format_diff_text(preview + "\n… 点击展开", self._colors))
+            return
+        if self._expanded:
+            self.update(format_turn_diff(self._payload or {}, self._colors))
+        else:
+            self.update(format_turn_diff_summary(self._payload or {}, self._colors))
+
+
 class InteractiveApp(App[None]):
     """Codex / Claude Code 式交互界面：对话区 + 审批面板 + 状态栏 + 输入框。"""
 
@@ -382,6 +489,7 @@ class InteractiveApp(App[None]):
     .msg-waiting { color: $text-secondary; border-left: solid $text-tertiary; padding-left: 1; text-style: italic; }
     .msg-metrics { color: $text-quaternary; }
     .msg-tool { padding-left: 1; }
+    .msg-diff { padding-left: 1; }
     .msg-assistant { margin-bottom: 1; }
     #input-row.streaming { border-top: round $text-tertiary; border-bottom: round $text-tertiary; }
     #input-hint { height: 1; padding: 0 1; color: $text-tertiary; }
@@ -437,6 +545,7 @@ class InteractiveApp(App[None]):
         self._waiting_block: Static | None = None
         self._waiting_frame = 0
         self._spinner_frame = 0
+        self._run_started_at: float | None = None
         self._tip_index = 0
         self._was_run_active = False
         self._prompt_handler: Any = None
@@ -609,7 +718,16 @@ class InteractiveApp(App[None]):
         if self._bridge.pending is not None or self._confirm_futures:
             wait_text = "⠏ 等待审批…"
         elif self._run_active:
-            wait_text = f"{_SPINNER_FRAMES[self._spinner_frame]} 生成中…"
+            # Codex 工作指示式：spinner + 生成中 + （耗时 · Ctrl+C 取消）。
+            elapsed = (
+                int(time.monotonic() - self._run_started_at)
+                if self._run_started_at is not None
+                else 0
+            )
+            wait_text = (
+                f"{_SPINNER_FRAMES[self._spinner_frame]} 生成中…"
+                f" ({fmt_elapsed_compact(elapsed)} · Ctrl+C 取消)"
+            )
         else:
             wait_text = ""
         wait.update(wait_text)
@@ -649,11 +767,12 @@ class InteractiveApp(App[None]):
             hint_box.remove_class("show")
             hint_box.update("")
             return
-        lines = ["[bold cyan]可用命令 (Tab 补全):[/bold cyan]"]
+        header = "文件 (Tab 补全):" if message.kind == "mention" else "可用命令 (Tab 补全):"
+        lines = [f"[bold cyan]{header}[/bold cyan]"]
         for cmd, desc in message.matches[:5]:
             lines.append(f"  [bold]{cmd}[/bold] - {desc}")
         if len(message.matches) > 5:
-            lines.append(f"  [dim]...还有 {len(message.matches) - 5} 个命令[/dim]")
+            lines.append(f"  [dim]...还有 {len(message.matches) - 5} 个[/dim]")
         hint_box.update("\n".join(lines))
         hint_box.add_class("show")
 
@@ -696,6 +815,7 @@ class InteractiveApp(App[None]):
     async def _execute_task(self, text: str) -> None:
         """跑一轮任务：run_stream 事件喂 ChatViewModel 并增量建块。"""
         self._run_active = True
+        self._run_started_at = time.monotonic()
         self._append_user(text)
         self._show_waiting()
         view = ChatViewModel()
@@ -720,6 +840,8 @@ class InteractiveApp(App[None]):
                     self._mount_tool_block(delta.tool_started)
                 if delta.tool_completed is not None:
                     self._update_tool_block(delta.tool_completed)
+                if delta.diff is not None:
+                    self._mount_diff_block(delta.diff)
                 if delta.terminal:
                     await self._finish_text_block(view)
                     self._append_metrics(view)
@@ -733,7 +855,14 @@ class InteractiveApp(App[None]):
             self._current_run_id = None
             self._accumulate(view)
             self._run_active = False
+            self._run_started_at = None
             self._refresh_status()
+
+    def _mount_diff_block(self, payload: dict[str, Any]) -> None:
+        """每轮末 diff 块（Codex PatchHistoryCell 式）：摘要头 + hunks，可点击折叠。"""
+        block = DiffBlock(payload, self._palette, classes="msg-diff")
+        self._conversation.mount(block)
+        self._scroll_end()
 
     async def _sync_text_block(self, view: ChatViewModel) -> None:
         segment = view.text[self._rendered_text_len :]
@@ -799,11 +928,10 @@ class InteractiveApp(App[None]):
         （ok=success、error=error、denied/timeout=warning）。
         """
         colors = self._palette
-        summary = node.arguments_summary() or "—"
         line = Text()
         line.append("⏺ ", style=f"bold {colors['accent']}")
-        line.append(node.name, style="bold")
-        line.append(f"({summary})")
+        # Codex ExecCell 式动词标签（读/搜/列/$/写/改/删 + 目标），其余保持原样。
+        line.append(node.display_label(), style="bold")
         if node.finished_at is None:
             line.append(" · 运行中", style=colors["tertiary"])
             return line
@@ -1201,6 +1329,7 @@ class InteractiveApp(App[None]):
     async def _plan_flow(self, text: str) -> None:
         """计划模式提交：建计划 → 界面确认 → 脏文件确认 → Build。"""
         self._run_active = True
+        self._run_started_at = time.monotonic()
         self._append_user(text)
         self._show_waiting()
         self._refresh_status()
@@ -1227,6 +1356,7 @@ class InteractiveApp(App[None]):
         finally:
             self._hide_waiting()
             self._run_active = False
+            self._run_started_at = None
             self._refresh_status()
 
     async def _authorize_dirty(
@@ -1375,6 +1505,30 @@ class InteractiveApp(App[None]):
             except Exception as exc:  # noqa: BLE001
                 self._append_system(f"获取 MCP 配置失败：{exc}")
             return
+        if prompt == "/diff":
+            self.run_worker(self._command_diff(), group="run", exclusive=True)
+            return
+        if prompt == "/new":
+            self.run_worker(self._command_new(), group="run", exclusive=True)
+            return
+        if prompt == "/review":
+            if self._run_active:
+                self._append_system("已有任务在运行中，请等待完成后再审查。")
+                return
+            self.run_worker(self._execute_task(REVIEW_PROMPT), group="run", exclusive=True)
+            return
+        if prompt == "/export":
+            self.run_worker(self._command_export(), group="run", exclusive=True)
+            return
+        if prompt == "/copy":
+            self._command_copy()
+            return
+        if prompt == "/theme" or prompt.startswith("/theme "):
+            self._command_theme(prompt.removeprefix("/theme").strip())
+            return
+        if prompt == "/archive":
+            self.run_worker(self._command_archive(), group="run", exclusive=True)
+            return
         if prompt.split(maxsplit=1)[0] in _CLI_ONLY_COMMANDS:
             self._append_system("该命令请在行式 CLI 中使用（非 TTY 或 deity run 的行式界面）。")
             return
@@ -1390,10 +1544,17 @@ class InteractiveApp(App[None]):
             f"模式：{mode}",
             f"会话：{self.state.session_id[:8]}",
             f"工作区：{self._workspace}",
-            f"轮次：{status.turns} · 工具调用：{status.tool_calls} 次",
-            f"Token：{status.token_text()}",
-            f"耗时：{status.elapsed_seconds:.1f}s",
         ]
+        branch = git_branch(self._workspace)
+        if branch is not None:
+            lines.append(f"分支：{branch}")
+        lines.extend(
+            [
+                f"轮次：{status.turns} · 工具调用：{status.tool_calls} 次",
+                f"Token：{status.token_text()}",
+                f"耗时：{status.elapsed_seconds:.1f}s",
+            ]
+        )
         context_text = status.context_text()
         if context_text is not None:
             # 上下文占用自状态栏瘦身后回归 /status 详情（P2-5）；
@@ -1407,6 +1568,79 @@ class InteractiveApp(App[None]):
         count = len([m for m in messages[-8:] if m.get("role") in {"user", "assistant"}])
         lines.append(f"上下文消息数：{count}（最近 8 条口径）")
         self._append_system("\n".join(lines))
+
+    async def _command_diff(self) -> None:
+        """工作台 /diff（Codex 式）：工作区未提交改动以可折叠 diff 块挂在对话区。"""
+        result = await workspace_diff(self._workspace)
+        diff_text = str(result.get("diff", ""))
+        untracked = result.get("untracked", [])
+        if not diff_text and not untracked:
+            self._append_system("工作区无未提交改动。")
+            return
+        if diff_text:
+            self._conversation.mount(
+                DiffBlock(None, self._palette, raw_text=diff_text, classes="msg-diff")
+            )
+            self._scroll_end()
+        if untracked:
+            self._append_system(
+                f"未追踪文件（{len(untracked)}）：\n"
+                + "\n".join(f"  + {path}" for path in untracked)
+            )
+
+    async def _command_new(self) -> None:
+        """工作台 /new（Codex 式）：换新会话 id，清屏并重新挂欢迎头。"""
+        self.state.session_id = str(uuid4())
+        self.state.plan_mode = False
+        self._view = None
+        await self._conversation.remove_children()
+        self._mount_welcome()
+        self._append_system("已开始新会话。")
+        self._refresh_status()
+
+    async def _command_archive(self) -> None:
+        """工作台 /archive（Codex 式）：归档当前会话后开始新会话。"""
+        repo = await SQLiteSessionRepository.open(self.service.db_path)
+        try:
+            await repo.archive_session(self.state.session_id, archived=True)
+        finally:
+            await repo.close()
+        self._append_system("已归档上一会话。")
+        await self._command_new()
+
+    async def _command_export(self) -> None:
+        """工作台 /export（Codex 式）：当前会话导出为 Markdown 文件。"""
+        target = await export_session_markdown(self.service, self.state.session_id, self._workspace)
+        if target is None:
+            self._append_system("当前会话暂无消息可导出。")
+            return
+        self._append_system(f"已导出：{target}")
+
+    def _command_copy(self) -> None:
+        """工作台 /copy（Codex 式）：复制上一轮回答文本到剪贴板。"""
+        text = self._view.text if self._view is not None else ""
+        if not text:
+            self._append_system("暂无可复制的回答。")
+            return
+        self.copy_to_clipboard(text)
+        self._append_system("已复制上一轮回答。")
+
+    def _command_theme(self, arg: str) -> None:
+        """工作台 /theme（Codex 式）：切换深浅主题；无参数时在两者间切换。"""
+        name = arg.strip().lower()
+        if name == "dark":
+            dark = True
+        elif name == "light":
+            dark = False
+        elif name == "":
+            dark = self.theme != "deity-dark"
+        else:
+            self._append_system("用法：/theme [dark|light]")
+            return
+        self.theme = "deity-dark" if dark else "deity-light"
+        self._palette = palette(dark=dark)
+        self._append_system(f"已切换到{'深色' if dark else '浅色'}主题。")
+        self._refresh_status()
 
     def _command_tools(self, prompt: str) -> None:
         view = self._view

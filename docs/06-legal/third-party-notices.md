@@ -45,5 +45,23 @@ Deity 的实现均为自研；个别模块在设计与算法层面参照了开�
   分级规则与门的位置均为 Deity 独立设计与实现
   （`src/deity/core/delegation/__init__.py`、
   `src/deity/application/run_service.py`）。
+- 参照对象：`codex-rs/tui/src/`（提交 ee344ca）的 TUI 行为：
+  `diff_render.rs` 的 diff 摘要与 hunk 呈现、`history_cell/patches.rs`
+  的每轮末补丁块、`exec_cell/render.rs` 的动词标签与输出截断、
+  `status_indicator_widget.rs` 的工作耗时、`slash_command.rs` 的
+  斜杠命令集、`footer_hint.rs` 的按键提示；`codex-rs/cli/src/main.rs`
+  的子命令集。
+- 本仓库对应实现：`src/deity/interfaces/cli/diff_render.py`、
+  `src/deity/interfaces/cli/workspace_diff.py`、
+  `src/deity/interfaces/cli/chat_view_model.py` 的
+  `ToolNode.display_label` 与 turn_diff 折叠、
+  `src/deity/interfaces/cli/chat_status.py` 的 `fmt_elapsed_compact`、
+  `src/deity/interfaces/cli/chat_commands.py` 与
+  `src/deity/interfaces/tui/interactive.py` 的新增斜杠命令与
+  `DiffBlock`、`src/deity/interfaces/cli/main.py` 的 `deity review`
+  （ADR-022 修订，2026-11-22）。刻意差异：diff 新增行用中性浅灰底
+  而非 Codex 的绿色（配合黑色主题）；工具输出预览与 (exit N) 未移植——
+  live 事件无输出/退出码字段；审批内 diff 预览、/usage、/rename、
+  /model 弹窗等 Codex 元素未移植（见 ADR-022 修订节）。
 - 许可证全文：https://www.apache.org/licenses/LICENSE-2.0
   （Apache License, Version 2.0；Copyright OpenAI）。

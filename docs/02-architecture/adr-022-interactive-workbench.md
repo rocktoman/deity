@@ -92,3 +92,41 @@ Gemini 品牌（名称、logo、✦、蓝紫玫红渐变、彩虹 spinner）；�
 改为状态行在输入框上方；`test_interactive_round_borders` 随去框化
 改为上下圆角、左右无边框；`test_interactive_submit_completes_run`
 随用户消息前缀改为 `> `。监视台 app.py 未动。
+
+## 2026-11-22 修订：Codex 行为移植 + 黑色主题
+
+用户要求通读 Codex（openai/codex，提交 ee344ca，Apache-2.0）的 CLI 与
+TUI 做法并搬到 deity 上；同时把 Klee 深绿品牌色换成黑色主题。本修订
+只动呈现层与命令层，不改事件协议（turn_diff 事件种类已存在，见
+ADR-018）、配置格式、SQLite schema 与审批语义；所有移植均为 Python
+重新实现，不复制 Rust 源码，出处见 docs/06-legal/third-party-notices.md
+的 Codex 条目。
+
+1. **黑色主题**：深色主题改为黑色基底——背景 #000000、面板 #242424、
+   强调色改为白色/浅灰中性色（#E8EAE8），界面里不再出现绿色；神之眼
+   徽记保留形状、颜色改为中性；浅色主题暂不动。Klee 深绿 #1E4C35/#2E7D5B
+   品牌色废弃，`test_accent_is_klee_deep_green_with_brighter_dark_variant`
+   与工作台主题断言随之改写（非放宽）。
+2. **每轮末 diff 块**：ChatViewModel 折叠 turn_diff 事件（ViewDelta.diff），
+   行式与工作台在每轮末挂可点击折叠的 diff 块（摘要头 `• 已改动 N 个文件
+   (+A -D)` + hunks，行号 + +/- gutter，新增行浅灰底、删除行红底）。
+   Codex 的绿/红 diff 配色改为中性浅灰 + 红，不引入绿色。
+3. **exec 动词标签**：工具行由 `名(参数摘要)` 改为动词标签（读/搜/列/
+   $/写/改/删 + 目标），其余工具仍用 `名(参数摘要)`；工具输出预览与
+   (exit N) 不搬——live 事件无输出/退出码字段，改协议需另立 ADR。
+4. **工作耗时**：等待行改为 `⠋ 生成中… (12s · Ctrl+C 取消)`，
+   格式 0s/1m 00s/1h 02m 03s。
+5. **斜杠命令**：新增 /diff（工作区未提交改动）、/new（新会话）、
+   /review（审查未提交改动，固定提示词走正常 run 通路）、/export
+   （当前会话导出 Markdown）、/copy（复制上一轮回答到剪贴板，仅工作台）、
+   /theme（切换深浅主题，仅工作台）、/archive（归档当前会话并新开）；
+   /status 加分支行；行式 /copy 与 /theme 明确提示仅工作台可用。
+   新增 CLI 顶层命令 `deity review [--base <ref>]`（一次性审查任务）。
+6. **@ 文件补全**：输入框行尾 @<片段> 触发工作区文件子串匹配联想，
+   Tab 补全（唯一匹配直接补全、多匹配补公共前缀），复用斜杠命令联想框。
+7. **不搬**：/model 弹窗（行内列表已够用）、/usage（无账号后端）、
+   /rename（无重命名存储接口）、/vim /pets /raw /tui /statusline /keymap
+   /hooks 浏览器、账号/登录/订阅/云/守护进程/桌面/语音/IDE/图片/
+   后台终端、沙箱后端（deity 已有 bwrap）、推理强度（无 ModelConfig
+   字段）、审批内 diff 预览（审批 payload 无 diff）；快捷键不新增
+   Ctrl+R/Ctrl+L/Ctrl+D/Ctrl+P/N（deity 已有等价键位）。

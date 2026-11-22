@@ -292,6 +292,45 @@ def run(
 
 
 @app.command()
+def review(
+    base: Annotated[str, typer.Option("--base", help="对比基准 ref（默认 HEAD）")] = "HEAD",
+    config: Annotated[Path | None, typer.Option("--config", help="TOML 配置路径")] = None,
+    workspace: Annotated[Path | None, typer.Option("--workspace", help="工作区路径")] = None,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite 路径")] = None,
+    session: Annotated[str | None, typer.Option("--session", help="已有会话 ID")] = None,
+) -> None:
+    """审查工作区相对基准的未提交改动（Codex review 式一次性任务）。"""
+    from deity.interfaces.cli.chat_commands import REVIEW_PROMPT
+
+    try:
+        workdir = (workspace or Path.cwd()).resolve(strict=True)
+        settings = _resolve_config(config, workdir)
+        db_path = db or Path.home() / ".local/share/deity/deity.db"
+        rules = ApprovalRules.load()
+        approval = ApprovalController(workspace=workdir, console=console, rules=rules)
+        service = RunService.from_config(
+            settings,
+            db_path=db_path,
+            workspace=workdir,
+            approve=make_approve(approval),
+            rules=rules,
+        )
+        model_name = settings.model.name  # type: ignore[union-attr]
+        prompt = REVIEW_PROMPT if base == "HEAD" else f"{REVIEW_PROMPT}（对比基准：{base}）"
+        result = asyncio.run(service.run(prompt, model_name=model_name, session_id=session))
+        console.print(result.final_text or "无最终回答")
+    except (ModelFailure, ProtocolError, BudgetExceeded) as exc:
+        console.print(f"运行失败：{run_error_message(exc)}", style="red")
+        raise typer.Exit(code=1) from None
+    except (ValueError, OSError) as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=2) from None
+    except KeyboardInterrupt:
+        console.print("运行已取消", style="yellow")
+        raise typer.Exit(code=130) from None
+
+
+@app.command()
 def sessions(
     db: Annotated[Path | None, typer.Option("--db", help="SQLite 路径")] = None,
     all_sessions: Annotated[bool, typer.Option("--all", help="包含已归档会话")] = False,

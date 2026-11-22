@@ -1,7 +1,7 @@
 """V1.1-M2：CLI 视图模型（事件折叠成状态树、delta、工具节点折叠/展开）。"""
 
 from deity.core.contracts.client import ClientEvent
-from deity.interfaces.cli.chat_view_model import ChatViewModel
+from deity.interfaces.cli.chat_view_model import ChatViewModel, ToolNode
 
 
 def _event(seq: int, kind: str, **payload: object) -> ClientEvent:
@@ -67,3 +67,48 @@ def test_arguments_summary_truncates_and_hides_content() -> None:
     summary = view.tools["c1"].arguments_summary()
     assert "b.txt" in summary
     assert "secret-body" not in summary
+
+
+def _tool_node(name: str, args_text: str) -> ToolNode:
+    return ToolNode(call_id="c1", name=name, fragments=[args_text])
+
+
+def test_display_label_verb_labels() -> None:
+    assert _tool_node("read_file", '{"path": "a.txt"}').display_label() == "读 a.txt"
+    assert _tool_node("list_files", '{"path": "src"}').display_label() == "列 src"
+    assert _tool_node("glob", '{"pattern": "**/*.py"}').display_label() == "找 **/*.py"
+    assert _tool_node("grep", '{"pattern": "foo", "path": "src"}').display_label() == (
+        "搜 “foo”（位于 src）"
+    )
+    assert _tool_node("grep", '{"pattern": "foo"}').display_label() == "搜 “foo”"
+    assert _tool_node("grep", '{"pattern": "foo", "path": "."}').display_label() == "搜 “foo”"
+    assert _tool_node("shell", '{"argv": ["pytest", "-q"]}').display_label() == "$ pytest -q"
+    assert _tool_node("shell", '{"session": "s1"}').display_label() == "$ 会话 s1（轮询）"
+    assert _tool_node("write_file", '{"path": "b.txt"}').display_label() == "写 b.txt"
+    assert _tool_node("apply_patch", '{"path": "c.txt"}').display_label() == "改 c.txt"
+    assert _tool_node("delete_file", '{"path": "d.txt"}').display_label() == "删 d.txt"
+
+
+def test_display_label_falls_back_to_name_summary() -> None:
+    node = _tool_node("unknown_tool", '{"x": 1}')
+    assert node.display_label() == 'unknown_tool({"x": 1})'
+    assert _tool_node("read_file", "").display_label() == "read_file"
+
+
+def test_turn_diff_event_folds_into_view() -> None:
+    view = ChatViewModel()
+    payload = {
+        "files": [{"path": "a.py", "status": "modified", "diff": "@@ -1,1 +1,1 @@\n-x\n+y\n"}],
+        "files_changed": 1,
+    }
+    delta = view.apply(_event(1, "turn_diff", **payload))
+    assert delta.diff == payload
+    assert view.diffs == [payload]
+
+
+def test_turn_diff_after_terminal_is_dropped() -> None:
+    view = ChatViewModel()
+    view.apply(_event(1, "run_status", status="completed", final_text="done"))
+    delta = view.apply(_event(2, "turn_diff", files=[], files_changed=0))
+    assert delta.diff is None
+    assert view.diffs == []
