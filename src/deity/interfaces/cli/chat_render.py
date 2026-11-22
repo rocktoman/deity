@@ -29,6 +29,7 @@ from rich.syntax import Syntax
 from deity.core.contracts.client import ClientEvent
 from deity.interfaces.cli.chat_status import ChatStatus
 from deity.interfaces.cli.chat_view_model import ChatViewModel, ToolNode
+from deity.interfaces.cli.diff_render import DARK_DIFF_COLORS, format_turn_diff
 
 DIFF_MAX_LINES = 200
 TEXT_FLUSH_INTERVAL_SECONDS = 0.05
@@ -160,9 +161,11 @@ class StreamingRenderer:
         if delta.text_appended:
             self._maybe_flush()
         if delta.tool_started is not None:
-            self._print_line(f"▸ {delta.tool_started.name}")
+            self._print_line(f"▸ {delta.tool_started.display_label()}")
         if delta.tool_completed is not None:
             self._complete_tool(delta.tool_completed)
+        if delta.diff is not None:
+            self._print_turn_diff(delta.diff)
 
     def note_idle(self) -> None:
         """无事件超过 THINKING_IDLE_SECONDS 时打印一次思考提示（需开启）。"""
@@ -224,14 +227,19 @@ class StreamingRenderer:
                 self._print_line(f"    参数：{node.args_text}")
 
     def _complete_tool(self, node: ToolNode) -> None:
-        """工具完成行：名 + 参数摘要 + 状态 + 耗时；参数被截断时标注已折叠。"""
+        """工具完成行：动词标签 + 状态 + 耗时；参数被截断时标注已折叠。"""
         summary = node.arguments_summary()
         mark = "✓" if node.status == "ok" else "✗"
-        detail = f"({summary}) " if summary else ""
         folded = " · 已折叠（/tools 展开）" if len(node.args_text) > len(summary) else ""
         self._print_line(
-            f"  {mark} {node.name}{detail}· {node.status} · {node.elapsed(self._clock):.2f}s{folded}"
+            f"  {mark} {node.display_label()} · {node.status}"
+            f" · {node.elapsed(self._clock):.2f}s{folded}"
         )
+
+    def _print_turn_diff(self, payload: dict[str, object]) -> None:
+        """每轮末 diff（Codex PatchHistoryCell 式）：摘要头 + hunks。"""
+        self._flush_text()
+        self.console.print(format_turn_diff(payload, DARK_DIFF_COLORS), highlight=False)
 
     def _maybe_flush(self) -> None:
         """节流刷新：满 50ms 或满 4KB 才打印（R7，具体数值见实施记录）。"""

@@ -5,10 +5,13 @@
 审批走 ApprovalController，压缩没有独立触发入口（见 /compact）。
 """
 
+import json
 import shlex
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from rich.console import Console
 
@@ -22,10 +25,19 @@ from deity.interfaces.cli.chat_approval import ApprovalController
 from deity.interfaces.cli.chat_input import PlainInput, PromptToolkitInput
 from deity.interfaces.cli.chat_status import ChatStatus
 from deity.interfaces.cli.chat_view_model import ChatViewModel
+from deity.interfaces.cli.diff_render import DARK_DIFF_COLORS, format_diff_text
 from deity.interfaces.cli.plan import (
     authorize_dirty_targets,
     build_approved,
     confirm_build,
+)
+from deity.interfaces.cli.workspace_diff import git_branch, workspace_diff
+
+# /review 的固定提示词（Codex /review 式）：审查未提交改动并逐项给结论。
+REVIEW_PROMPT = (
+    "审查当前工作区相对 HEAD 的未提交改动：逐文件列出问题（文件、行、"
+    "严重程度、修复建议）；没有问题就明确说通过。可用 read_file、"
+    "git_diff、grep 等工具查看改动。"
 )
 
 
@@ -94,6 +106,13 @@ COMMANDS: tuple[Command, ...] = (
     Command("/tools", "/tools [call_id]", "查看上一轮工具调用（折叠列表/展开参数）"),
     Command("/auto", "/auto", "进入/退出自动接受模式"),
     Command("/doctor", "/doctor", "运行环境检查"),
+    Command("/diff", "/diff", "查看工作区未提交改动"),
+    Command("/new", "/new", "开始新会话"),
+    Command("/review", "/review", "审查工作区未提交改动"),
+    Command("/export", "/export", "导出当前会话为 Markdown 文件"),
+    Command("/copy", "/copy", "复制上一轮回答（仅工作台）"),
+    Command("/theme", "/theme [dark|light]", "切换工作台深浅主题（仅工作台）"),
+    Command("/archive", "/archive", "归档当前会话并开始新会话"),
     Command("/exit", "/exit 或 /quit", "退出交互"),
 )
 
@@ -192,6 +211,27 @@ async def dispatch(prompt: str, ctx: ChatContext) -> bool:
         return True
     if prompt == "/doctor":
         _handle_doctor(ctx)
+        return True
+    if prompt == "/diff":
+        await _handle_diff(ctx)
+        return True
+    if prompt == "/new":
+        _handle_new(ctx)
+        return True
+    if prompt == "/review":
+        await _handle_review(ctx)
+        return True
+    if prompt == "/export":
+        await _handle_export(ctx)
+        return True
+    if prompt == "/copy":
+        ctx.console.print("复制仅在工作台中使用（/copy 在行式界面不可用）。")
+        return True
+    if prompt == "/theme" or prompt.startswith("/theme "):
+        ctx.console.print("主题切换仅在工作台中使用（行式界面无主题）。")
+        return True
+    if prompt == "/archive":
+        await _handle_archive(ctx)
         return True
     if prompt.startswith("/"):
         ctx.console.print("未知命令。输入 /help 查看可用命令。")
@@ -502,15 +542,23 @@ async def _handle_status(ctx: ChatContext) -> None:
         mode = "自动接受"
     else:
         mode = "普通"
-    for line in (
+    branch = git_branch(ctx.workspace)
+    status_lines = [
         f"模型：{ctx.state.model_name}",
         f"模式：{mode}",
         f"会话：{ctx.state.session_id[:8]}",
         f"工作区：{ctx.workspace}",
-        f"轮次：{ctx.status.turns} · 工具调用：{ctx.status.tool_calls} 次",
-        f"Token：{ctx.status.token_text()}",
-        f"耗时：{ctx.status.elapsed_seconds:.1f}s",
-    ):
+    ]
+    if branch is not None:
+        status_lines.append(f"分支：{branch}")
+    status_lines.extend(
+        [
+            f"轮次：{ctx.status.turns} · 工具调用：{ctx.status.tool_calls} 次",
+            f"Token：{ctx.status.token_text()}",
+            f"耗时：{ctx.status.elapsed_seconds:.1f}s",
+        ]
+    )
+    for line in status_lines:
         ctx.console.print(line, highlight=False, markup=False)
     count = await _context_message_count(ctx)
     ctx.console.print(
@@ -586,6 +634,92 @@ def _handle_doctor(ctx: ChatContext) -> None:
         )
     if report.failed:
         ctx.console.print("doctor 检查有 fail 项。", style="red")
+
+
+async def _handle_diff(ctx: ChatContext) -> None:
+    """执行 /diff（Codex 式）：工作区未提交改动的 unified diff + 未追踪文件。"""
+    result = await workspace_diff(ctx.workspace)
+    diff_text = str(result.get("diff", ""))
+    untracked = result.get("untracked", [])
+    if not diff_text and not untracked:
+        ctx.console.print("工作区无未提交改动。", highlight=False, markup=False)
+        return
+    if diff_text:
+        ctx.console.print(format_diff_text(diff_text, DARK_DIFF_COLORS), highlight=False)
+    if untracked:
+        ctx.console.print(f"未追踪文件（{len(untracked)}）：", highlight=False, markup=False)
+        for path in untracked:
+            ctx.console.print(f"  + {path}", highlight=False, markup=False)
+
+
+def _handle_new(ctx: ChatContext) -> None:
+    """执行 /new（Codex 式）：换新会话 id，回到普通模式。"""
+    ctx.state.session_id = str(uuid4())
+    ctx.state.plan_mode = False
+    ctx.console.print("已开始新会话。", highlight=False, markup=False)
+
+
+async def _handle_review(ctx: ChatContext) -> None:
+    """执行 /review（Codex 式）：把审查当作一次普通任务提交，复用 run 通路。"""
+    try:
+        result = await ctx.service.run(
+            REVIEW_PROMPT,
+            model_name=ctx.state.model_name,
+            session_id=ctx.state.session_id,
+        )
+    except (ModelFailure, ProtocolError, BudgetExceeded, ValueError, OSError) as exc:
+        ctx.console.print(f"运行失败：{run_error_message(exc)}", style="red")
+        return
+    ctx.console.print(result.final_text or "无最终回答")
+
+
+async def export_session_markdown(
+    service: RunService, session_id: str, workspace: Path
+) -> Path | None:
+    """把会话消息导出为 Markdown 文件；无消息时返回 None（行式与工作台共用）。"""
+    repo = await SQLiteSessionRepository.open(service.db_path)
+    try:
+        messages = await repo.messages(session_id)
+    finally:
+        await repo.close()
+    if not messages:
+        return None
+    target = workspace / f"deity-export-{session_id[:8]}.md"
+    lines = [
+        "# Deity 会话导出",
+        "",
+        f"会话：{session_id} · 导出时间：{datetime.now(UTC).isoformat()}",
+        "",
+    ]
+    for item in messages:
+        role = str(item.get("role", ""))
+        title = {"user": "## 用户", "assistant": "## 助手"}.get(role, f"## {role}")
+        content = item.get("content", "")
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        lines.extend([title, "", text, ""])
+    target.write_text("\n".join(lines), encoding="utf-8")
+    return target
+
+
+async def _handle_export(ctx: ChatContext) -> None:
+    """执行 /export（Codex 式）：当前会话消息导出为 Markdown 文件。"""
+    target = await export_session_markdown(ctx.service, ctx.state.session_id, ctx.workspace)
+    if target is None:
+        ctx.console.print("当前会话暂无消息可导出。", highlight=False, markup=False)
+        return
+    ctx.console.print(f"已导出：{target}", highlight=False, markup=False)
+
+
+async def _handle_archive(ctx: ChatContext) -> None:
+    """执行 /archive（Codex 式）：归档当前会话后开始新会话。"""
+    repo = await SQLiteSessionRepository.open(ctx.service.db_path)
+    try:
+        await repo.archive_session(ctx.state.session_id, archived=True)
+    finally:
+        await repo.close()
+    ctx.state.session_id = str(uuid4())
+    ctx.state.plan_mode = False
+    ctx.console.print("已归档当前会话，并开始新会话。", highlight=False, markup=False)
 
 
 __all__ = [

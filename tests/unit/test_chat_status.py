@@ -40,3 +40,15 @@ def test_cost_text_lists_rounds_tools_elapsed() -> None:
     text = status.cost_text()
     assert "轮次" in text and "工具调用" in text and "耗时" in text
     assert "3" in text and "2" in text
+
+
+def test_fmt_elapsed_compact() -> None:
+    from deity.interfaces.cli.chat_status import fmt_elapsed_compact
+
+    assert fmt_elapsed_compact(0) == "0s"
+    assert fmt_elapsed_compact(59) == "59s"
+    assert fmt_elapsed_compact(60) == "1m 00s"
+    assert fmt_elapsed_compact(61) == "1m 01s"
+    assert fmt_elapsed_compact(3599) == "59m 59s"
+    assert fmt_elapsed_compact(3600) == "1h 00m 00s"
+    assert fmt_elapsed_compact(3723) == "1h 02m 03s"

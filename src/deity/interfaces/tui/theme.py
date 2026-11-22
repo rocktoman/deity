@@ -1,14 +1,15 @@
-"""Deity TUI 自定义主题（Klee 风格对齐 P0）：深浅两套 + 四级文字色。
+"""Deity TUI 自定义主题：深浅两套 + 四级文字色。
 
-品牌色取 Klee 的深绿 #1E4C35：浅底主题用原色，深底主题用提亮
-变体 #2E7D5B（深绿在深底上对比不足，实测后选定）。其余颜色走
-语义层级：正文 / 次级 / 三级 / 弱提示四级文字色（对应 Klee 的
-primary/secondary/tertiary/quaternary），以及 success/warning/
-error 语义色。边框色（primary）统一降为中性灰，不再抢品牌色。
+深色主题为黑色基底（2026-11-22 用户定，取代 Klee 深绿）：终端底色
+纯黑、面板/底色深灰、强调色白/浅灰中性色，界面里不再出现绿色——
+深色变体的绿色 token（accent、success、user-bg、code-bg 的绿调）
+已一并换成中性灰。浅色主题暂不动（仍用 Klee 深绿作强调色），与黑
+色方案不冲突。颜色走语义层级：正文 / 次级 / 三级 / 弱提示四级文
+字色，以及 success/warning/error 语义色。边框色（primary）为中性灰。
 
 主题只提供呈现 token：工作台（interactive.py）与监视台（app.py）
-共用，保证两个界面观感一致。Rich 文本（如工具行）无法引用 CSS
-变量，调色板函数 palette() 给出与主题变量同源的十六进制色值。
+共用，保证两个界面观感一致。Rich 文本（如工具行、diff 行）无法引
+用 CSS 变量，调色板函数 palette() 给出与主题变量同源的十六进制色值。
 """
 
 import os
@@ -18,16 +19,16 @@ from typing import Any
 from textual.theme import Theme
 
 ACCENT_LIGHT = "#1E4C35"
-ACCENT_DARK = "#2E7D5B"
+ACCENT_DARK = "#E8EAE8"
 
 # 四级文字色与辅助色块的十六进制值（与 Theme.variables 同源）。
 _DARK_LEVELS = {
-    "text-secondary": "#B9BDB9",
-    "text-tertiary": "#8B908B",
-    "text-quaternary": "#5E625E",
-    "user-bg": "#1D2B23",
+    "text-secondary": "#BDBDBD",
+    "text-tertiary": "#8A8A8A",
+    "text-quaternary": "#5E5E5E",
+    "user-bg": "#1F1F1F",
     "hover-bg": "#2C2C2C",
-    "code-bg": "#22261F",
+    "code-bg": "#1F1F1F",
 }
 _LIGHT_LEVELS = {
     "text-secondary": "#454A45",
@@ -41,14 +42,14 @@ _LIGHT_LEVELS = {
 DEITY_DARK = Theme(
     name="deity-dark",
     dark=True,
-    primary="#5C665E",
-    secondary="#7A847B",
+    primary="#6E6E6E",
+    secondary="#8A8A8A",
     accent=ACCENT_DARK,
     foreground="#E8EAE8",
-    background="#191B19",
-    surface="#20221F",
-    panel="#262824",
-    success="#4CAF7D",
+    background="#000000",
+    surface="#1A1A1A",
+    panel="#242424",
+    success="#E8EAE8",
     warning="#D9A441",
     error="#E5534B",
     variables=dict(_DARK_LEVELS),
@@ -98,16 +99,22 @@ def apply_deity_theme(app: Any) -> str:
 
 
 def palette(dark: bool) -> dict[str, str]:
-    """Rich 渲染用的十六进制调色板（与主题变量同源，按明暗二选一）。"""
+    """Rich 渲染用的十六进制调色板（与主题变量同源，按明暗二选一）。
+
+    深色为黑色方案：success 不再是绿色，改用中性浅灰（与 accent 同值）；
+    diff 行底色：增行深灰、删行暗红底（无绿色）。
+    """
     levels = _DARK_LEVELS if dark else _LIGHT_LEVELS
     return {
         "accent": ACCENT_DARK if dark else ACCENT_LIGHT,
         "secondary": levels["text-secondary"],
         "tertiary": levels["text-tertiary"],
         "quaternary": levels["text-quaternary"],
-        "success": "#4CAF7D" if dark else "#1E7D46",
+        "success": "#E8EAE8" if dark else "#1E7D46",
         "warning": "#D9A441" if dark else "#B97F16",
         "error": "#E5534B" if dark else "#C62F3B",
+        "diff_add_bg": "#262626" if dark else "#EDEDED",
+        "diff_del_bg": "#3A1F1C" if dark else "#F6DEDC",
     }
 
 

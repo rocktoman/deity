@@ -7,6 +7,17 @@
 
 ### 新增
 
+- 交互工作台黑色主题（ADR-022 修订）：深色主题改为黑色基底（背景
+  #000000、面板深灰、强调色白色/浅灰），界面不再出现绿色；神之眼徽记
+  保留形状、颜色改为中性。Klee 深绿 #1E4C35/#2E7D5B 品牌色废弃，浅色
+  主题暂不动。
+- Codex 行为移植（ADR-022 修订）：每轮末 diff 块（可点击折叠，行号 +
+  +/- gutter，新增行浅灰底、删除行红底）；工具行动词标签（读/搜/列/
+  $/写/改/删 + 目标）；等待行带工作耗时（12s · Ctrl+C 取消）；新增
+  斜杠命令 /diff /new /review /export /copy /theme /archive（行式与
+  工作台共用语义，/copy 与 /theme 仅工作台）；/status 加分支行；新增
+  CLI 顶层命令 `deity review [--base <ref>]`；输入框 @ 文件补全（Tab
+  补全）。出处见 docs/06-legal/third-party-notices.md 的 Codex 条目。
 - 模型失败呈现诊断细节（ADR-022 修订）：「运行失败」不再只有失败
   代码——ModelFailure 新增可选 detail，界面呈现为
   `model_http（HTTP 404: 服务端消息摘要）`；detail 只带 HTTP 状态码

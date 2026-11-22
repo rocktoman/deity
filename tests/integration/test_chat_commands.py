@@ -245,3 +245,107 @@ async def test_shell_passthrough_empty_is_ignored(tmp_path: Path) -> None:
     service = _real_service(tmp_path)
     output, _ = await _run_session(service, ["!", "/exit"], tmp_path)
     assert "已拒绝" not in output
+
+
+# --- Codex 移植新增命令 ------------------------------------------------------
+import subprocess as _subprocess
+
+from deity.adapters.storage import SQLiteSessionRepository
+from deity.interfaces.cli.chat_commands import REVIEW_PROMPT
+
+
+def _git(cwd: Path, *args: str) -> None:
+    _subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+            "HOME": str(cwd),
+        },
+    )
+
+
+def _git_repo(tmp_path: Path) -> Path:
+    _git(tmp_path, "init", "-q")
+    (tmp_path / "a.txt").write_text("one\n", encoding="utf-8")
+    _git(tmp_path, "add", "a.txt")
+    _git(tmp_path, "commit", "-qm", "init")
+    return tmp_path
+
+
+@pytest.mark.asyncio
+async def test_new_starts_fresh_session(tmp_path: Path) -> None:
+    output, session = await _run_session(
+        FakeService(tmp_path), ["/new", "/exit"], tmp_path, session_id="s1"
+    )
+    assert "已开始新会话。" in output
+    assert session.state.session_id != "s1"
+
+
+@pytest.mark.asyncio
+async def test_diff_empty_workspace_reports_clean(tmp_path: Path) -> None:
+    output, _ = await _run_session(FakeService(tmp_path), ["/diff", "/exit"], tmp_path)
+    assert "工作区无未提交改动。" in output
+
+
+@pytest.mark.asyncio
+async def test_diff_in_git_repo_shows_changes_and_untracked(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path)
+    (repo / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "b.txt").write_text("fresh\n", encoding="utf-8")
+    output, _ = await _run_session(FakeService(tmp_path), ["/diff", "/exit"], tmp_path)
+    assert "two" in output
+    assert "未追踪文件" in output
+    assert "b.txt" in output
+
+
+@pytest.mark.asyncio
+async def test_review_runs_review_prompt(tmp_path: Path) -> None:
+    service = FakeService(tmp_path)
+    output, _ = await _run_session(service, ["/review", "/exit"], tmp_path)
+    assert service.runs == [REVIEW_PROMPT]
+    assert "reply" in output
+
+
+@pytest.mark.asyncio
+async def test_export_writes_markdown(tmp_path: Path) -> None:
+    service = _real_service(tmp_path)
+    await service.run("先跑一轮", model_name="fake", session_id="s1")
+    output, _ = await _run_session(service, ["/export", "/exit"], tmp_path, session_id="s1")
+    target = tmp_path / "deity-export-s1.md"
+    assert "已导出" in output
+    assert target.exists()
+    assert "hello" in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_archive_archives_and_starts_new(tmp_path: Path) -> None:
+    service = _real_service(tmp_path)
+    await service.run("先跑一轮", model_name="fake", session_id="s1")
+    output, session = await _run_session(service, ["/archive", "/exit"], tmp_path, session_id="s1")
+    assert "已归档当前会话，并开始新会话。" in output
+    assert session.state.session_id != "s1"
+    repo = await SQLiteSessionRepository.open(tmp_path / "deity.db")
+    try:
+        assert await repo.sessions() == []
+    finally:
+        await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_copy_and_theme_are_tui_only_in_repl(tmp_path: Path) -> None:
+    output, _ = await _run_session(FakeService(tmp_path), ["/copy", "/theme", "/exit"], tmp_path)
+    assert output.count("仅在工作台中") == 2
+
+
+@pytest.mark.asyncio
+async def test_status_shows_branch_in_git_repo(tmp_path: Path) -> None:
+    _git_repo(tmp_path)
+    output, _ = await _run_session(FakeService(tmp_path), ["/status", "/exit"], tmp_path)
+    assert "分支：" in output
