@@ -1,9 +1,11 @@
 """Sandbox diagnostics and explicit command execution."""
 
 import asyncio
+import shutil
+import sys
 import tempfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import uuid4
 
 import typer
@@ -21,6 +23,41 @@ from deity.core.contracts.execution import (
     SandboxPolicy,
     SandboxSpec,
 )
+
+
+def sandbox_status_lines(service: Any) -> list[str]:
+    """`/sandbox` 无参展示（ADR-023）：后端/策略/启用/网络/可用性。
+
+    bwrap 可用性 = Linux + bwrap 二进制；缺失时明确不可用，绝不回退
+    宿主机执行。服务未提供沙箱配置（测试替身）时如实说明。
+    """
+    sandbox = getattr(service, "sandbox", None)
+    if sandbox is None:
+        return ["沙箱：当前服务未提供沙箱配置。"]
+    lines = [
+        "沙箱状态：",
+        f"启用：{'是' if sandbox.enabled else '否'}",
+        f"后端：{sandbox.backend}",
+        f"策略：{sandbox.policy}",
+        f"网络：{sandbox.network}",
+    ]
+    if sandbox.backend == "bwrap":
+        available = sys.platform.startswith("linux") and shutil.which("bwrap") is not None
+        lines.append(
+            "可用性：可用"
+            if available
+            else "可用性：不可用（需要 Linux + bwrap 二进制；无 bwrap/非 Linux = 明确不可用，不回退宿主机执行）"
+        )
+    elif sandbox.backend == "docker":
+        lines.append("可用性：见 deity sandbox doctor（需 Docker 守护进程）")
+    else:
+        lines.append("可用性：local 后端无隔离")
+    lines.append(
+        "切换：/sandbox read-only | /sandbox workspace-write（仅本次会话内生效；"
+        "写入配置文件 [sandbox] policy 可永久生效）"
+    )
+    return lines
+
 
 sandbox_app = typer.Typer(help="Diagnose and run a constrained local Docker sandbox")
 

@@ -36,6 +36,29 @@ class PendingPrompt:
     text: str
     pattern: str | None = None
     allow_permanent: bool = False
+    # ADR-023：改文件工具的预期 diff（控制器卡片算出，未截断的原始文本）；
+    # text 里对应的 diff 块已剥离，避免面板内重复显示。
+    diff: str | None = None
+
+
+def _strip_diff_block(text: str) -> tuple[str, bool]:
+    """从捕获的卡片文本里剥离 diff 块（行式 Panel 渲染，内容行带 `│ ` 前缀）。
+
+    diff 块起于 `--- <path>`（或 patch 形态的 `*** Begin Patch`），止于
+    `风险：` 行（不含）。找到才剥离并返回 True，否则原文不动。
+    """
+    lines = text.splitlines()
+    start = end = None
+    for index, line in enumerate(lines):
+        inner = line.strip().lstrip("│").strip()
+        if start is None and inner.startswith(("--- ", "*** Begin Patch")):
+            start = index
+        elif start is not None and inner.startswith("风险："):
+            end = index
+            break
+    if start is None or end is None:
+        return text, False
+    return "\n".join(lines[:start] + lines[end:]), True
 
 
 class TuiApprovalBridge:
@@ -82,11 +105,22 @@ class TuiApprovalBridge:
         text = self._drain()
         kind: Literal["approval", "confirm"] = "confirm" if "自动接受" in prompt else "approval"
         match = _PATTERN_RE.search(text)
+        # ADR-023：控制器算出的 diff 随提示交给面板彩色渲染；文本里的
+        # diff 块随之剥离，避免重复显示。剥离失败时 diff 置空（面板仍
+        # 显示原文本，不丢失信息也不重复）。
+        diff = self.controller.last_diff or None
+        if diff is not None:
+            stripped, found = _strip_diff_block(text)
+            if found:
+                text = stripped
+            else:
+                diff = None
         pending = PendingPrompt(
             kind=kind,
             text=text,
             pattern=match.group(1) if match else None,
             allow_permanent="[4]" in text,
+            diff=diff,
         )
         with self._lock:
             self._pending = pending

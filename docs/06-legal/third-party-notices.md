@@ -60,8 +60,25 @@ Deity 的实现均为自研；个别模块在设计与算法层面参照了开�
   `src/deity/interfaces/tui/interactive.py` 的新增斜杠命令与
   `DiffBlock`、`src/deity/interfaces/cli/main.py` 的 `deity review`
   （ADR-022 修订，2026-11-22）。刻意差异：diff 新增行用中性浅灰底
-  而非 Codex 的绿色（配合黑色主题）；工具输出预览与 (exit N) 未移植——
-  live 事件无输出/退出码字段；审批内 diff 预览、/usage、/rename、
-  /model 弹窗等 Codex 元素未移植（见 ADR-022 修订节）。
+  而非 Codex 的绿色（配合黑色主题）。
+- 参照对象：`codex-rs/tui/src/exec_cell/render.rs` 的工具输出预览与
+  (exit N)、审批内 diff 预览；`slash_command.rs` 的 /usage（用量汇总）、
+  /rename（重命名当前线程）、/model（对话框选择器）；`protocol.rs`
+  的 `SandboxPolicy` 枚举与 `sandboxing` crate 的后端分层。
+- 本仓库对应实现（ADR-023，2026-11-22）：
+  `src/deity/core/contracts/client.py` 的 `output_preview_for_event`
+  与 `ApprovalRequest.diff`（live-only，事件协议 schema_version 不变、
+  不改 SQLite 结构）、`src/deity/application/approval_diff.py`、
+  `src/deity/interfaces/cli/chat_render.py` 的预览行 + `(exit N)`、
+  `src/deity/interfaces/tui/approval_bridge.py` 的 diff 剥离与面板彩色
+  渲染、`src/deity/interfaces/cli/chat_status.py` 的 `usage_text`、
+  `src/deity/adapters/storage/__init__.py` 的 `rename_session`、
+  `src/deity/application/run_service.py` 的 `set_sandbox_policy`、
+  `src/deity/interfaces/cli/sandbox.py` 的 `sandbox_status_lines`、工作台
+  `#model-dialog`（列表 + 过滤）。刻意差异：沙箱只保留
+  read-only/workspace-write 两档会话内切换（Codex 的 DangerFullAccess
+  不可经命令切换；landlock/seatbelt/windows 后端未接入，见 ADR-023
+  §6）；/usage 只展示本会话本地用量（无账号配额后端，不编造数字）；
+  推理强度（reasoning effort）未移植（无 ModelConfig 字段）。
 - 许可证全文：https://www.apache.org/licenses/LICENSE-2.0
   （Apache License, Version 2.0；Copyright OpenAI）。

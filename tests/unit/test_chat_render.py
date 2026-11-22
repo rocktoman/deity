@@ -185,3 +185,70 @@ def test_render_diff_shows_add_remove_lines() -> None:
     print_diff(console, "a\nb\n", "a\nc\n", path="a.txt")
     assert "-b" in buffer.getvalue()
     assert "+c" in buffer.getvalue()
+
+
+# ADR-023：工具完成行渲染输出预览与 (exit N)（Codex 移植第二轮）
+
+
+def test_complete_tool_renders_preview_and_exit_code() -> None:
+    console, buffer = _console()
+    renderer = StreamingRenderer(console, model_name="fake")
+    asyncio.run(
+        _drain(
+            renderer,
+            [
+                _event(
+                    1,
+                    "tool_call_started",
+                    call_id="c1",
+                    name="shell",
+                    args={"command": "pytest -q"},
+                ),
+                _event(
+                    2,
+                    "tool_call_completed",
+                    call_id="c1",
+                    name="shell",
+                    status="failed",
+                    output_preview="FAILED tests/test_x.py\n1 failed",
+                    exit_code=1,
+                ),
+                _event(3, "run_status", status="failed", final_text=""),
+            ],
+        )
+    )
+    output = buffer.getvalue()
+    assert "(exit 1)" in output
+    assert "FAILED tests/test_x.py" in output
+
+
+def test_complete_tool_zero_exit_code_shows_no_exit_suffix() -> None:
+    console, buffer = _console()
+    renderer = StreamingRenderer(console, model_name="fake")
+    asyncio.run(
+        _drain(
+            renderer,
+            [
+                _event(
+                    1,
+                    "tool_call_started",
+                    call_id="c1",
+                    name="shell",
+                    args={"command": "true"},
+                ),
+                _event(
+                    2,
+                    "tool_call_completed",
+                    call_id="c1",
+                    name="shell",
+                    status="ok",
+                    output_preview="ok",
+                    exit_code=0,
+                ),
+                _event(3, "run_status", status="completed", final_text=""),
+            ],
+        )
+    )
+    output = buffer.getvalue()
+    assert "(exit 0)" not in output
+    assert "ok" in output

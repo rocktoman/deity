@@ -23,6 +23,7 @@ from typing import Any, Literal
 from rich.console import Console
 from rich.panel import Panel
 
+from deity.application.approval_diff import _read_workspace_text, approval_diff
 from deity.application.approval_rules import (
     ApprovalRule,
     ApprovalRules,
@@ -30,11 +31,8 @@ from deity.application.approval_rules import (
     shell_command_text,
 )
 from deity.core.contracts.client import approval_args_summary
-from deity.interfaces.cli.chat_render import render_diff
 
 ApprovalDecision = Literal["allow_once", "allow_session", "allow_always", "deny"]
-
-_MAX_DIFF_CHARS = 200_000
 
 
 class SessionAllowlist:
@@ -99,6 +97,10 @@ class ApprovalCard:
         self.workspace = workspace
         self.allow_permanent = allow_permanent
 
+    def diff_text(self) -> str:
+        """本卡片的预期 diff（ADR-023）；无 diff 时为空串。"""
+        return approval_diff(self.tool_name, self.args, self.workspace) or ""
+
     def body_lines(self) -> list[str]:
         """卡片正文：按工具类型展示最关键的执行内容。"""
         lines = [f"工具：{self.tool_name}"]
@@ -113,13 +115,15 @@ class ApprovalCard:
         elif self.tool_name == "apply_patch":
             path = str(self.args.get("path", ""))
             lines.append(f"文件：{path}")
-            old = self.args.get("old_text", "")
-            new = self.args.get("new_text", "")
-            if isinstance(old, str) and isinstance(new, str):
-                lines.append(render_diff(old, new, path=path))
+            diff = approval_diff(self.tool_name, self.args, self.workspace)
+            if diff:
+                lines.append(diff)
             lines.append("风险：将修改工作区文件。")
         elif self.tool_name == "delete_file":
             lines.append(f"文件：{self.args.get('path', '')}")
+            diff = approval_diff(self.tool_name, self.args, self.workspace)
+            if diff:
+                lines.append(diff)
             lines.append("将删除该文件。")
             lines.append("风险：将修改工作区文件。")
         else:
@@ -131,21 +135,15 @@ class ApprovalCard:
 
     def _write_diff_lines(self, path: str) -> list[str]:
         """write_file 的 diff：旧内容读盘，新内容取 args；过大则不展示。"""
+        diff = approval_diff(self.tool_name, self.args, self.workspace)
+        if diff:
+            return [diff]
         new = self.args.get("content", "")
         if not isinstance(new, str):
             return []
-        old = ""
-        try:
-            candidate = (self.workspace / path).resolve()
-            if candidate.is_relative_to(self.workspace.resolve()) and candidate.is_file():
-                old = candidate.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            old = ""
-        if not old:
+        if _read_workspace_text(self.workspace, path) is None:
             return ["新建文件。"]
-        if len(old) > _MAX_DIFF_CHARS or len(new) > _MAX_DIFF_CHARS:
-            return ["文件过大，未展示 diff。"]
-        return [render_diff(old, new, path=path)]
+        return ["文件过大，未展示 diff。"]
 
     def render(self, console: Console) -> None:
         """把卡片打印到终端（工作线程调用亦安全）。"""
@@ -213,6 +211,13 @@ class ApprovalController:
         self.mode: Literal["ask", "auto", "session"] = "ask"
         self._input_fn = input_fn
         self.rules = rules
+        # 最近一张审批卡片的预期 diff（ADR-023）：工作台桥据此渲染彩色 diff 块。
+        self._last_diff = ""
+
+    @property
+    def last_diff(self) -> str:
+        """最近一张审批卡片的预期 diff；无 diff 时为空串。"""
+        return self._last_diff
 
     def decide(self, name: str, args: dict[str, Any]) -> bool:
         """approve(name, args) -> bool 的实现：折叠卡片决策。"""
@@ -223,6 +228,7 @@ class ApprovalController:
         card = ApprovalCard(
             name, args, workspace=self.workspace, allow_permanent=self.rules is not None
         )
+        self._last_diff = card.diff_text()
         card.render(self.console)
         decision = card.prompt(self.console, input_fn=self._input_fn)
         if decision == "allow_once":

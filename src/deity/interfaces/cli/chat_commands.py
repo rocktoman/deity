@@ -31,6 +31,7 @@ from deity.interfaces.cli.plan import (
     build_approved,
     confirm_build,
 )
+from deity.interfaces.cli.sandbox import sandbox_status_lines
 from deity.interfaces.cli.workspace_diff import git_branch, workspace_diff
 
 # /review 的固定提示词（Codex /review 式）：审查未提交改动并逐项给结论。
@@ -101,6 +102,9 @@ COMMANDS: tuple[Command, ...] = (
     Command("/compact", "/compact", "查看上下文压缩状态"),
     Command("/clear", "/clear", "清屏（不删除 SQLite 历史）"),
     Command("/cost", "/cost", "查看本会话 token 与轮次"),
+    Command("/usage", "/usage", "查看本会话用量汇总"),
+    Command("/rename", "/rename <新标题>", "重命名当前会话"),
+    Command("/sandbox", "/sandbox [read-only|workspace-write]", "查看或切换沙箱策略"),
     Command("/model", "/model [名称]", "查看或切换模型（仅本次会话）"),
     Command("/status", "/status", "查看会话状态"),
     Command("/tools", "/tools [call_id]", "查看上一轮工具调用（折叠列表/展开参数）"),
@@ -196,6 +200,15 @@ async def dispatch(prompt: str, ctx: ChatContext) -> bool:
         return True
     if prompt == "/cost":
         ctx.console.print(ctx.status.cost_text(), highlight=False, markup=False)
+        return True
+    if prompt == "/usage":
+        ctx.console.print(ctx.status.usage_text(), highlight=False, markup=False)
+        return True
+    if prompt == "/rename" or prompt.startswith("/rename "):
+        await _handle_rename(prompt, ctx)
+        return True
+    if prompt == "/sandbox" or prompt.startswith("/sandbox "):
+        _handle_sandbox(prompt, ctx)
         return True
     if prompt == "/model" or prompt.startswith("/model "):
         _handle_model(prompt, ctx)
@@ -720,6 +733,46 @@ async def _handle_archive(ctx: ChatContext) -> None:
     ctx.state.session_id = str(uuid4())
     ctx.state.plan_mode = False
     ctx.console.print("已归档当前会话，并开始新会话。", highlight=False, markup=False)
+
+
+async def _handle_rename(prompt: str, ctx: ChatContext) -> None:
+    """执行 /rename（ADR-023）：重命名当前会话；只改 sessions.title。"""
+    title = prompt.removeprefix("/rename").strip()
+    if not title:
+        ctx.console.print("用法：/rename <新标题>", highlight=False, markup=False)
+        return
+    repo = await SQLiteSessionRepository.open(ctx.service.db_path)
+    try:
+        await repo.rename_session(ctx.state.session_id, title, workspace_root=str(ctx.workspace))
+    except (KeyError, ValueError) as exc:
+        ctx.console.print(f"重命名失败：{exc}", style="red", highlight=False, markup=False)
+        return
+    finally:
+        await repo.close()
+    ctx.console.print(f"已重命名当前会话为：{title.strip()[:80]}", highlight=False, markup=False)
+
+
+def _handle_sandbox(prompt: str, ctx: ChatContext) -> None:
+    """执行 /sandbox（ADR-023）：无参展示状态；有参切换本次会话策略。"""
+    arg = prompt.removeprefix("/sandbox").strip()
+    if not arg:
+        for line in sandbox_status_lines(ctx.service):
+            ctx.console.print(line, highlight=False, markup=False)
+        return
+    setter = getattr(ctx.service, "set_sandbox_policy", None)
+    if setter is None:
+        ctx.console.print("当前服务不支持沙箱策略切换。", style="red")
+        return
+    try:
+        setter(arg)
+    except ValueError as exc:
+        ctx.console.print(f"切换失败：{exc}", style="red", highlight=False, markup=False)
+        return
+    ctx.console.print(
+        f"已切换沙箱策略为：{arg}（仅本次会话内生效；写入配置文件 [sandbox] policy 可永久生效）。",
+        highlight=False,
+        markup=False,
+    )
 
 
 __all__ = [

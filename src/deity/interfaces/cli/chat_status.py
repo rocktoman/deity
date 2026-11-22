@@ -108,5 +108,27 @@ class ChatStatus:
             lines.append(f"token：输入 {self.input_tokens or 0} · 输出 {self.output_tokens or 0}")
         return "\n".join(lines)
 
+    def usage_text(self) -> str:
+        """/usage 的文本（ADR-023）：本会话本地用量汇总；无账号配额后端，不编造。"""
+        lines = [
+            "本会话用量（本地统计，无账号配额后端）：",
+            (
+                f"轮次：{self.turns} · 工具调用：{self.tool_calls} 次"
+                f" · 耗时：{self.elapsed_seconds:.1f}s"
+            ),
+        ]
+        if self.input_tokens is None and self.output_tokens is None:
+            lines.append("Token：未接通（usage 事件未到达，未编造数字）")
+        else:
+            lines.append(
+                f"Token：输入 {self.input_tokens or 0} · 输出 {self.output_tokens or 0}"
+                f" · 合计 {(self.input_tokens or 0) + (self.output_tokens or 0)}"
+            )
+        context = self.context_text()
+        lines.append(
+            f"上下文占用：{context}" if context is not None else "上下文占用：—（无 usage 数据）"
+        )
+        return "\n".join(lines)
+
 
 __all__ = ["ChatStatus"]

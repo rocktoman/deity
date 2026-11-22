@@ -49,11 +49,12 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import Button, Footer, Header, Markdown, Static, TextArea
+from textual.widgets import Button, Footer, Header, Input, Markdown, Static, TextArea
 
 from deity import __version__
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.application.build_service import BuildService
+from deity.application.config import KNOWN_MODELS
 from deity.application.doctor import run_doctor
 from deity.application.plan_service import PlanService
 from deity.application.run_service import RunService
@@ -74,6 +75,7 @@ from deity.interfaces.cli.diff_render import (
     format_turn_diff_summary,
 )
 from deity.interfaces.cli.plan import build_approved, plan_lines
+from deity.interfaces.cli.sandbox import sandbox_status_lines
 from deity.interfaces.cli.workspace_diff import git_branch, workspace_diff
 from deity.interfaces.tui.approval_bridge import PendingPrompt, TuiApprovalBridge
 from deity.interfaces.tui.theme import apply_deity_theme, palette
@@ -92,6 +94,9 @@ AVAILABLE_SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/model", "查看或切换当前模型"),
     ("/status", "查看会话状态与 Token 统计"),
     ("/cost", "查看当前会话 Token 消耗详情"),
+    ("/usage", "查看本会话用量汇总"),
+    ("/rename", "重命名当前会话"),
+    ("/sandbox", "查看或切换沙箱策略"),
     ("/tools", "展开或切换工具调用详情"),
     ("/skills", "查看已配置与已启用的 Skills"),
     ("/mcp", "查看已配置的 MCP 工具服务器"),
@@ -483,6 +488,12 @@ class InteractiveApp(App[None]):
     #input-prompt { width: 2; padding: 1 0 0 1; color: $accent; text-style: bold; }
     #input { border: none; min-height: 1; max-height: 6; height: auto; width: 1fr; background: $panel; }
     #status-bar { height: 1; background: $panel; padding: 0 1; }
+    #model-dialog { display: none; border: round $primary; padding: 0 1; margin-bottom: 1; max-height: 14; }
+    #model-dialog.show { display: block; }
+    #model-filter { border: none; height: 1; margin: 0 0 1 0; background: $panel; }
+    #model-list { height: auto; max-height: 8; }
+    .model-row { width: 1fr; height: 1; border: none; }
+    .model-row.current { color: $accent; }
     .msg-user { margin-top: 1; text-style: bold; background: $user-bg; padding: 0 1; }
     .msg-system { color: $text-tertiary; }
     .msg-error { color: $error; border: round $error; padding: 0 1; margin: 1 0; }
@@ -540,6 +551,9 @@ class InteractiveApp(App[None]):
         self._text_block: Markdown | None = None
         self._rendered_text_len = 0
         self._tool_blocks: dict[str, Static] = {}
+        # ADR-023 /model 弹窗状态：是否打开、按钮 id → 模型名。
+        self._model_dialog_open = False
+        self._model_rows: dict[str, str] = {}
         self._sidebar_map: dict[str, str] = {}
         self._scroller = ScrollThrottler()
         self._waiting_block: Static | None = None
@@ -569,6 +583,7 @@ class InteractiveApp(App[None]):
             yield Static("", id="prompt-title", classes="section-header")
             with VerticalScroll(id="prompt-scroll"):
                 yield Static("", id="prompt-text")
+                yield Static("", id="prompt-diff")
             with Horizontal(id="prompt-buttons"):
                 yield Button("[1] 允许一次", id="btn-allow-once", variant="success")
                 yield Button("[2] 本次会话都允许", id="btn-allow-session")
@@ -582,6 +597,12 @@ class InteractiveApp(App[None]):
             yield Static("", id="status-tip")
         yield Static("", id="status-divider")
         yield Static("", id="status-bar")
+        with Vertical(id="model-dialog"):
+            yield Static(
+                "选择模型（仅本次会话）", id="model-dialog-title", classes="section-header"
+            )
+            yield Input(placeholder="输入过滤…", id="model-filter")
+            yield VerticalScroll(id="model-list")
         with Horizontal(id="input-row"):
             yield Static("❯", id="input-prompt")
             yield ChatInput(id="input")
@@ -946,6 +967,12 @@ class InteractiveApp(App[None]):
         line.append("  ⎿ ", style=colors["tertiary"])
         line.append(status, style=status_style)
         line.append(f" · {node.elapsed(time.monotonic):.1f}s", style=colors["secondary"])
+        # ADR-023：非零退出码附 (exit N)；输出预览缩进追加（最多 3 行）。
+        if node.exit_code is not None and node.exit_code != 0:
+            line.append(f" (exit {node.exit_code})", style=colors["error"])
+        if node.output_preview:
+            for preview_line in node.output_preview.splitlines():
+                line.append(f"\n    {preview_line}", style=colors["tertiary"])
         if node.expanded:
             line.append(
                 f"\n参数：{node.args_text or '—'}（{node.call_id}）", style=colors["secondary"]
@@ -1006,6 +1033,12 @@ class InteractiveApp(App[None]):
         return False
 
     def on_key(self, event: Any) -> None:
+        # ADR-023：模型弹窗打开时 Esc 关闭弹窗（不落入审批热键）。
+        if self._model_dialog_open and event.key == "escape":
+            self._close_model_dialog()
+            event.prevent_default()
+            event.stop()
+            return
         if self.handle_prompt_key(event.key):
             event.prevent_default()
             event.stop()
@@ -1021,6 +1054,12 @@ class InteractiveApp(App[None]):
     def _present_prompt(self, pending: PendingPrompt) -> None:
         """呈现审批卡片或确认（桥从工作线程经 call_from_thread 调入）。"""
         self.query_one("#prompt-text", Static).update(pending.text or "（无内容）")
+        # ADR-023：审批 diff 预览（首轮 diff 块同款配色：新增行浅灰底、删除行红底）。
+        diff_widget = self.query_one("#prompt-diff", Static)
+        if pending.diff:
+            diff_widget.update(format_diff_text(pending.diff, self._palette))
+        else:
+            diff_widget.update("")
         self._current_pending_kind = pending.kind
         title, subtitle = (
             ("审批", "工具调用需要你的确认") if pending.kind == "approval" else ("确认", "")
@@ -1070,6 +1109,7 @@ class InteractiveApp(App[None]):
 
     def _hide_prompt(self) -> None:
         self.query_one("#prompt-panel").remove_class("show")
+        self.query_one("#prompt-diff", Static).update("")
         self._prompt_handler = None
         self._collapse_input(False)
         if self.is_running:
@@ -1077,6 +1117,10 @@ class InteractiveApp(App[None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
+        # ADR-023：模型弹窗行按钮优先路由（点击即切换并关闭弹窗）。
+        if bid is not None and bid in self._model_rows:
+            self._select_model(self._model_rows[bid])
+            return
         # 侧栏按钮优先于审批 handler 路由：侧栏开着时误触不能当成审批答案。
         if bid is not None and bid in self._sidebar_map:
             self._sidebar_click(self._sidebar_map[bid])
@@ -1145,6 +1189,7 @@ class InteractiveApp(App[None]):
         self._confirm_futures.append(future)
         self._current_pending_kind = "confirm"
         self.query_one("#prompt-text", Static).update(text)
+        self.query_one("#prompt-diff", Static).update("")
         self.query_one("#prompt-title", Static).update(Text("确认", style="bold"))
         self._collapse_input(True)
         self.query_one("#btn-confirm", Button).label = f"[y/Enter] {confirm_label}"
@@ -1407,6 +1452,19 @@ class InteractiveApp(App[None]):
         if prompt == "/cost":
             self._append_system(self.session_status.cost_text())
             return
+        if prompt == "/usage":
+            self._append_system(self.session_status.usage_text())
+            return
+        if prompt == "/rename" or prompt.startswith("/rename "):
+            self.run_worker(
+                self._command_rename(prompt.removeprefix("/rename").strip()),
+                group="run",
+                exclusive=True,
+            )
+            return
+        if prompt == "/sandbox" or prompt.startswith("/sandbox "):
+            self._command_sandbox(prompt.removeprefix("/sandbox").strip())
+            return
         if prompt == "/tools" or prompt.startswith("/tools "):
             self._command_tools(prompt)
             return
@@ -1436,11 +1494,8 @@ class InteractiveApp(App[None]):
         if prompt == "/model" or prompt.startswith("/model "):
             requested = prompt.removeprefix("/model").strip()
             if not requested:
-                self._append_system(
-                    "\n".join(
-                        model_listing_lines(self.state.model_name, self.service.provider_id or "")
-                    )
-                )
+                # ADR-023：无参开弹窗；无固定列表的提供方回落到文本列表。
+                await self._open_model_dialog()
             else:
                 self.state.model_name = requested
                 self._append_system(f"已切换模型：{requested}（仅本次会话内生效，下轮任务生效）。")
@@ -1607,6 +1662,111 @@ class InteractiveApp(App[None]):
             await repo.close()
         self._append_system("已归档上一会话。")
         await self._command_new()
+
+    # -- /model 弹窗（ADR-023） ------------------------------------------------
+
+    async def _open_model_dialog(self) -> None:
+        """打开模型选择弹窗：列表取 KNOWN_MODELS[provider]，支持过滤。"""
+        known = KNOWN_MODELS.get(self.service.provider_id or "", ())
+        if not known:
+            # 无固定模型列表的提供方：回落到行式文本列表。
+            self._append_system(
+                "\n".join(
+                    model_listing_lines(self.state.model_name, self.service.provider_id or "")
+                )
+            )
+            return
+        self._model_dialog_open = True
+        self.query_one("#model-dialog").add_class("show")
+        filter_input = self.query_one("#model-filter", Input)
+        filter_input.value = ""
+        await self._render_model_list("")
+        filter_input.focus()
+
+    async def _render_model_list(self, filter_text: str) -> None:
+        """按过滤文本重建模型列表行（当前模型标 ●；无匹配时提示）。"""
+        known = KNOWN_MODELS.get(self.service.provider_id or "", ())
+        needle = filter_text.strip().lower()
+        visible = [name for name in known if needle in name.lower()]
+        container = self.query_one("#model-list", VerticalScroll)
+        await container.remove_children()
+        self._model_rows.clear()
+        if not visible:
+            await container.mount(Static("无匹配模型。", classes="msg-system"))
+            return
+        for index, name in enumerate(visible):
+            label = f"● {name}（当前）" if name == self.state.model_name else name
+            bid = f"model-row-{index}"
+            self._model_rows[bid] = name
+            await container.mount(
+                Button(
+                    label,
+                    id=bid,
+                    classes="model-row current" if name == self.state.model_name else "model-row",
+                )
+            )
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        """模型弹窗过滤框输入：即时按子串过滤列表。"""
+        if event.input.id == "model-filter" and self._model_dialog_open:
+            await self._render_model_list(event.value)
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """模型弹窗过滤框回车：选中第一个可见候选。"""
+        if event.input.id == "model-filter" and self._model_dialog_open:
+            first = next(iter(self._model_rows.values()), None)
+            if first is not None:
+                self._select_model(first)
+
+    def _select_model(self, name: str) -> None:
+        self.state.model_name = name
+        self._close_model_dialog()
+        self._append_system(f"已切换模型：{name}（仅本次会话内生效，下轮任务生效）。")
+        self._refresh_status()
+
+    def _close_model_dialog(self) -> None:
+        self._model_dialog_open = False
+        self.query_one("#model-dialog").remove_class("show")
+        self.query_one("#model-filter", Input).value = ""
+        if self.is_running:
+            self.query_one("#input", ChatInput).focus()
+
+    async def _command_rename(self, title: str) -> None:
+        """工作台 /rename（ADR-023）：重命名当前会话，侧栏随即刷新新标题。"""
+        if not title:
+            self._append_system("用法：/rename <新标题>")
+            return
+        repo = await SQLiteSessionRepository.open(self.service.db_path)
+        try:
+            await repo.rename_session(
+                self.state.session_id, title, workspace_root=str(self._workspace)
+            )
+        except (KeyError, ValueError) as exc:
+            self._append_system(f"重命名失败：{exc}")
+            return
+        finally:
+            await repo.close()
+        self._append_system(f"已重命名当前会话为：{title.strip()[:80]}")
+        if self.query_one("#sidebar").has_class("show"):
+            await self._fill_sidebar()
+
+    def _command_sandbox(self, arg: str) -> None:
+        """工作台 /sandbox（ADR-023）：无参展示状态；有参切换本次会话策略。"""
+        if not arg:
+            self._append_system("\n".join(sandbox_status_lines(self.service)))
+            return
+        setter = getattr(self.service, "set_sandbox_policy", None)
+        if setter is None:
+            self._append_system("当前服务不支持沙箱策略切换。")
+            return
+        try:
+            setter(arg)
+        except ValueError as exc:
+            self._append_system(f"切换失败：{exc}")
+            return
+        self._append_system(
+            f"已切换沙箱策略为：{arg}（仅本次会话内生效；写入配置文件 [sandbox] policy 可永久生效）。"
+        )
 
     async def _command_export(self) -> None:
         """工作台 /export（Codex 式）：当前会话导出为 Markdown 文件。"""

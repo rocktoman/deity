@@ -112,3 +112,40 @@ def test_turn_diff_after_terminal_is_dropped() -> None:
     delta = view.apply(_event(2, "turn_diff", files=[], files_changed=0))
     assert delta.diff is None
     assert view.diffs == []
+
+
+# ADR-023：工具节点承载输出预览与退出码（Codex 移植第二轮）
+
+
+def test_tool_node_carries_output_preview_and_exit_code() -> None:
+    view = ChatViewModel()
+    view.apply(
+        _event(
+            1,
+            "tool_call_started",
+            call_id="c1",
+            name="shell",
+            args={"command": "pytest -q"},
+        )
+    )
+    delta = view.apply(
+        _event(
+            2,
+            "tool_call_completed",
+            call_id="c1",
+            name="shell",
+            status="failed",
+            output_preview="FAILED tests/test_x.py\n…（共 5 行，只显示前 3 行）",
+            exit_code=1,
+        )
+    )
+    assert delta.tool_completed is not None
+    assert delta.tool_completed.output_preview.startswith("FAILED")
+    assert delta.tool_completed.exit_code == 1
+    # 旧事件无新字段时保持默认（向后兼容）。
+    view2 = ChatViewModel()
+    view2.apply(_event(1, "tool_call_started", call_id="c2", name="shell", args={}))
+    delta2 = view2.apply(_event(2, "tool_call_completed", call_id="c2", name="shell", status="ok"))
+    assert delta2.tool_completed is not None
+    assert delta2.tool_completed.output_preview == ""
+    assert delta2.tool_completed.exit_code is None

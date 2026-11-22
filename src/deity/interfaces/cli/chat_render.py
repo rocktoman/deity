@@ -16,7 +16,6 @@ V1.1-M3 渲染增强（均可选，默认关，保持基线行为）：
 """
 
 import asyncio
-import difflib
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
@@ -26,6 +25,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.syntax import Syntax
 
+from deity.application.approval_diff import render_unified_diff
 from deity.core.contracts.client import ClientEvent
 from deity.interfaces.cli.chat_status import ChatStatus
 from deity.interfaces.cli.chat_view_model import ChatViewModel, ToolNode
@@ -53,18 +53,7 @@ class RunSummary:
 
 def render_diff(old_text: str, new_text: str, *, path: str = "", max_lines: int = 200) -> str:
     """unified diff（只用于展示，不写盘）；超长截断并提示。"""
-    lines = list(
-        difflib.unified_diff(
-            old_text.splitlines(),
-            new_text.splitlines(),
-            fromfile=f"a/{path}" if path else "a/old",
-            tofile=f"b/{path}" if path else "b/new",
-            lineterm="",
-        )
-    )
-    if len(lines) > max_lines:
-        lines = lines[:max_lines] + [f"…（已截断，只显示前 {max_lines} 行）"]
-    return "\n".join(lines) + ("\n" if lines else "")
+    return render_unified_diff(old_text, new_text, path=path, max_lines=max_lines)
 
 
 def print_diff(
@@ -225,16 +214,34 @@ class StreamingRenderer:
             )
             if node.args_text:
                 self._print_line(f"    参数：{node.args_text}")
+            self._print_tool_output(node)
+
+    def _print_tool_output(self, node: ToolNode) -> None:
+        """工具输出预览与退出码（ADR-023）：非零退出码附 `(exit N)`。"""
+        if node.exit_code is not None and node.exit_code != 0:
+            self._print_line(f"    (exit {node.exit_code})")
+        if node.output_preview:
+            for line in node.output_preview.splitlines():
+                self._print_line(f"    {line}")
 
     def _complete_tool(self, node: ToolNode) -> None:
         """工具完成行：动词标签 + 状态 + 耗时；参数被截断时标注已折叠。"""
         summary = node.arguments_summary()
         mark = "✓" if node.status == "ok" else "✗"
         folded = " · 已折叠（/tools 展开）" if len(node.args_text) > len(summary) else ""
+        exit_part = (
+            f" (exit {node.exit_code})"
+            if node.exit_code is not None and node.exit_code != 0
+            else ""
+        )
         self._print_line(
             f"  {mark} {node.display_label()} · {node.status}"
-            f" · {node.elapsed(self._clock):.2f}s{folded}"
+            f" · {node.elapsed(self._clock):.2f}s{exit_part}{folded}"
         )
+        # 退出码已附在完成行内，此处只追加预览行（不重复）。
+        if node.output_preview:
+            for line in node.output_preview.splitlines():
+                self._print_line(f"    {line}")
 
     def _print_turn_diff(self, payload: dict[str, object]) -> None:
         """每轮末 diff（Codex PatchHistoryCell 式）：摘要头 + hunks。"""
