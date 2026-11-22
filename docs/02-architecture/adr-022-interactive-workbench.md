@@ -67,3 +67,7 @@
 2. 两个模型适配器（OpenAI 兼容 / Anthropic）统一填充 detail，提取与脱敏规则收敛在 `adapters/model/_errors.py` 单点实现：状态类错误（APIStatusError）取 `HTTP <状态码>` + 服务端消息摘要——消息只取 SDK 已从响应体提取的 message 字段，空白折叠（去换行）后截断至 200 字符；连接类错误（APIConnectionError / APITimeoutError）只取异常类型名，不取异常消息（传输层消息可能含代理/URL 等本地网络细节）。
 3. **sanitized 边界**：detail 绝不包含 API key、请求头、完整请求体；拿不准的字段宁可不取。服务端消息属于服务端返回文本，截断与折叠防止其撑爆界面或借换行伪造界面内容。
 4. 呈现：`run_error_message` 对带 detail 的 ModelFailure 返回 `代码（detail）`，TUI 与行式 CLI 共用同一出口；无 detail 时与此前完全一致。
+
+## 2026-11-22 修订：/help 一行一命令与 /model 可选模型列表
+
+用户反馈：/help 输出是分号连成的整段、终端换行后难读；/model 只显示当前模型、看不到可选模型。改动：HELP_TEXT 改为由 COMMANDS 注册表逐条生成、每条命令占一行（行式与工作台共用同一文本，行式打印加 markup=False，避免用法里的 [call_id] 被 Rich 当样式吞掉）；新增 KNOWN_MODELS（qwen/anthropic 常用模型、openai_compatible 无固定列表），/model 无参数时展示当前模型 + 本提供方可选模型（当前项打 ● 标记），/model <名称> 仍只改会话内模型名、不换提供方。两处原按旧格式断言的整段输出测试随格式改写（非放宽）。

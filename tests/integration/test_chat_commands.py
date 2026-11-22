@@ -110,6 +110,8 @@ async def test_model_show_and_switch(tmp_path: Path) -> None:
     assert "当前模型：fake" in output
     assert "已切换模型：fake-x" in output
     assert "当前模型：fake-x" in output
+    # 替身提供方无固定模型列表：/model 应说明而非列出空表。
+    assert "无固定模型列表" in output
     assert session.model_name == "fake-x"
 
 
