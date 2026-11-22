@@ -459,7 +459,12 @@ class InteractiveApp(App[None]):
     """Codex / Claude Code 式交互界面：对话区 + 审批面板 + 状态栏 + 输入框。"""
 
     CSS: ClassVar[str] = """
-    #main-row { height: 1fr; }
+    /* 底部 chrome 间距体系（LSF 网站设计 skill · B 参考创作迁移，ADR-022 修订）：
+       L1 对齐线：底部各行文字左缘统一 col 1（padding/margin 0 1）；
+       G2 组间隙 1 行：对话区↔状态组、状态组↔输入面板、输入面板↔提示组；
+       G1 组内行距 0：组内行相邻，靠规则线/底色分组，不靠空行；
+       P1 面板内边距 1：输入面板内容四周各留 1 cell，文字不贴边框。 */
+    #main-row { height: 1fr; margin-bottom: 1; }
     #sidebar { width: 36; display: none; border: round $primary; padding: 0 1; }
     #sidebar.show { display: block; }
     #sidebar-title { text-style: bold; color: $accent; }
@@ -479,16 +484,16 @@ class InteractiveApp(App[None]):
     .section-header { border-top: solid $text-tertiary; text-style: bold; }
     #cmd-hint { display: none; height: auto; max-height: 5; background: $panel; border: round $primary; padding: 0 1; margin-bottom: 1; }
     #cmd-hint.show { display: block; }
-    #status-top { height: 1; }
+    #status-top { height: 1; padding: 0 1; }
     #status-wait { width: 1fr; color: $text-secondary; }
     #status-tip { width: auto; color: $text-tertiary; }
-    #status-divider { height: 1; border-top: solid $text-quaternary; }
-    #input-row { min-height: 3; max-height: 8; height: auto; border-top: round $primary; border-bottom: round $primary; background: $panel; }
+    #status-divider { height: 1; margin: 0 1; border-top: solid $text-quaternary; }
+    #input-row { min-height: 3; max-height: 10; height: auto; margin-top: 1; padding: 1 0; border-top: round $primary; border-bottom: round $primary; background: $panel; }
     #input-row.collapsed { display: none; }
-    #input-prompt { width: 2; padding: 1 0 0 1; color: $accent; text-style: bold; }
+    #input-prompt { width: 2; padding: 0 0 0 1; color: $accent; text-style: bold; }
     #input { border: none; min-height: 1; max-height: 6; height: auto; width: 1fr; background: $panel; }
     #status-bar { height: 1; background: $panel; padding: 0 1; }
-    #model-dialog { display: none; border: round $primary; padding: 0 1; margin-bottom: 1; max-height: 14; }
+    #model-dialog { display: none; height: auto; border: round $primary; padding: 0 1; margin-bottom: 1; max-height: 14; }
     #model-dialog.show { display: block; }
     #model-filter { border: none; height: 1; margin: 0 0 1 0; background: $panel; }
     #model-list { height: auto; max-height: 8; }
@@ -503,7 +508,7 @@ class InteractiveApp(App[None]):
     .msg-diff { padding-left: 1; }
     .msg-assistant { margin-bottom: 1; }
     #input-row.streaming { border-top: round $text-tertiary; border-bottom: round $text-tertiary; }
-    #input-hint { height: 1; padding: 0 1; color: $text-tertiary; }
+    #input-hint { height: 1; margin-top: 1; padding: 0 1; color: $text-tertiary; }
     #input-hint.collapsed { display: none; }
     #disclaimer { height: 1; padding: 0 1; color: $text-quaternary; }
     .msg-tool:hover { background: $boost; }

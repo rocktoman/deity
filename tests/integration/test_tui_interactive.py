@@ -544,6 +544,82 @@ async def test_interactive_status_row_sits_above_input(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lsf_spacing_status_rows_share_left_alignment(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # L1 对齐线：底部各行文字左缘统一 col 1，分隔线左右各缩进 1。
+        assert app.query_one("#status-top").styles.padding.left == 1
+        assert app.query_one("#status-bar").styles.padding.left == 1
+        assert app.query_one("#input-hint").styles.padding.left == 1
+        assert app.query_one("#disclaimer").styles.padding.left == 1
+        assert app.query_one("#status-divider").styles.margin.left == 1
+        assert app.query_one("#status-divider").styles.margin.right == 1
+        divider = app.query_one("#status-divider")
+        assert divider.region.width == app.size.width - 2
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_lsf_spacing_group_gaps_are_real_blank_rows(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # G2 组间隙 1 行：对话区↔状态组、状态组↔输入面板、输入面板↔提示组。
+        assert app.query_one("#main-row").styles.margin.bottom == 1
+        assert app.query_one("#input-row").styles.margin.top == 1
+        assert app.query_one("#input-hint").styles.margin.top == 1
+        main_row = app.query_one("#main-row")
+        status_top = app.query_one("#status-top")
+        assert status_top.region.y - main_row.region.bottom == 1
+        status_bar = app.query_one("#status-bar")
+        input_row = app.query_one("#input-row")
+        assert input_row.region.y - status_bar.region.bottom == 1
+        input_hint = app.query_one("#input-hint")
+        assert input_hint.region.y - input_row.region.bottom == 1
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_lsf_spacing_input_panel_inset(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # P1 面板内边距 1：单行输入时面板高 5 行（上下边框 2 + 内边距 2 + 文本 1）。
+        row = app.query_one("#input-row")
+        assert row.styles.padding.top == 1
+        assert row.styles.padding.bottom == 1
+        assert row.region.height == 5
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_lsf_spacing_prompt_aligns_with_first_text_line(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        box = app.query_one("#input", ChatInput)
+        box.text = "hello"
+        box.focus()
+        await pilot.pause()
+        # ❯ 不再被顶边距推到下一行：提示符与首行文本同处一行。
+        prompt = app.query_one("#input-prompt")
+        assert prompt.styles.padding.top == 0
+        assert prompt.region.y == box.region.y
+        # 屏幕几何：❯ 所在格与首行文本首格同处一行。
+        row = prompt.region.y
+        prompt_widget, _ = app.screen.get_widget_at(prompt.region.x + 1, row)
+        assert prompt_widget.id == "input-prompt"
+        input_widget, _ = app.screen.get_widget_at(box.region.x, row)
+        assert input_widget.id == "input"
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
 async def test_interactive_shift_tab_cycles_modes(tmp_path: Path) -> None:
     pytest.importorskip("textual")
     app = _make_app(tmp_path, FakeModel([]), plan_enabled=True)
@@ -1225,6 +1301,26 @@ async def test_codex2_model_dialog_click_selects_row(tmp_path: Path) -> None:
         await pilot.click("#model-row-2")
         await _wait_until(lambda: app.state.model_name == "qwen-max")
         assert not app.query_one("#model-dialog").has_class("show")
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_lsf_spacing_model_dialog_rows_all_clickable(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    app.service.provider_id = "qwen"
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/model")
+        await _wait_until(lambda: app.query_one("#model-dialog").has_class("show"))
+        await pilot.pause()
+        # 弹窗按内容定高（不与对话区抢 1fr）：全部 5 行都在弹窗可见区内，
+        # 点击任一行都落在按钮上而非边框上（LSF 重构曾把第 3 行压到底边框）。
+        dialog = app.query_one("#model-dialog")
+        assert dialog.styles.height.is_auto
+        for i in range(5):
+            row = app.query_one(f"#model-row-{i}")
+            assert dialog.region.contains_region(row.region), f"model-row-{i} 应在弹窗内"
         await pilot.press("ctrl+q")
 
 
