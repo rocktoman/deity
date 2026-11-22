@@ -43,7 +43,12 @@ from deity.application.doctor import run_doctor
 from deity.application.plan_service import PlanService
 from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
-from deity.interfaces.cli.chat_commands import HELP_TEXT, ChatState, run_error_message
+from deity.interfaces.cli.chat_commands import (
+    HELP_TEXT,
+    ChatState,
+    model_listing_lines,
+    run_error_message,
+)
 from deity.interfaces.cli.chat_status import ChatStatus
 from deity.interfaces.cli.chat_view_model import ChatViewModel, ToolNode
 from deity.interfaces.cli.plan import build_approved, plan_lines
@@ -1167,7 +1172,9 @@ class InteractiveApp(App[None]):
             requested = prompt.removeprefix("/model").strip()
             if not requested:
                 self._append_system(
-                    f"当前模型：{self.state.model_name}（提供方 {self.service.provider_id or '—'}）"
+                    "\n".join(
+                        model_listing_lines(self.state.model_name, self.service.provider_id or "")
+                    )
                 )
             else:
                 self.state.model_name = requested

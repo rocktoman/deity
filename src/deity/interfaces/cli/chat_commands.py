@@ -13,6 +13,7 @@ from typing import Any
 from rich.console import Console
 
 from deity.adapters.storage import SQLiteSessionRepository
+from deity.application.config import KNOWN_MODELS
 from deity.application.doctor import run_doctor
 from deity.application.plan_service import PlanService
 from deity.application.run_service import RunService
@@ -25,16 +26,6 @@ from deity.interfaces.cli.plan import (
     authorize_dirty_targets,
     build_approved,
     confirm_build,
-)
-
-HELP_TEXT = (
-    "/plan 进入持续计划模式；/build [计划ID] [--allow-dirty 路径] 执行已有计划；"
-    "/normal 返回普通模式；/skill 选择 Skill；/mcp 查看并选择 MCP 工具；"
-    "选择会提示模型在下一条任务中使用；/resume [运行ID] 恢复中断的运行；"
-    "/sessions 列出并切换会话；/compact 查看上下文压缩状态；/clear 清屏；"
-    "/cost 查看本会话 token 与轮次；/model [名称] 查看或切换模型；"
-    "/status 查看会话状态；/auto 进入/退出自动接受模式；"
-    "/doctor 运行环境检查；/exit 或 /quit 退出"
 )
 
 
@@ -112,13 +103,33 @@ def command_names() -> tuple[str, ...]:
     return tuple(command.name for command in COMMANDS)
 
 
+# /help 的展示文本：由 COMMANDS 注册表生成，每条命令占一行，避免手写
+# 文本与注册表漂移（旧版是分号连成的整段，终端里换行后难读）。
+HELP_TEXT = "\n".join(f"{command.usage}  {command.description}" for command in COMMANDS)
+
+
+def model_listing_lines(model_name: str, provider: str) -> list[str]:
+    """` /model`（无参数）的展示行：当前模型 + 本提供方的可选模型列表。"""
+    lines = [f"当前模型：{model_name}（提供方 {provider or '—'}）"]
+    known = KNOWN_MODELS.get(provider or "", ())
+    if known:
+        lines.append(f"可选模型（{provider}）：")
+        for name in known:
+            lines.append(f"  ● {name}（当前）" if name == model_name else f"    {name}")
+        lines.append("/model <名称> 切换（仅本次会话内生效）")
+    else:
+        lines.append("本提供方无固定模型列表（端点自定模型名），用 /model <名称> 直接切换。")
+    return lines
+
+
 async def dispatch(prompt: str, ctx: ChatContext) -> bool:
     """处理一条输入；返回 True 表示已作为命令处理，不发给模型。"""
     if prompt in {"/exit", "/quit"}:
         ctx.state.exit_requested = True
         return True
     if prompt == "/help":
-        ctx.console.print(HELP_TEXT)
+        # markup=False：用法里的 [call_id] 等方括号是字面量，不能被 Rich 当样式吞掉。
+        ctx.console.print(HELP_TEXT, markup=False)
         return True
     if prompt == "/plan":
         if not ctx.service.coding.plan_build_enabled or not ctx.service.coding.git_guard_enabled:
@@ -455,9 +466,9 @@ def _handle_model(prompt: str, ctx: ChatContext) -> None:
     """执行 /model：无参数查看当前模型，有参数切换（仅本次会话内生效）。"""
     requested = prompt.removeprefix("/model").strip()
     if not requested:
-        provider = getattr(ctx.service, "provider_id", None) or "—"
+        provider = getattr(ctx.service, "provider_id", None) or ""
         ctx.console.print(
-            f"当前模型：{ctx.state.model_name}（提供方 {provider}）",
+            "\n".join(model_listing_lines(ctx.state.model_name, provider)),
             highlight=False,
             markup=False,
         )

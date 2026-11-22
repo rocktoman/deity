@@ -225,6 +225,24 @@ QWEN_DEFAULT_MODEL = "qwen3.8-omni-flash"
 QWEN_DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 QWEN_DEFAULT_API_KEY_ENV = "DASHSCOPE_API_KEY"
 
+# 各提供方已知的常用模型（仅作 /model 的快捷参考；厂商会调整名称，
+# /model 接受任意名称，不以此表校验）。
+KNOWN_MODELS: dict[str, tuple[str, ...]] = {
+    "qwen": (
+        "qwen3.8-omni-flash",
+        "qwen4-max",
+        "qwen-max",
+        "qwen-plus",
+        "qwen-turbo",
+    ),
+    "anthropic": (
+        "claude-opus-4-1",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+    ),
+    "openai_compatible": (),
+}
+
 
 @dataclass(frozen=True)
 class ModelConfig:
