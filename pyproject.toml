@@ -66,7 +66,6 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     "deity.interfaces.cli.chat_input",
-    "deity.interfaces.tui.app",
-    "deity.interfaces.tui.interactive",
+    "deity.interfaces.tui.*",
 ]
 disable_error_code = ["untyped-decorator", "misc"]

@@ -223,7 +223,7 @@ class SQLiteSessionRepository:
                     "FROM runs LEFT JOIN run_leases ON runs.id=run_leases.run_id "
                     "WHERE runs.status IN ('running', 'waiting_approval')"
                 ) as cursor:
-                    rows = await cursor.fetchall()
+                    rows = list(await cursor.fetchall())
                 for row in rows:
                     if row["owner_id"] is not None and _owner_alive(row["owner_id"]):
                         continue
@@ -2794,6 +2794,106 @@ class SQLiteSessionRepository:
         ) as cursor:
             rows = await cursor.fetchall()
         return [{"role": row[0], "content": json.loads(row[1])} for row in rows]
+
+    async def compact_messages(
+        self, session_id: str, *, keep_recent: int = 2
+    ) -> tuple[int, int, int, int]:
+        """Deterministically compact older session messages into one summary record.
+
+        Returns (old_count, new_count, old_estimated_tokens, new_estimated_tokens).
+        Preserves SQLite schema compatibility by replacing older rows in `messages`
+        with one compact `assistant` summary message while keeping the most recent
+        `keep_recent` rows verbatim.
+        """
+        from deity.core.context.reliable import ConservativeEstimator
+
+        if keep_recent < 1:
+            raise ValueError("keep_recent must be at least 1")
+        estimator = ConservativeEstimator()
+        async with self._lock:
+            async with self.db.execute(
+                "SELECT id, run_id, role, content_json, ordinal FROM messages "
+                "WHERE session_id=? ORDER BY ordinal",
+                (session_id,),
+            ) as cursor:
+                rows = list(await cursor.fetchall())
+            if not rows:
+                return 0, 0, 0, 0
+            decoded = [{"role": row[2], "content": json.loads(row[3])} for row in rows]
+            old_count = len(decoded)
+            old_tokens = estimator.estimate(decoded)
+            if old_count <= keep_recent:
+                return old_count, old_count, old_tokens, old_tokens
+            older = decoded[:-keep_recent]
+            recent_rows = rows[-keep_recent:]
+            summary_lines: list[str] = ["[历史上下文压缩摘要]"]
+            for item in older:
+                role = str(item.get("role", ""))
+                content = item.get("content", "")
+                if isinstance(content, str) and content.strip():
+                    compact_text = " ".join(content.strip().split())
+                    if len(compact_text) > 180:
+                        compact_text = compact_text[:177] + "…"
+                    summary_lines.append(f"- {role}: {compact_text}")
+            summary_content = "\n".join(summary_lines[:25])
+            anchor_run_id = rows[0][1]
+            new_decoded = [{"role": "assistant", "content": summary_content}] + decoded[
+                -keep_recent:
+            ]
+            new_tokens = estimator.estimate(new_decoded)
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self.db.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+                await self.db.execute(
+                    "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        str(uuid4()),
+                        session_id,
+                        anchor_run_id,
+                        "assistant",
+                        json.dumps(_redact(summary_content)),
+                        1,
+                    ),
+                )
+                for offset, row in enumerate(recent_rows, start=2):
+                    await self.db.execute(
+                        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+                        (str(uuid4()), session_id, row[1], row[2], row[3], offset),
+                    )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+            return old_count, len(new_decoded), old_tokens, new_tokens
+
+    async def truncate_messages(self, session_id: str, keep_count: int) -> int:
+        """Delete session messages beyond the first `keep_count` ordered rows.
+
+        Returns the number of deleted rows. Keeps SQLite schema unchanged.
+        """
+        if keep_count < 0:
+            raise ValueError("keep_count must be nonnegative")
+        async with self._lock:
+            async with self.db.execute(
+                "SELECT id FROM messages WHERE session_id=? ORDER BY ordinal",
+                (session_id,),
+            ) as cursor:
+                rows = list(await cursor.fetchall())
+            to_delete = [row[0] for row in rows[keep_count:]]
+            if not to_delete:
+                return 0
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                placeholders = ",".join("?" for _ in to_delete)
+                await self.db.execute(
+                    f"DELETE FROM messages WHERE id IN ({placeholders})",
+                    to_delete,
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+            return len(to_delete)
 
     async def evidence(self, run_id: str) -> list[dict[str, str]]:
         """Read persisted verification facts for a run."""

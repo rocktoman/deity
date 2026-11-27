@@ -312,29 +312,54 @@ class GitWorkspaceAdapter:
         return tuple(sorted(states, key=lambda item: item.path))
 
     def _plain_files(self) -> tuple[WorkspaceFileState, ...]:
+        ignored_dirs = {
+            ".git",
+            ".venv",
+            "__pycache__",
+            "node_modules",
+            ".Trash",
+            "Library",
+            "System",
+            "Volumes",
+            "Applications",
+            "dev",
+            "proc",
+            "sys",
+            "private",
+        }
         states: list[WorkspaceFileState] = []
-        for root, dirs, names in os.walk(self.workspace, followlinks=False):
-            dirs[:] = sorted(name for name in dirs if name != ".git")
+        for root, dirs, names in os.walk(self.workspace, followlinks=False, onerror=lambda _: None):
+            dirs[:] = sorted(name for name in dirs if name not in ignored_dirs)
             for name in sorted(names):
                 path = Path(root) / name
-                resolved = path.resolve(strict=False)
-                if resolved in self.ignored or path.is_symlink() or not path.is_file():
+                try:
+                    resolved = path.resolve(strict=False)
+                    if resolved in self.ignored:
+                        continue
+                    st = path.lstat()
+                    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                        continue
+                except OSError:
                     continue
                 states.append(
                     WorkspaceFileState(
                         str(path.relative_to(self.workspace)), "present", self._hash_file(path)
                     )
                 )
-                if len(states) > self.max_files:
-                    raise ValueError("workspace snapshot exceeds file limit")
+                if len(states) >= self.max_files:
+                    return tuple(states)
         return tuple(states)
 
     @staticmethod
     def _hash_file(path: Path) -> str | None:
-        if not path.is_file() or path.is_symlink():
+        try:
+            st = path.lstat()
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                return None
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(64 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+        except OSError:
             return None
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(64 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()

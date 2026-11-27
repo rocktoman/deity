@@ -23,6 +23,12 @@ from deity.interfaces.cli.chat_approval import make_approve
 from deity.interfaces.cli.main import app as cli_app
 from deity.interfaces.tui.approval_bridge import TuiApprovalBridge
 from deity.interfaces.tui.interactive import ChatInput, InteractiveApp
+from deity.interfaces.tui.modals import (
+    ApprovalModal,
+    CommandPaletteModal,
+    ModelPickerModal,
+)
+from deity.interfaces.tui.widgets import ToolGroupWidget
 
 
 class FakeModel:
@@ -110,15 +116,18 @@ async def _submit(app: InteractiveApp, pilot, text: str) -> None:  # type: ignor
 
 def _conversation_text(app: InteractiveApp) -> str:
     parts: list[str] = []
-    for widget in app.query_one("#conversation").children:
-        parts.append(str(widget.render()))
-        for child in widget.children:
-            parts.append(str(child.render()))
+    for widget in app.query_one("#conversation").walk_children(with_self=False):
+        render_fn = getattr(widget, "render", None)
+        if callable(render_fn):
+            parts.append(str(render_fn()))
     return "\n".join(parts)
 
 
 def _status_bar(app: InteractiveApp) -> str:
-    return str(app.query_one("#status-bar").render())
+    left = str(app.query_one("#top-bar-left").render())
+    right = str(app.query_one("#top-bar-right").render())
+    footer = str(app.query_one("#composer-footer").render())
+    return f"{left} {right} {footer}"
 
 
 @pytest.mark.asyncio
@@ -131,7 +140,6 @@ async def test_interactive_starts_and_quits(tmp_path: Path) -> None:
         assert "欢迎来到 Deity" in _conversation_text(app)
         bar = _status_bar(app)
         assert "fake" in bar
-        # 工作区随状态栏瘦身移出状态栏（P2-5）；欢迎头里仍有（见欢迎头用例）。
         assert str(tmp_path) not in bar
         assert "空闲" in bar
         await pilot.press("ctrl+q")
@@ -181,8 +189,8 @@ async def test_interactive_approve_writes_file(tmp_path: Path) -> None:
         await _submit(app, pilot, "写 b.txt")
         await _wait_until(lambda: bridge.pending is not None)
         await pilot.pause()
-        assert app.query_one("#prompt-panel").has_class("show")
-        prompt_text = str(app.query_one("#prompt-text").render())
+        assert isinstance(app.screen, ApprovalModal)
+        prompt_text = str(app.screen.query_one("#prompt-text").render())
         assert "write_file" in prompt_text
         assert "b.txt" in prompt_text
         await pilot.click("#btn-allow-once")
@@ -405,6 +413,7 @@ def test_bare_deity_tty_routes_to_interactive(
     calls: list[str] = []
     _stub_launch(monkeypatch, calls)
     monkeypatch.setattr(cli_main, "_interactive_tty", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(cli_app, [])
     assert result.exit_code == 0, result.output
@@ -482,21 +491,57 @@ def test_tui_command_run_id_uses_monitor(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
-async def test_interactive_busy_submit_is_rejected_with_note(tmp_path: Path) -> None:
+async def test_interactive_busy_submit_queues_and_runs_next(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    turns = [
+        [ModelEvent("text_delta", text="第一轮完成"), ModelEvent("message_completed")],
+        [ModelEvent("text_delta", text="排队任务完成"), ModelEvent("message_completed")],
+    ]
+
+    class SlowFirstModel:
+        def __init__(self) -> None:
+            self.index = 0
+
+        async def stream(self, request: object):  # type: ignore[no-untyped-def]
+            if self.index == 0:
+                self.index += 1
+                await asyncio.sleep(0.4)
+                for ev in turns[0]:
+                    yield ev
+            else:
+                for ev in turns[1]:
+                    yield ev
+
+    app = _make_app(tmp_path, SlowFirstModel())
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "首轮任务")
+        await _wait_until(lambda: app._run_active)
+        await _submit(app, pilot, "排队任务")
+        await pilot.pause()
+        assert "已加入排队" in _conversation_text(app)
+        await _wait_until(lambda: "排队任务完成" in _conversation_text(app))
+        await _wait_until(lambda: not app._run_active)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_interactive_cancel_clears_input_queue(tmp_path: Path) -> None:
     pytest.importorskip("textual")
     app = _make_app(tmp_path, HangingModel())
     async with app.run_test() as pilot:
         await _submit(app, pilot, "慢任务")
         await _wait_until(lambda: app._run_active)
-        await _submit(app, pilot, "插队任务")
+        await _submit(app, pilot, "待清空任务")
         await pilot.pause()
-        assert "当前有 Run 在运行" in _conversation_text(app)
+        assert app._input_queue.size == 1
         await pilot.press("ctrl+c")
         await _wait_until(lambda: not app._run_active)
+        assert app._input_queue.size == 0
+        assert "已清空排队任务" in _conversation_text(app)
         await pilot.press("ctrl+q")
 
 
-# -- Claude Code 观感对齐（ADR-022 修订）：欢迎头 / 输入区 / 模式循环 / 工具行 --
+# -- AGY 风格重构：欢迎头 / 极简三段式布局 / 命令面板 / 真实压缩 --
 
 
 @pytest.mark.asyncio
@@ -510,112 +555,87 @@ async def test_interactive_welcome_header_has_emblem_version_model_workspace(
         app.query_one("#welcome-header")
         emblem = str(app.query_one("#welcome-emblem").render())
         emblem_lines = [line for line in emblem.splitlines() if line.strip()]
-        # 徽记只断言存在性与规模（神之眼字符画不写死整幅）。
         assert len(emblem_lines) >= 4
         assert "◉" in emblem
         text = _conversation_text(app)
         assert f"Deity v{__version__}" in text
         assert "模型：fake" in text
         assert str(tmp_path) in text
-        # 与原一行欢迎消息合并，不重复两份欢迎。
         assert text.count("欢迎来到 Deity") == 1
         await pilot.press("ctrl+q")
 
 
 @pytest.mark.asyncio
-async def test_interactive_status_row_sits_above_input(tmp_path: Path) -> None:
+async def test_interactive_agy_layout_hierarchy(tmp_path: Path) -> None:
     pytest.importorskip("textual")
     app = _make_app(tmp_path, FakeModel([]))
     async with app.run_test() as pilot:
         await pilot.pause()
-        # Gemini 式 StatusRow：等待/提示行 + 分隔线 + 模式行都在输入框上方。
         ordered_ids = [w.id for w in app.screen.walk_children(with_self=False) if w.id]
-        assert ordered_ids.index("status-top") < ordered_ids.index("status-divider")
-        assert ordered_ids.index("status-divider") < ordered_ids.index("status-bar")
-        assert ordered_ids.index("status-bar") < ordered_ids.index("input")
+        assert ordered_ids.index("top-bar") < ordered_ids.index("workspace-body")
+        assert ordered_ids.index("workspace-body") < ordered_ids.index("composer-shell")
+        assert ordered_ids.index("focus-bar") < ordered_ids.index("input")
+        assert ordered_ids.index("input") < ordered_ids.index("composer-footer")
         bar = _status_bar(app)
-        assert "普通模式" in bar
+        assert "[普通]" in bar
         assert "fake" in bar
-        # 模式动态副提示：普通模式下一步切到计划。
-        assert "shift+tab 切换到计划" in bar
-        # (shift+tab 切换) 提示仍在输入区状态提示行（P2-5）。
-        assert "Shift+Tab 切换模式" in str(app.query_one("#input-hint").render())
+        assert "Shift+Tab 切换" in str(app.query_one("#composer-footer").render())
         await pilot.press("ctrl+q")
 
 
 @pytest.mark.asyncio
-async def test_lsf_spacing_status_rows_share_left_alignment(tmp_path: Path) -> None:
+async def test_agy_top_bar_and_composer_compact(tmp_path: Path) -> None:
     pytest.importorskip("textual")
     app = _make_app(tmp_path, FakeModel([]))
     async with app.run_test() as pilot:
         await pilot.pause()
-        # L1 对齐线：底部各行文字左缘统一 col 1，分隔线左右各缩进 1。
-        assert app.query_one("#status-top").styles.padding.left == 1
-        assert app.query_one("#status-bar").styles.padding.left == 1
-        assert app.query_one("#input-hint").styles.padding.left == 1
-        assert app.query_one("#disclaimer").styles.padding.left == 1
-        assert app.query_one("#status-divider").styles.margin.left == 1
-        assert app.query_one("#status-divider").styles.margin.right == 1
-        divider = app.query_one("#status-divider")
-        assert divider.region.width == app.size.width - 2
-        await pilot.press("ctrl+q")
-
-
-@pytest.mark.asyncio
-async def test_lsf_spacing_group_gaps_are_real_blank_rows(tmp_path: Path) -> None:
-    pytest.importorskip("textual")
-    app = _make_app(tmp_path, FakeModel([]))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        # G2 组间隙 1 行：对话区↔状态组、状态组↔输入面板、输入面板↔提示组。
-        assert app.query_one("#main-row").styles.margin.bottom == 1
-        assert app.query_one("#input-row").styles.margin.top == 1
-        assert app.query_one("#input-hint").styles.margin.top == 1
-        main_row = app.query_one("#main-row")
-        status_top = app.query_one("#status-top")
-        assert status_top.region.y - main_row.region.bottom == 1
-        status_bar = app.query_one("#status-bar")
-        input_row = app.query_one("#input-row")
-        assert input_row.region.y - status_bar.region.bottom == 1
-        input_hint = app.query_one("#input-hint")
-        assert input_hint.region.y - input_row.region.bottom == 1
-        await pilot.press("ctrl+q")
-
-
-@pytest.mark.asyncio
-async def test_lsf_spacing_input_panel_inset(tmp_path: Path) -> None:
-    pytest.importorskip("textual")
-    app = _make_app(tmp_path, FakeModel([]))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        # P1 面板内边距 1：单行输入时面板高 5 行（上下边框 2 + 内边距 2 + 文本 1）。
-        row = app.query_one("#input-row")
-        assert row.styles.padding.top == 1
-        assert row.styles.padding.bottom == 1
-        assert row.region.height == 5
-        await pilot.press("ctrl+q")
-
-
-@pytest.mark.asyncio
-async def test_lsf_spacing_prompt_aligns_with_first_text_line(tmp_path: Path) -> None:
-    pytest.importorskip("textual")
-    app = _make_app(tmp_path, FakeModel([]))
-    async with app.run_test() as pilot:
-        await pilot.pause()
+        assert app.query_one("#top-bar").region.height == 1
+        assert app.query_one("#focus-bar").region.height == 1
+        assert app.query_one("#composer-footer").region.height == 1
+        assert len(app.query("Header")) == 0
+        assert len(app.query("Footer")) == 0
         box = app.query_one("#input", ChatInput)
         box.text = "hello"
         box.focus()
         await pilot.pause()
-        # ❯ 不再被顶边距推到下一行：提示符与首行文本同处一行。
         prompt = app.query_one("#input-prompt")
-        assert prompt.styles.padding.top == 0
         assert prompt.region.y == box.region.y
-        # 屏幕几何：❯ 所在格与首行文本首格同处一行。
-        row = prompt.region.y
-        prompt_widget, _ = app.screen.get_widget_at(prompt.region.x + 1, row)
-        assert prompt_widget.id == "input-prompt"
-        input_widget, _ = app.screen.get_widget_at(box.region.x, row)
-        assert input_widget.id == "input"
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_agy_command_palette_opens_and_dispatches(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    app = _make_app(tmp_path, FakeModel([]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+p")
+        await _wait_until(lambda: isinstance(app.screen, CommandPaletteModal))
+        await pilot.press("t", "h", "e", "m", "e")
+        await pilot.pause()
+        await pilot.press("enter")
+        await _wait_until(lambda: app.theme == "deity-light")
+        assert "已切换到浅色主题" in _conversation_text(app)
+        await pilot.press("ctrl+q")
+
+
+@pytest.mark.asyncio
+async def test_agy_compact_command_compacts_session_messages(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
+    turns = [
+        [ModelEvent("text_delta", text=f"回复 {i}"), ModelEvent("message_completed")]
+        for i in range(3)
+    ]
+    app = _make_app(tmp_path, FakeModel(turns))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for i in range(3):
+            await _submit(app, pilot, f"历史消息内容 {i}")
+            await _wait_until(lambda: not app._run_active)
+        await _submit(app, pilot, "/compact")
+        await _wait_until(lambda: "已压缩会话上下文" in _conversation_text(app))
+        text = _conversation_text(app)
+        assert "6 条 → 3 条" in text
         await pilot.press("ctrl+q")
 
 
@@ -728,7 +748,7 @@ async def test_interactive_plan_mode_submit_uses_plan_flow(tmp_path: Path) -> No
         await _submit(app, pilot, "实现 feature")
         # 计划路径：先展示计划并询问是否构建，而不是直接执行任务。
         await _wait_until(lambda: "计划 ID：" in _conversation_text(app))
-        await _wait_until(lambda: app.query_one("#prompt-panel").has_class("show"))
+        await _wait_until(lambda: isinstance(app.screen, ApprovalModal))
         await pilot.click("#btn-cancel")  # 保留草案，不构建
         await _wait_until(lambda: not app._run_active)
         await pilot.pause()
@@ -751,7 +771,6 @@ async def test_interactive_uses_deity_theme(tmp_path: Path) -> None:
         assert app.theme in ("deity-dark", "deity-light")
         theme = app.get_theme(app.theme)
         assert theme is not None
-        # 品牌色：深底黑色主题中性强调色、浅底 Klee 深绿原色（2026-11-22 黑色主题）。
         assert theme.accent in ("#E8EAE8", "#1E4C35")
         assert "text-quaternary" in theme.variables
         await pilot.press("ctrl+q")
@@ -763,15 +782,9 @@ async def test_interactive_round_borders(tmp_path: Path) -> None:
     app = _make_app(tmp_path, FakeModel([]))
     async with app.run_test() as pilot:
         await pilot.pause()
-        for selector in ("#welcome-header", "#prompt-panel"):
+        for selector in ("#welcome-header", "#input-row"):
             border_type = app.query_one(selector).styles.border[0][0]
             assert border_type == "round", selector
-        # Gemini 式去框化输入框：仅上下两条圆角线，左右无边框（未设边为空串）。
-        edges = app.query_one("#input-row").styles.border
-        assert edges[0][0] == "round", "input-row top"
-        assert edges[2][0] == "round", "input-row bottom"
-        assert edges[1][0] == "", "input-row right"
-        assert edges[3][0] == "", "input-row left"
         await pilot.press("ctrl+q")
 
 
@@ -870,15 +883,14 @@ async def test_interactive_input_hint_states(tmp_path: Path) -> None:
     app = _make_app(tmp_path, HangingModel())
     async with app.run_test() as pilot:
         await pilot.pause()
-        hint = str(app.query_one("#input-hint").render())
-        assert "输入任务开始" in hint
-        assert "可能会出错" in str(app.query_one("#disclaimer").render())
+        footer = str(app.query_one("#composer-footer").render())
+        assert "Enter 发送" in footer
         await _submit(app, pilot, "慢任务")
         await _wait_until(lambda: app._run_active)
         await pilot.pause()
         app._refresh_status()
-        hint = str(app.query_one("#input-hint").render())
-        assert "生成中" in hint
+        footer = str(app.query_one("#composer-footer").render())
+        assert "运行中" in footer
         assert app.query_one("#input-row").has_class("streaming")
         await pilot.press("ctrl+c")
         await _wait_until(lambda: not app._run_active)
@@ -900,11 +912,11 @@ async def test_interactive_welcome_greeting_by_clock(tmp_path: Path) -> None:
         await pilot.pause()
         text = _conversation_text(evening)
         assert "晚上好" in text
-        assert "今天想让我帮你做什么？" in text
+        assert "Ctrl+P 面板" in text
         await pilot.press("ctrl+q")
 
 
-# -- Klee 风格对齐 P2：会话侧栏 --
+# -- AGY 辅助抽屉：会话 / 文件 / 任务三标签 --
 
 
 @pytest.mark.asyncio
@@ -916,21 +928,27 @@ async def test_interactive_sidebar_toggle_and_current_session(tmp_path: Path) ->
         await _submit(app, pilot, "建会话的任务")
         await _wait_until(lambda: not app._run_active)
         await pilot.pause()
-        sidebar = app.query_one("#sidebar")
-        assert not sidebar.has_class("show")  # 默认隐藏（D3）
+        drawer = app.query_one("#aux-drawer")
+        assert not drawer.has_class("show")
         await pilot.press("ctrl+b")
         await _wait_until(lambda: len(app.query(".session-row")) >= 1)
         await pilot.pause()
-        assert sidebar.has_class("show")
+        assert drawer.has_class("show")
         rows = app.query(".session-row")
         assert len(rows) == 1
         assert rows[0].has_class("current")
         assert "●" in str(rows[0].label)
         assert app.state.session_id[:8] in str(rows[0].label)
         assert "模型：fake" in str(app.query_one("#sidebar-model").render())
+        await pilot.click("#tab-tasks")
+        await pilot.pause()
+        assert "本轮暂无工具调用" in str(app.query_one("#drawer-tasks-content").render())
+        await pilot.click("#tab-files")
+        await pilot.pause()
+        assert app.query_one("#pane-files").has_class("active")
         await pilot.press("ctrl+b")
         await pilot.pause()
-        assert not sidebar.has_class("show")
+        assert not drawer.has_class("show")
         await pilot.press("ctrl+q")
 
 
@@ -942,7 +960,7 @@ async def test_interactive_sidebar_refused_when_narrow(tmp_path: Path) -> None:
         await pilot.pause()
         await pilot.press("ctrl+b")
         await pilot.pause()
-        assert not app.query_one("#sidebar").has_class("show")
+        assert not app.query_one("#aux-drawer").has_class("show")
         assert "窗口太窄" in _conversation_text(app)
         await pilot.press("ctrl+q")
 
@@ -961,7 +979,6 @@ async def test_interactive_sidebar_row_hover_feedback(tmp_path: Path) -> None:
         before = row.styles.background
         await pilot.hover(row)
         await pilot.pause()
-        # hover 反馈（P2-1）：行背景切到主题 hover 底色。
         assert row.styles.background != before
         await pilot.press("ctrl+q")
 
@@ -979,16 +996,15 @@ async def test_interactive_tool_lines_are_compact(tmp_path: Path) -> None:
         await _wait_until(lambda: not app._run_active)
         await pilot.pause()
         text = _conversation_text(app)
-        # 一行式条目 + 缩进结果行；不再是旧的 ▸/▾ 面板式呈现。
-        # Codex 移植后工具行改动词标签：⏺ 写 b.txt（不再是 ⏺ write_file(…））。
         assert "⏺ 写 b.txt" in text
         assert "⎿" in text
         assert "▸ write_file" not in text
+        groups = list(app.query(ToolGroupWidget))
+        assert len(groups) == 1
+        groups[0].toggle_collapsed()
+        await pilot.pause()
+        assert groups[0].group_state.collapsed is True
         await pilot.press("ctrl+q")
-
-
-# -- Gemini 风格对齐：StatusRow 两行化 / 上下文着色 / 模式副提示 /
-#    等待行左竖线 / SectionHeader / 审批折叠输入区 --
 
 
 @pytest.mark.asyncio
@@ -997,9 +1013,7 @@ async def test_interactive_status_row_tip_visible_when_wide(tmp_path: Path) -> N
     app = _make_app(tmp_path, FakeModel([]))
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        # 宽屏：等待/提示行右侧显示 Tip，分隔线为淡色单线。
-        assert "Tip：" in str(app.query_one("#status-tip").render())
-        assert app.query_one("#status-divider").styles.border[0][0] == "solid"
+        assert "Ctrl+P" in str(app.query_one("#focus-status").render())
         await pilot.press("ctrl+q")
 
 
@@ -1009,7 +1023,7 @@ async def test_interactive_status_row_tip_hidden_when_narrow(tmp_path: Path) -> 
     app = _make_app(tmp_path, FakeModel([]))
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        assert str(app.query_one("#status-tip").render()).strip() == ""
+        assert str(app.query_one("#top-bar-right").render()).strip() == ""
         await pilot.press("ctrl+q")
 
 
@@ -1028,17 +1042,15 @@ async def test_interactive_context_usage_colored_by_ratio(tmp_path: Path) -> Non
         await _submit(app, pilot, "带用量的任务")
         await _wait_until(lambda: not app._run_active)
         await pilot.pause()
-        # 80% ≥ 0.75 压缩软限：右侧显示「上下文 80%」，警告色。
-        bar = str(app.query_one("#status-bar").render())
-        assert "上下文 80%" in bar
-        rendered = app.query_one("#status-bar").render()
+        bar = str(app.query_one("#top-bar-right").render())
+        assert "Ctx 80%" in bar
+        rendered = app.query_one("#top-bar-right").render()
         assert any("217,164,65" in str(span.style) for span in rendered.spans)  # 警告色 #D9A441
-        # 满额：直接改状态再刷新，变红。
         app.session_status.last_input_tokens = 1000
         app._refresh_status()
-        bar = str(app.query_one("#status-bar").render())
-        assert "上下文 100%" in bar
-        rendered = app.query_one("#status-bar").render()
+        bar = str(app.query_one("#top-bar-right").render())
+        assert "Ctx 100%" in bar
+        rendered = app.query_one("#top-bar-right").render()
         assert any("229,83,75" in str(span.style) for span in rendered.spans)  # 错误色 #E5534B
         await pilot.press("ctrl+q")
 
@@ -1058,9 +1070,9 @@ async def test_interactive_context_usage_percent_only_when_narrow(tmp_path: Path
         await _submit(app, pilot, "带用量的任务")
         await _wait_until(lambda: not app._run_active)
         await pilot.pause()
-        bar = str(app.query_one("#status-bar").render())
-        assert "50%" in bar
-        assert "上下文" not in bar
+        bar = str(app.query_one("#top-bar-right").render())
+        assert "Ctx 50%" in bar
+        assert "tokens" not in bar
         await pilot.press("ctrl+q")
 
 
@@ -1071,18 +1083,18 @@ async def test_interactive_mode_subhint_follows_mode(tmp_path: Path) -> None:
     bridge = app._bridge
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert "shift+tab 切换到计划" in _status_bar(app)
+        assert "[普通]" in _status_bar(app)
         await pilot.press("shift+tab")
         await _wait_until(lambda: app.state.plan_mode)
         await pilot.pause()
-        assert "shift+tab 切换到自动接受" in _status_bar(app)
+        assert "[计划]" in _status_bar(app)
         await pilot.press("shift+tab")
         await _wait_until(lambda: bridge.pending is not None)
         await pilot.pause()
         await pilot.click("#btn-confirm")
         await _wait_until(lambda: bridge.controller.mode == "auto")
         await pilot.pause()
-        assert "shift+tab 回到普通" in _status_bar(app)
+        assert "[自动接受]" in _status_bar(app)
         await pilot.press("ctrl+q")
 
 
@@ -1095,7 +1107,6 @@ async def test_interactive_waiting_row_left_border(tmp_path: Path) -> None:
         await _wait_until(lambda: len(app.query("#waiting-row")) == 1)
         waiting = app.query_one("#waiting-row")
         assert "Thinking..." in str(waiting.render())
-        # 仅左竖线 + 斜体（不伪造思考内容，仍只显示等待态）。
         assert waiting.styles.border[3][0] == "solid"
         assert "italic" in str(waiting.styles.text_style)
         await _wait_until(lambda: not app._run_active)
@@ -1118,7 +1129,7 @@ async def test_interactive_help_section_header(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_interactive_approval_collapses_input(tmp_path: Path) -> None:
+async def test_interactive_approval_uses_modal_overlay_without_hiding_input(tmp_path: Path) -> None:
     pytest.importorskip("textual")
     app = _make_app(tmp_path, FakeModel(_write_turns("b.txt", "hello")))
     bridge = app._bridge
@@ -1126,17 +1137,13 @@ async def test_interactive_approval_collapses_input(tmp_path: Path) -> None:
         await _submit(app, pilot, "写 b.txt")
         await _wait_until(lambda: bridge.pending is not None)
         await pilot.pause()
-        assert app.query_one("#prompt-panel").has_class("show")
-        # 审批独占焦点：输入框与下方提示行折叠，面板标题为 SectionHeader。
-        assert app.query_one("#input-row").has_class("collapsed")
-        assert app.query_one("#input-hint").has_class("collapsed")
-        assert not app.query_one("#input-row").display
-        assert "审批" in str(app.query_one("#prompt-title").render())
+        assert isinstance(app.screen, ApprovalModal)
+        assert "审批" in str(app.screen.query_one("#prompt-title").render())
+        assert app.screen_stack[0].query_one("#input-row").display is True
         await pilot.click("#btn-allow-once")
         await _wait_until(lambda: not app._run_active)
         await pilot.pause()
-        assert not app.query_one("#input-row").has_class("collapsed")
-        assert app.query_one("#input-row").display
+        assert not isinstance(app.screen, ApprovalModal)
         assert isinstance(app.focused, ChatInput)
         assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "hello"
         await pilot.press("ctrl+q")
@@ -1177,10 +1184,10 @@ async def test_codex_working_indicator_shows_elapsed(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await _submit(app, pilot, "慢任务")
         await _wait_until(lambda: app._run_active)
-        await _wait_until(lambda: "生成中" in str(app.query_one("#status-wait").render()))
-        text = str(app.query_one("#status-wait").render())
+        await _wait_until(lambda: "生成中" in str(app.query_one("#focus-status").render()))
+        text = str(app.query_one("#focus-status").render())
         assert "生成中" in text
-        assert re.search(r"\(\d+s · Ctrl\+C 取消\)", text) is not None
+        assert re.search(r"\(\d+s · .*Ctrl\+C 取消\)", text) is not None
         await pilot.press("ctrl+c")
         await _wait_until(lambda: not app._run_active)
         await pilot.press("ctrl+q")
@@ -1265,25 +1272,21 @@ async def test_codex2_model_dialog_opens_filters_and_selects(tmp_path: Path) -> 
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
         await _submit(app, pilot, "/model")
-        await _wait_until(lambda: app.query_one("#model-dialog").has_class("show"))
-        assert app._model_dialog_open
-        rows = list(app.query(".model-row"))
+        await _wait_until(lambda: isinstance(app.screen, ModelPickerModal))
+        rows = list(app.screen.query(".modal-row"))
         assert len(rows) == 5
         assert "● qwen3.8-omni-flash" in str(rows[0].render())
-        # 过滤框获得焦点，输入 qwen4 后只剩一个候选。
         await _wait_until(lambda: isinstance(app.focused, Input))
         await pilot.press("q", "w", "e", "n", "4")
-        await _wait_until(lambda: len(list(app.query(".model-row"))) == 1)
-        # 回车选中第一个可见候选。
+        await _wait_until(lambda: len(list(app.screen.query(".modal-row"))) == 1)
         await pilot.press("enter")
         await _wait_until(lambda: app.state.model_name == "qwen4-max")
-        assert not app.query_one("#model-dialog").has_class("show")
+        assert not isinstance(app.screen, ModelPickerModal)
         assert "已切换模型：qwen4-max" in _conversation_text(app)
-        # Esc 关闭：重开后按 Esc，焦点回到输入框，模型不变。
         await _submit(app, pilot, "/model")
-        await _wait_until(lambda: app.query_one("#model-dialog").has_class("show"))
+        await _wait_until(lambda: isinstance(app.screen, ModelPickerModal))
         await pilot.press("escape")
-        await _wait_until(lambda: not app.query_one("#model-dialog").has_class("show"))
+        await _wait_until(lambda: not isinstance(app.screen, ModelPickerModal))
         assert isinstance(app.focused, ChatInput)
         assert app.state.model_name == "qwen4-max"
         await pilot.press("ctrl+q")
@@ -1297,10 +1300,10 @@ async def test_codex2_model_dialog_click_selects_row(tmp_path: Path) -> None:
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
         await _submit(app, pilot, "/model")
-        await _wait_until(lambda: app.query_one("#model-dialog").has_class("show"))
+        await _wait_until(lambda: isinstance(app.screen, ModelPickerModal))
         await pilot.click("#model-row-2")
         await _wait_until(lambda: app.state.model_name == "qwen-max")
-        assert not app.query_one("#model-dialog").has_class("show")
+        assert not isinstance(app.screen, ModelPickerModal)
         await pilot.press("ctrl+q")
 
 
@@ -1312,15 +1315,14 @@ async def test_lsf_spacing_model_dialog_rows_all_clickable(tmp_path: Path) -> No
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
         await _submit(app, pilot, "/model")
-        await _wait_until(lambda: app.query_one("#model-dialog").has_class("show"))
+        await _wait_until(lambda: isinstance(app.screen, ModelPickerModal))
         await pilot.pause()
-        # 弹窗按内容定高（不与对话区抢 1fr）：全部 5 行都在弹窗可见区内，
-        # 点击任一行都落在按钮上而非边框上（LSF 重构曾把第 3 行压到底边框）。
-        dialog = app.query_one("#model-dialog")
+        dialog = app.screen.query_one("#model-dialog")
         assert dialog.styles.height.is_auto
         for i in range(5):
-            row = app.query_one(f"#model-row-{i}")
+            row = app.screen.query_one(f"#model-row-{i}")
             assert dialog.region.contains_region(row.region), f"model-row-{i} 应在弹窗内"
+        await pilot.press("escape")
         await pilot.press("ctrl+q")
 
 
@@ -1332,7 +1334,7 @@ async def test_codex2_model_dialog_falls_back_without_catalog(tmp_path: Path) ->
         await pilot.pause()
         await _submit(app, pilot, "/model")
         await _wait_until(lambda: "无固定模型列表" in _conversation_text(app))
-        assert not app.query_one("#model-dialog").has_class("show")
+        assert not isinstance(app.screen, ModelPickerModal)
         await pilot.press("ctrl+q")
 
 
@@ -1419,14 +1421,14 @@ async def test_codex2_approval_panel_shows_diff_preview(tmp_path: Path) -> None:
         await _submit(app, pilot, "改 b.txt")
         await _wait_until(lambda: bridge.pending is not None)
         await pilot.pause()
-        assert app.query_one("#prompt-panel").has_class("show")
+        assert isinstance(app.screen, ApprovalModal)
         # 原始 diff 在 pending 上；渲染后的 diff 块带行号（`2 - two` 格式）。
         assert bridge.pending is not None and bridge.pending.diff is not None
         assert "-two" in bridge.pending.diff
         assert "+TWO" in bridge.pending.diff
-        diff_text = str(app.query_one("#prompt-diff").render())
+        diff_text = str(app.screen.query_one("#prompt-diff").render())
         assert "two" in diff_text and "TWO" in diff_text
-        assert "--- a/b.txt" not in str(app.query_one("#prompt-text").render())
+        assert "--- a/b.txt" not in str(app.screen.query_one("#prompt-text").render())
         await pilot.click("#btn-allow-once")
         await _wait_until(lambda: not app._run_active)
         assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "one\nTWO\nthree\n"

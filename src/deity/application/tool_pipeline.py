@@ -52,6 +52,7 @@ class ToolPipeline:
         code_search: Callable[[], LexicalCodeSearch],
         git_guard_enabled: bool,
         require_read_before_write: bool,
+        on_preimage: Callable[[str, str, bytes | None], None] | None = None,
     ) -> None:
         self._workspace = workspace
         self._db_path = db_path
@@ -63,6 +64,7 @@ class ToolPipeline:
         self._code_search = code_search
         self._git_guard_enabled = git_guard_enabled
         self._require_read_before_write = require_read_before_write
+        self._on_preimage = on_preimage
         self._session_managers: dict[int, ShellSessionManager] = {}
 
     async def compose(
@@ -105,7 +107,8 @@ class ToolPipeline:
                         dispatcher,
                         repo,
                         GitWorkspaceAdapter(self._workspace, ignored=(self._db_path,)),
-                    )
+                    ),
+                    on_preimage=self._on_preimage,
                 ),
                 None,
             )
@@ -125,8 +128,23 @@ class ToolPipeline:
                 plan_targets=plan_targets,
             )
             guard_ref[0] = guarded
-            return TurnDiffDispatcher(guarded), guarded
-        return TurnDiffDispatcher(dispatcher), None
+            return TurnDiffDispatcher(guarded, on_preimage=self._on_preimage), guarded
+        return TurnDiffDispatcher(dispatcher, on_preimage=self._on_preimage), None
+
+    def active_shell_sessions(self) -> tuple[dict[str, object], ...]:
+        """列出当前所有活跃管线持有的持久 shell 会话快照（ADR-026）。"""
+        items: list[dict[str, object]] = []
+        for manager in self._session_managers.values():
+            items.extend(manager.list_sessions())
+        return tuple(items)
+
+    async def kill_shell_session(self, name: str) -> bool:
+        """按会话名终止对应的持久 shell 会话；未找到返回 False。"""
+        for manager in list(self._session_managers.values()):
+            if manager.get(name) is not None:
+                await manager.close(name)
+                return True
+        return False
 
     async def close_sessions(self, repo: SQLiteSessionRepository) -> None:
         """回收某次运行的持久 shell 会话（ADR-019 B1：run 级资源）。

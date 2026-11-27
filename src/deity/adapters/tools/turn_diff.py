@@ -7,6 +7,7 @@ flush_turn_diff 取走本轮 unified diff。shell 的改动不在追踪范围。
 
 import difflib
 import hashlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from deity.adapters.tools.patch import patch_target_paths
 from deity.core.contracts import AgentRequest, ToolCall, ToolResult
 
 MAX_DIFF_CHARS = 8_000
+_MAX_PREIMAGE_BYTES = 2_000_000
 _WRITE_TOOLS = {"write_file", "apply_patch", "delete_file"}
 
 # 快照三态：("text", 内容) / ("binary", sha256) / ("absent", None)
@@ -108,8 +110,14 @@ class TurnDiffTracker:
 class TurnDiffDispatcher:
     """把 TurnDiffTracker 叠加到任意工具分发器之外。"""
 
-    def __init__(self, inner: Any) -> None:
+    def __init__(
+        self,
+        inner: Any,
+        *,
+        on_preimage: Callable[[str, str, bytes | None], None] | None = None,
+    ) -> None:
         self.inner = inner
+        self._on_preimage = on_preimage
         self._trackers: dict[str, TurnDiffTracker] = {}
 
     def definitions(self) -> tuple[dict[str, Any], ...]:
@@ -129,9 +137,29 @@ class TurnDiffDispatcher:
             tracker = self._trackers.setdefault(context.run_id, TurnDiffTracker())
             root = Path(context.workspace).resolve()
             for raw in targets:
+                if self._on_preimage is not None:
+                    self._capture_preimage(context.run_id, root, raw)
                 tracker.snapshot(root, raw)
         result: ToolResult = await self.inner.dispatch(call, context)
         return result
+
+    def _capture_preimage(self, run_id: str, root: Path, raw_path: str) -> None:
+        assert self._on_preimage is not None
+        relative = Path(raw_path)
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            return
+        key = relative.as_posix()
+        candidate = (root / relative).resolve(strict=False)
+        if not candidate.is_relative_to(root):
+            return
+        try:
+            if not candidate.is_file() or candidate.is_symlink():
+                self._on_preimage(run_id, key, None)
+                return
+            if candidate.stat().st_size <= _MAX_PREIMAGE_BYTES:
+                self._on_preimage(run_id, key, candidate.read_bytes())
+        except OSError:
+            return
 
     async def after_persist(
         self, call: ToolCall, result: ToolResult, context: AgentRequest

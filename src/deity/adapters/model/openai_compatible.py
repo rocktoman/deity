@@ -118,6 +118,11 @@ class OpenAICompatibleProvider:
                 )
             for choice in getattr(chunk, "choices", []):
                 delta = choice.delta
+                reasoning = getattr(delta, "reasoning_content", None) or getattr(
+                    delta, "reasoning", None
+                )
+                if isinstance(reasoning, str) and reasoning:
+                    yield ModelEvent("reasoning_delta", text=reasoning)
                 if getattr(delta, "content", None):
                     yield ModelEvent("text_delta", text=delta.content)
                 for call in getattr(delta, "tool_calls", None) or []:

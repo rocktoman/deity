@@ -17,6 +17,7 @@ from deity.interfaces.tui.interactive import (
     InteractiveApp,
     ToolBlock,
 )
+from deity.interfaces.tui.modals import ApprovalModal
 
 
 class DummyModel:
@@ -83,9 +84,9 @@ async def test_instant_single_key_approval(tmp_path: Path) -> None:
         await _wait_until(lambda: bridge.pending is not None)
         await pilot.pause()
 
-        # 面板此时显示，直接按键盘 '1'
-        panel = app.query_one("#prompt-panel")
-        assert "show" in panel.classes
+        # 审批浮层此时显示，直接按键盘 '1'
+        assert isinstance(app.screen, ApprovalModal)
+        app.screen.query_one("#prompt-panel")
         await pilot.press("1")
         await _wait_until(lambda: not app._run_active)
         await pilot.pause()

@@ -93,6 +93,18 @@ class ShellSessionManager:
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._sessions))
 
+    def list_sessions(self) -> tuple[dict[str, object], ...]:
+        """返回所有会话的只读快照（名称、PID、存活状态、退出码）。"""
+        return tuple(
+            {
+                "name": name,
+                "pid": session.pid,
+                "running": session.running,
+                "exit_code": session.exit_code,
+            }
+            for name, session in sorted(self._sessions.items())
+        )
+
     def get(self, name: str) -> _Session | None:
         return self._sessions.get(name)
 

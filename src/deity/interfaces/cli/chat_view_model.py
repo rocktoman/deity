@@ -116,6 +116,7 @@ class ViewDelta:
     """一次 apply 的变化量：渲染器按 delta 增量绘制。"""
 
     text_appended: bool = False
+    reasoning_appended: bool = False
     tool_started: ToolNode | None = None
     tool_completed: ToolNode | None = None
     terminal: bool = False
@@ -129,6 +130,7 @@ class ChatViewModel:
         self._clock = clock
         self.status = ChatStatus(clock=clock)
         self.text: str = ""
+        self.reasoning: str = ""
         self.tools: dict[str, ToolNode] = {}
         self.diffs: list[dict[str, object]] = []
         self.run_id: str | None = None
@@ -171,6 +173,9 @@ class ChatViewModel:
         if event.kind == "text_delta":
             self.text += str(event.payload.get("text", ""))
             delta.text_appended = True
+        elif event.kind == "reasoning_delta":
+            self.reasoning += str(event.payload.get("text", ""))
+            delta.reasoning_appended = True
         elif event.kind == "tool_call_started":
             call_id = str(event.payload.get("call_id", ""))
             started_node = ToolNode(

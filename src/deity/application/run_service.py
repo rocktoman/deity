@@ -27,7 +27,7 @@ from deity.adapters.model.anthropic import AnthropicProvider
 from deity.adapters.model.openai_compatible import OpenAICompatibleProvider
 from deity.adapters.skills import SkillCatalog, SkillDispatcher
 from deity.adapters.storage import SQLiteSessionRepository
-from deity.adapters.tools import LocalToolDispatcher, auto_shell_allowed
+from deity.adapters.tools import LocalToolDispatcher
 from deity.adapters.tools.delegation import DelegationDispatcher
 from deity.adapters.tools.git_guard import GitGuardedDispatcher
 from deity.adapters.tools.read_only import ReadOnlyToolDispatcher
@@ -196,6 +196,7 @@ class RunService:
         self._active_loop: AgentLoop | None = None
         self._active_children: dict[str, AgentLoop] = {}
         self._sandbox_active_run_id: str | None = None
+        self._turn_preimages: dict[str, dict[str, bytes | None]] = {}
         self._tool_pipeline = ToolPipeline(
             workspace=self.workspace,
             db_path=self.db_path,
@@ -211,7 +212,24 @@ class RunService:
             code_search=self._code_search,
             git_guard_enabled=self.coding.git_guard_enabled,
             require_read_before_write=self.git_guard.require_read_before_write,
+            on_preimage=self._record_preimage,
         )
+
+    def _record_preimage(self, run_id: str, rel_path: str, data: bytes | None) -> None:
+        bucket = self._turn_preimages.setdefault(run_id, {})
+        bucket.setdefault(rel_path, data)
+
+    def take_turn_preimages(self, run_id: str) -> dict[str, bytes | None]:
+        """取走并清理某次 Run 的首个写前文件快照（供 /undo 与 /rewind 使用）。"""
+        return self._turn_preimages.pop(run_id, {})
+
+    def active_shell_sessions(self) -> tuple[dict[str, object], ...]:
+        """列出当前运行中管线的持久 shell 会话快照（供 /ps 与 TUI 抽屉展示）。"""
+        return self._tool_pipeline.active_shell_sessions()
+
+    async def kill_shell_session(self, name: str) -> bool:
+        """终止指定名称的持久 shell 会话（供 /kill 使用）。"""
+        return await self._tool_pipeline.kill_shell_session(name)
 
     def cancel(self, run_id: str) -> bool:
         """Signal cancellation to this service's active run."""
@@ -227,7 +245,7 @@ class RunService:
         if policy == "deny":
             return False
         if policy == "auto":
-            return auto_shell_allowed(args, self.workspace) if name == "shell" else True
+            return True
         if self.rules is not None:
             # ADR-019 A3：持久规则在 ask 路径先行表态，未命中才落到交互审批。
             decided_by_rule = self.rules.decide(name, args)
@@ -1022,12 +1040,15 @@ class RunService:
             )
             instructions_file = self.workspace / "AGENTS.md"
             instructions = None
-            if (
-                instructions_file.is_file()
-                and instructions_file.resolve().is_relative_to(self.workspace)
-                and instructions_file.stat().st_size <= 16_000
-            ):
-                instructions = instructions_file.read_text(encoding="utf-8")
+            try:
+                if (
+                    instructions_file.is_file()
+                    and instructions_file.resolve().is_relative_to(self.workspace)
+                    and instructions_file.stat().st_size <= 16_000
+                ):
+                    instructions = instructions_file.read_text(encoding="utf-8")
+            except OSError:
+                instructions = None
             context = ContextBuilder(
                 system_instructions=HARNESS_SYSTEM_INSTRUCTIONS,
                 project_instructions=instructions,

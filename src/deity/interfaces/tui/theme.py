@@ -29,6 +29,10 @@ _DARK_LEVELS = {
     "user-bg": "#1F1F1F",
     "hover-bg": "#2C2C2C",
     "code-bg": "#1F1F1F",
+    "bar-bg": "#121212",
+    "drawer-bg": "#111111",
+    "composer-bg": "#161616",
+    "badge-bg": "#262626",
 }
 _LIGHT_LEVELS = {
     "text-secondary": "#454A45",
@@ -37,6 +41,10 @@ _LIGHT_LEVELS = {
     "user-bg": "#E6EFE9",
     "hover-bg": "#E3E7E0",
     "code-bg": "#EEF1EA",
+    "bar-bg": "#ECEEE8",
+    "drawer-bg": "#F2F4EE",
+    "composer-bg": "#FFFFFF",
+    "badge-bg": "#E3E7E0",
 }
 
 DEITY_DARK = Theme(

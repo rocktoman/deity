@@ -1,0 +1,380 @@
+/* Deity AGY 风格工作台样式表（ADR-024） */
+
+Screen {
+    background: $background;
+    color: $foreground;
+}
+
+#top-bar {
+    height: 1;
+    background: $bar-bg;
+    padding: 0 1;
+    color: $text-secondary;
+}
+
+#top-bar-left {
+    width: 1fr;
+}
+
+#top-bar-right {
+    width: auto;
+}
+
+#workspace-body {
+    height: 1fr;
+}
+
+#conversation {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+}
+
+#aux-drawer {
+    width: 40;
+    height: 1fr;
+    display: none;
+    background: $drawer-bg;
+    border-left: solid $primary;
+    padding: 0 1;
+}
+
+#aux-drawer.show {
+    display: block;
+}
+
+#drawer-tabs {
+    height: 1;
+    margin-bottom: 1;
+}
+
+.drawer-tab {
+    width: 1fr;
+    height: 1;
+    min-width: 6;
+    border: none;
+    background: $bar-bg;
+    color: $text-tertiary;
+    padding: 0;
+}
+
+.drawer-tab.active {
+    background: $badge-bg;
+    color: $accent;
+    text-style: bold;
+}
+
+.drawer-pane {
+    height: 1fr;
+    display: none;
+}
+
+.drawer-pane.active {
+    display: block;
+}
+
+.drawer-section-title {
+    color: $accent;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.session-row {
+    width: 1fr;
+    height: auto;
+    border: none;
+    background: transparent;
+    padding: 0 1;
+}
+
+.session-row:hover {
+    background: $hover-bg;
+}
+
+.session-row.current {
+    color: $accent;
+    text-style: bold;
+}
+
+#btn-sidebar-doctor {
+    margin-top: 1;
+    width: 1fr;
+}
+
+#welcome-header {
+    border: round $primary;
+    background: $surface;
+    padding: 0 1;
+    height: auto;
+    margin: 1 0;
+}
+
+#welcome-emblem {
+    width: auto;
+    padding-right: 2;
+    color: $accent;
+    text-style: bold;
+}
+
+#welcome-text {
+    width: 1fr;
+}
+
+.section-header {
+    border-top: solid $text-tertiary;
+    text-style: bold;
+    margin-top: 1;
+}
+
+.msg-user {
+    margin-top: 1;
+    text-style: bold;
+    background: $user-bg;
+    padding: 0 1;
+}
+
+.msg-system {
+    color: $text-tertiary;
+}
+
+.msg-error {
+    color: $error;
+    border: round $error;
+    padding: 0 1;
+    margin: 1 0;
+}
+
+.msg-waiting {
+    color: $text-secondary;
+    border-left: solid $text-tertiary;
+    padding-left: 1;
+    text-style: italic;
+}
+
+.thinking-block {
+    margin: 0 0 1 0;
+    padding-left: 1;
+    border-left: solid $text-quaternary;
+}
+
+.thinking-header {
+    color: $text-tertiary;
+}
+
+.thinking-header:hover {
+    background: $hover-bg;
+}
+
+.thinking-body {
+    color: $text-tertiary;
+    text-style: italic;
+    padding-left: 2;
+}
+
+.thinking-body.collapsed {
+    display: none;
+}
+
+.msg-metrics {
+    color: $text-quaternary;
+}
+
+.msg-assistant {
+    margin-bottom: 1;
+}
+
+.tool-group {
+    margin: 0 0 1 0;
+    padding-left: 1;
+    border-left: solid $primary;
+}
+
+.tool-group-header {
+    color: $text-secondary;
+}
+
+.tool-group-header:hover {
+    background: $hover-bg;
+}
+
+.tool-group-body {
+    height: auto;
+}
+
+.tool-group-body.collapsed {
+    display: none;
+}
+
+.msg-tool {
+    padding-left: 1;
+}
+
+.msg-tool:hover {
+    background: $boost;
+}
+
+.msg-diff {
+    padding-left: 1;
+    margin-bottom: 1;
+}
+
+#composer-shell {
+    height: auto;
+    padding: 0 1;
+    background: $background;
+}
+
+#focus-bar {
+    height: 1;
+    padding: 0 1;
+    color: $text-secondary;
+}
+
+#focus-status {
+    width: 1fr;
+}
+
+#focus-queue {
+    width: auto;
+    color: $warning;
+}
+
+#cmd-hint {
+    display: none;
+    height: auto;
+    max-height: 6;
+    background: $panel;
+    border: round $primary;
+    padding: 0 1;
+}
+
+#cmd-hint.show {
+    display: block;
+}
+
+#input-row {
+    min-height: 3;
+    max-height: 8;
+    height: auto;
+    padding: 0 1;
+    border: round $primary;
+    background: $composer-bg;
+}
+
+#input-row.streaming {
+    border: round $text-tertiary;
+}
+
+#input-prompt {
+    width: 2;
+    color: $accent;
+    text-style: bold;
+}
+
+#input {
+    border: none;
+    min-height: 1;
+    max-height: 6;
+    height: auto;
+    width: 1fr;
+    background: $composer-bg;
+}
+
+#composer-footer {
+    height: 1;
+    padding: 0 1;
+    color: $text-tertiary;
+}
+
+/* 浮层 ModalScreen 共用样式 */
+ApprovalModal,
+ModelPickerModal,
+CommandPaletteModal {
+    align: center middle;
+    background: $background 65%;
+}
+
+.modal-card {
+    width: 92%;
+    max-width: 96;
+    max-height: 92%;
+    height: auto;
+    background: $surface;
+    border: round $primary;
+    padding: 0 2;
+}
+
+.modal-card-warning {
+    border: round $warning;
+}
+
+.modal-title {
+    text-style: bold;
+    color: $accent;
+    margin-bottom: 1;
+}
+
+.modal-scroll {
+    height: auto;
+    max-height: 10;
+    margin-bottom: 1;
+}
+
+.modal-filter {
+    border: none;
+    height: 1;
+    margin-bottom: 1;
+    background: $panel;
+}
+
+.modal-list {
+    height: auto;
+    max-height: 12;
+}
+
+.modal-row {
+    width: 1fr;
+    height: 1;
+    border: none;
+    background: transparent;
+}
+
+.modal-row:hover {
+    background: $hover-bg;
+}
+
+.modal-row.current {
+    color: $accent;
+    text-style: bold;
+}
+
+.modal-actions {
+    height: auto;
+}
+
+.modal-actions Button {
+    height: 1;
+    min-width: 8;
+    border: none;
+    padding: 0 1;
+    margin-right: 1;
+}
+
+.modal-actions Button:hover {
+    background: $hover-bg;
+}
+
+MarkdownHeader {
+    margin: 1 0 0 0;
+    text-style: bold;
+}
+
+MarkdownFence {
+    background: $code-bg;
+    border-left: solid $accent;
+    margin: 1 0;
+}
+
+MarkdownBlockQuote {
+    color: $text-secondary;
+}

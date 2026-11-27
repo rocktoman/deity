@@ -100,7 +100,7 @@ async def test_auto_permission_completes_write_and_safe_shell_without_prompt(
 
 
 @pytest.mark.asyncio
-async def test_auto_permission_rejects_destructive_shell(tmp_path: Path) -> None:
+async def test_ask_permission_without_approver_rejects_destructive_shell(tmp_path: Path) -> None:
     class ShellModel:
         def __init__(self) -> None:
             self.turn = 0
@@ -123,7 +123,7 @@ async def test_auto_permission_rejects_destructive_shell(tmp_path: Path) -> None
         db_path=tmp_path / "deity.db",
         workspace=tmp_path,
         model=model,
-        permission=PermissionConfig(shell="auto"),
+        permission=PermissionConfig(shell="ask"),
     )
     await service.run("delete", model_name="fake")
     assert model.status == "denied"
@@ -212,3 +212,46 @@ async def test_auto_permission_deletes_file_resolved_from_previous_turn(tmp_path
     assert model.saw_history
     assert model.delete_status == "ok"
     assert not (tmp_path / "bubble_sort.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_auto_shell_executes_without_prompt(tmp_path: Path) -> None:
+    """shell=auto 全自动放行任意工作区 shell 命令，不触发审批卡片。"""
+
+    class GitVersionModel:
+        def __init__(self) -> None:
+            self.turn = 0
+            self.status = ""
+
+        async def stream(self, request: ModelRequest):
+            self.turn += 1
+            if self.turn == 1:
+                yield ModelEvent("tool_call_started", call_id="g1", name="shell")
+                yield ModelEvent(
+                    "tool_call_arguments_delta",
+                    call_id="g1",
+                    text='{"argv":["git","--version"]}',
+                )
+            else:
+                self.status = next(m["status"] for m in request.messages if m["role"] == "tool")
+                yield ModelEvent("text_delta", text="done")
+            yield ModelEvent("message_completed")
+
+    prompted: list[tuple[str, dict[str, object]]] = []
+
+    def approve(name: str, args: dict[str, object]) -> bool:
+        prompted.append((name, args))
+        return False
+
+    model = GitVersionModel()
+    service = RunService(
+        db_path=tmp_path / "deity.db",
+        workspace=tmp_path,
+        model=model,
+        approve=approve,
+        permission=PermissionConfig(shell="auto"),
+    )
+    result = await service.run("查 git 版本", model_name="fake")
+    assert result.status == RunStatus.COMPLETED
+    assert prompted == []
+    assert model.status == "ok"

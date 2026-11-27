@@ -9,6 +9,7 @@ class BackendKind(StrEnum):
     LOCAL = "local"
     DOCKER = "docker"
     BWRAP = "bwrap"
+    SEATBELT = "seatbelt"
     FAKE = "fake"
 
 

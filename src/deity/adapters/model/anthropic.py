@@ -153,6 +153,10 @@ class AnthropicProvider:
                 delta = event.delta
                 if delta.type == "text_delta":
                     yield ModelEvent("text_delta", text=delta.text)
+                elif delta.type == "thinking_delta":
+                    thinking = getattr(delta, "thinking", "")
+                    if isinstance(thinking, str) and thinking:
+                        yield ModelEvent("reasoning_delta", text=thinking)
                 elif delta.type == "input_json_delta":
                     index = getattr(event, "index", last_index)
                     if index not in calls:

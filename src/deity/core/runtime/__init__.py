@@ -114,9 +114,11 @@ class RetryPolicy:
 
 
 def _emit_model_event(event: ModelEvent, emit: Callable[[str, dict[str, Any]], None]) -> None:
-    """把一条 ModelEvent 翻译为 live ClientEvent 的 kind/payload（ADR-016）。"""
+    """把一条 ModelEvent 翻译为 live ClientEvent 的 kind/payload（ADR-016 / ADR-025）。"""
     if event.kind == "text_delta":
         emit("text_delta", {"text": event.text})
+    elif event.kind == "reasoning_delta":
+        emit("reasoning_delta", {"text": event.text})
     elif event.kind == "tool_call_started":
         emit("tool_call_started", {"call_id": event.call_id, "name": event.name})
     elif event.kind == "tool_call_arguments_delta":
@@ -754,6 +756,9 @@ class AgentLoop:
                 raise ProtocolError("非法流事件")
             if event.kind == "text_delta":
                 text_parts.append(event.text)
+            elif event.kind == "reasoning_delta":
+                # 思考流仅走观测通道，不混入最终回答正文（ADR-025）。
+                continue
             elif event.kind == "tool_call_started":
                 if not event.call_id or not event.name or event.call_id in pending:
                     raise ProtocolError("重复或无效 call_id")

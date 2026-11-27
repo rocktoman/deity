@@ -1,41 +1,13 @@
-"""全屏交互工作台（ADR-022）：底部输入、流式对话、界面内审批、状态栏。
+"""全屏交互工作台（ADR-024）：AGY 风格工作台 + Deity 神之眼与可验证护栏。
 
-定位：TTY 下的默认交互界面（无子命令的 `deity`、`deity run` 不带任务、
-`deity tui` 无 --run-id 时进入）。与行式 REPL 共用同一条事件通路：
-本进程内驱动 RunService.run_stream()，事件喂入既有 ChatViewModel
-折叠成状态树，对话区按 ViewDelta 增量建块；审批经 TuiApprovalBridge
-复用既有 ApprovalController（语义与 CLI 卡片完全一致），本模块只做
-呈现与回填。监视既有 Run 是 interfaces/tui/app.py 的 TuiApp 的活。
-
-按键：Enter 提交、Ctrl+J/Shift+Enter 换行、首/末行 ↑/↓ 走输入历史、
-Shift+Tab 循环切换模式（普通 → 计划 → 自动接受）、Ctrl+C 或 Esc
-取消当前 Run（空闲时退出）、Esc 取消当前 Run、Ctrl+Q 退出。
-
-观感与交互对齐 Claude Code（ADR-022 修订，2026-11-17）：启动欢迎头
-（神之眼徽记 + 版本/模型/工作区，边框块）、带 ❯ 提示的边框输入框、
-输入框正下方的模式状态行、一行式工具条目 + 缩进结果行。
-
-Klee 风格对齐（ADR-022 修订，2026-11-21）：自定义深浅两套主题
-（theme.py，四级文字色层级）、边框圆角化、消息分级配色、Markdown
-克制化样式、间距节奏统一。Klee 深绿品牌色已于 2026-11-22 废弃，
-深色主题改为黑色基底（见 theme.py）。
-
-Gemini 风格对齐（ADR-022 修订，2026-11-22）：输入框去框化（上下
-圆角细线 + 底色条）、输入框上方两行式 StatusRow（等待/提示行 +
-分隔线 + 模式行）、用户消息 `> ` 前缀、等待行左竖线、上下文占用
-着色、模式动态副提示、SectionHeader 顶线、审批时折叠输入区。
-神之眼徽记保留形状，不引入 Gemini 品牌元素。
-
-Codex 行为移植（ADR-022 修订，2026-11-22）：每轮末 diff 块、exec
-动词标签、工作耗时、斜杠命令 /diff /new /review /export /copy
-/theme /archive、@ 文件补全（见 docs/06-legal/third-party-notices.md
-的 Codex 条目；Python 重新实现，不复制 Rust 源码）。
+布局层级：
+1. 顶部单行上下文条（TopContextBar）：分支 · 模型 · 模式 · 运行态 · 上下文占比
+2. 主工作区（#workspace-body）：纯净对话画布 + 右侧可呼出三标签辅助抽屉（AuxDrawer）
+3. 底部一体式 Composer：FocusBar + 按需提示条 + ChatInput + 极简快捷键底条
+4. 居中模态浮层：ApprovalModal / ModelPickerModal / CommandPaletteModal
 """
 
 import asyncio
-import os
-import re
-import shlex
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -43,483 +15,72 @@ from pathlib import Path
 from typing import Any, ClassVar
 from uuid import uuid4
 
-from rich.cells import cell_len
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.widgets import Button, Footer, Header, Input, Markdown, Static, TextArea
+from textual.widgets import Button, Markdown, Static
 
-from deity import __version__
 from deity.adapters.storage import SQLiteSessionRepository
 from deity.application.build_service import BuildService
 from deity.application.config import KNOWN_MODELS
-from deity.application.doctor import run_doctor
+from deity.application.custom_commands import CustomCommandCatalog
 from deity.application.plan_service import PlanService
+from deity.application.rewind_service import RewindHistory
 from deity.application.run_service import RunService
 from deity.core.runtime import BudgetExceeded, ModelFailure, ProtocolError
-from deity.interfaces.cli.chat_commands import (
-    HELP_TEXT,
-    REVIEW_PROMPT,
-    ChatState,
-    export_session_markdown,
-    model_listing_lines,
-    run_error_message,
-)
+from deity.interfaces.cli.chat_commands import ChatState, run_error_message
 from deity.interfaces.cli.chat_status import ChatStatus, fmt_elapsed_compact
 from deity.interfaces.cli.chat_view_model import ChatViewModel, ToolNode
-from deity.interfaces.cli.diff_render import (
-    format_diff_text,
-    format_turn_diff,
-    format_turn_diff_summary,
-)
 from deity.interfaces.cli.plan import build_approved, plan_lines
-from deity.interfaces.cli.sandbox import sandbox_status_lines
-from deity.interfaces.cli.workspace_diff import git_branch, workspace_diff
+from deity.interfaces.cli.workspace_diff import git_branch
 from deity.interfaces.tui.approval_bridge import PendingPrompt, TuiApprovalBridge
+from deity.interfaces.tui.commands import AVAILABLE_SLASH_COMMANDS, CommandDispatcher
+from deity.interfaces.tui.modals import (
+    ApprovalModal,
+    CommandPaletteModal,
+    ModelPickerModal,
+)
+from deity.interfaces.tui.panes import AuxDrawer
+from deity.interfaces.tui.state import (
+    WELCOME_EMBLEM,
+    InputQueue,
+    ScrollThrottler,
+    ToolGroupState,
+    greeting_for_hour,
+)
 from deity.interfaces.tui.theme import apply_deity_theme, palette
-
-_CLI_ONLY_COMMANDS = ("/fork", "/timeline")
-
-# 欢迎头徽记：神之眼（三角形 + 眼睛 + 光芒），字符绘制、对称极简。
-_WELCOME_EMBLEM = "   \\ | /\n    \\|/\n    / \\\n   / ◉ \\\n  /______\\"
-
-AVAILABLE_SLASH_COMMANDS: list[tuple[str, str]] = [
-    ("/help", "查看命令帮助与工作台按键"),
-    ("/plan", "进入计划模式（建计划 → 审批 → 构建）"),
-    ("/build", "执行已批准的计划"),
-    ("/normal", "返回普通交互模式"),
-    ("/auto", "进入自动接受模式（免审批）"),
-    ("/model", "查看或切换当前模型"),
-    ("/status", "查看会话状态与 Token 统计"),
-    ("/cost", "查看当前会话 Token 消耗详情"),
-    ("/usage", "查看本会话用量汇总"),
-    ("/rename", "重命名当前会话"),
-    ("/sandbox", "查看或切换沙箱策略"),
-    ("/tools", "展开或切换工具调用详情"),
-    ("/skills", "查看已配置与已启用的 Skills"),
-    ("/mcp", "查看已配置的 MCP 工具服务器"),
-    ("/sessions", "列出历史会话或切换会话"),
-    ("/resume", "从最近检查点恢复 Run"),
-    ("/doctor", "运行环境与配置检查"),
-    ("/clear", "清屏对话区"),
-    ("/compact", "查看上下文压缩配置状态"),
-    ("/diff", "查看工作区未提交改动"),
-    ("/new", "开始新会话"),
-    ("/review", "审查工作区未提交改动"),
-    ("/export", "导出当前会话为 Markdown 文件"),
-    ("/copy", "复制上一轮回答到剪贴板"),
-    ("/theme", "切换工作台深浅主题"),
-    ("/archive", "归档当前会话并开始新会话"),
-    ("/exit", "退出 Deity 工作台"),
-]
-
-# 输入区下方免责行（Klee 风格对齐 P1-5）：deity 自己的文案。
-_DISCLAIMER = "Deity 是 AI，可能会出错；它会修改工作区文件，重要操作会先征求审批，请核对结果。"
-
-# 等待指示（P1-2）的三点动画帧：被激活的点依次轮动。
-_WAITING_FRAMES = ("●○○", "○●○", "○○●")
-
-# StatusRow 等待态 spinner 帧（盲文点阵，单色 accent，不用彩虹渐变）。
-_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-
-# StatusRow 右侧轮换 Tip（每轮完成后推进一条，不在刷新间隔内轮换）。
-_TIPS = (
-    "Tip：输入 / 补全斜杠命令",
-    "Tip：Ctrl+B 打开会话侧栏",
-    "Tip：/model 查看或切换模型",
-    "Tip：/cost 查看本会话 Token",
-    "Tip：Ctrl+C 取消运行，空闲时退出",
+from deity.interfaces.tui.widgets import (
+    ChatInput,
+    DiffBlock,
+    FocusBar,
+    ThinkingBlock,
+    ToolBlock,
+    ToolGroupWidget,
+    TopContextBar,
+    WelcomeCard,
 )
 
-# 上下文占用着色阈值：0.75 与压缩软限（core/context/reliable.py
-# soft_limit = 窗口 × 0.75）同值，满额（1.0）变红。
-_CONTEXT_WARN_RATIO = 0.75
-
-# 模式行动态副提示（Gemini 式）：按当前模式写下一步切换去向。
-_MODE_SUBHINT = {
-    "普通": "shift+tab 切换到计划",
-    "计划": "shift+tab 切换到自动接受",
-    "自动接受": "shift+tab 回到普通",
-}
-
-# @ 文件补全（Codex mention 式）：行尾 @<片段> 触发，子串匹配。
-_MENTION_AT_END_RE = re.compile(r"@([^\s@]*)$")
-_MENTION_SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules"}
-
-
-def _workspace_files(workspace: Path, partial: str, *, limit: int = 200) -> list[str]:
-    """工作区文件相对路径：按 @ 后缀子串匹配（不区分大小写），排序后上限截断。"""
-    needle = partial.lower()
-    found: list[str] = []
-    for root, dirs, files in os.walk(workspace):
-        dirs[:] = [d for d in dirs if d not in _MENTION_SKIP_DIRS and not d.startswith(".")]
-        for name in files:
-            rel = str(Path(root, name).relative_to(workspace))
-            if needle in rel.lower():
-                found.append(rel)
-                if len(found) >= limit:
-                    return sorted(found)
-    return sorted(found)
-
-
-def greeting_for_hour(hour: int) -> str:
-    """按小时给时间问候语（P1-6）：5–12 早上好、12–17 下午好、17–22 晚上好、其余夜深了。"""
-    if 5 <= hour < 12:
-        return "早上好"
-    if 12 <= hour < 17:
-        return "下午好"
-    if 17 <= hour < 22:
-        return "晚上好"
-    return "夜深了"
-
-
-class ScrollThrottler:
-    """流式滚动节流（P1-7）：间隔内的请求合并，到期由 flush_due 补滚。
-
-    纯逻辑、无 Textual 依赖（可单测）：request() 返回 True 表示应
-    立即滚动；返回 False 表示本次被合并、置 pending。调用方周期性
-    查 flush_due()，为 True 时执行一次尾随滚动并清 pending。
-    """
-
-    def __init__(self, interval: float = 0.15, clock: Callable[[], float] = time.monotonic) -> None:
-        self._interval = interval
-        self._clock = clock
-        self._last: float | None = None
-        self._pending = False
-
-    def request(self) -> bool:
-        now = self._clock()
-        if self._last is None or now - self._last >= self._interval:
-            self._last = now
-            self._pending = False
-            return True
-        self._pending = True
-        return False
-
-    def flush_due(self) -> bool:
-        if (
-            self._pending
-            and self._last is not None
-            and self._clock() - self._last >= self._interval
-        ):
-            self._last = self._clock()
-            self._pending = False
-            return True
-        return False
-
-    def force(self) -> None:
-        """终态强制滚动前调用：清 pending 并重置节流窗口。"""
-        self._last = self._clock()
-        self._pending = False
-
-
-class ChatInput(TextArea):
-    """工作台输入框：Enter 提交、Ctrl+J 换行、Tab 命令补全、首/末行方向键走历史。"""
-
-    class Submitted(Message):
-        """用户提交了一段输入（Enter）；文本是否采纳由 App 决定。"""
-
-        def __init__(self, text: str) -> None:
-            super().__init__()
-            self.text = text
-
-    class CancelRequested(Message):
-        """输入框内按 Ctrl+C / Esc：请求取消当前 Run（Ctrl+C 空闲时退出）。"""
-
-        def __init__(self, key: str = "ctrl+c") -> None:
-            super().__init__()
-            self.key = key
-
-    class ModeCycleRequested(Message):
-        """输入框内按 Shift+Tab：请求循环切换模式（普通/计划/自动接受）。"""
-
-    class CommandHintUpdated(Message):
-        """输入框内的联想更新：斜杠命令（kind="command"）或 @ 文件（kind="mention"）。"""
-
-        def __init__(self, matches: list[tuple[str, str]], kind: str = "command") -> None:
-            super().__init__()
-            self.matches = matches
-            self.kind = kind
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._history: list[str] = []
-        self._history_index: int | None = None
-        self._draft = ""
-
-    def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        text = self.text
-        if text.startswith("/") and not text.startswith("//"):
-            prefix = text.split()[0] if text else ""
-            matches = [
-                (cmd, desc) for cmd, desc in AVAILABLE_SLASH_COMMANDS if cmd.startswith(prefix)
-            ]
-            self.post_message(self.CommandHintUpdated(matches))
-            return
-        mention = _MENTION_AT_END_RE.search(text)
-        workspace = getattr(getattr(self, "app", None), "_workspace", None)
-        if mention is not None and isinstance(workspace, Path):
-            matches = [
-                (f"@{path}", "文件") for path in _workspace_files(workspace, mention.group(1))
-            ][:5]
-            self.post_message(self.CommandHintUpdated(matches, kind="mention"))
-            return
-        self.post_message(self.CommandHintUpdated([]))
-
-    async def _on_key(self, event: Any) -> None:
-        if (
-            self.app is not None
-            and getattr(self.app, "_prompt_handler", None) is not None
-            and hasattr(self.app, "handle_prompt_key")
-            and self.app.handle_prompt_key(event.key)
-        ):
-            event.prevent_default()
-            event.stop()
-            return
-
-        if event.key == "shift+tab":
-            event.prevent_default()
-            event.stop()
-            self.post_message(self.ModeCycleRequested())
-            return
-        if event.key == "enter":
-            event.prevent_default()
-            event.stop()
-            text = self.text
-            if text.strip():
-                self._push_history(text)
-            self.post_message(self.Submitted(text))
-            return
-        if event.key == "tab":
-            text = self.text
-            mention = _MENTION_AT_END_RE.search(text)
-            workspace = getattr(getattr(self, "app", None), "_workspace", None)
-            if mention is not None and isinstance(workspace, Path):
-                matches = _workspace_files(workspace, mention.group(1))
-                if matches:
-                    event.prevent_default()
-                    event.stop()
-                    if len(matches) == 1:
-                        completed = matches[0]
-                    else:
-                        completed = matches[0]
-                        for candidate in matches[1:]:
-                            while not candidate.startswith(completed):
-                                completed = completed[:-1]
-                    self.text = text[: mention.start()] + "@" + completed + " "
-                    self.move_cursor((0, len(self.text)))
-                    self.post_message(self.CommandHintUpdated([]))
-                    return
-            if text.startswith("/"):
-                prefix = text.split()[0] if text else ""
-                matches = [cmd for cmd, _ in AVAILABLE_SLASH_COMMANDS if cmd.startswith(prefix)]
-                if matches:
-                    event.prevent_default()
-                    event.stop()
-                    if len(matches) == 1:
-                        self.text = matches[0] + " "
-                        self.move_cursor((0, len(self.text)))
-                        self.post_message(self.CommandHintUpdated([]))
-                    else:
-                        common = matches[0]
-                        for m in matches[1:]:
-                            while not m.startswith(common):
-                                common = common[:-1]
-                        if len(common) > len(prefix):
-                            self.text = common
-                            self.move_cursor((0, len(self.text)))
-                        self.post_message(
-                            self.CommandHintUpdated(
-                                [
-                                    (cmd, desc)
-                                    for cmd, desc in AVAILABLE_SLASH_COMMANDS
-                                    if cmd in matches
-                                ]
-                            )
-                        )
-                    return
-        if event.key in ("ctrl+j", "shift+enter"):
-            event.prevent_default()
-            event.stop()
-            self.insert("\n")
-            return
-        if event.key in ("ctrl+c", "escape"):
-            event.prevent_default()
-            event.stop()
-            self.post_message(self.CancelRequested(event.key))
-            return
-        if event.key == "up" and self.cursor_location[0] == 0 and self._history:
-            event.prevent_default()
-            event.stop()
-            self._history_prev()
-            return
-        if (
-            event.key == "down"
-            and self._history_index is not None
-            and self.cursor_location[0] == self.document.line_count - 1
-        ):
-            event.prevent_default()
-            event.stop()
-            self._history_next()
-            return
-        await super()._on_key(event)
-
-    def _push_history(self, text: str) -> None:
-        if not self._history or self._history[-1] != text:
-            self._history.append(text)
-        self._history_index = None
-        self._draft = ""
-
-    def _set_text(self, text: str) -> None:
-        self.text = text
-        lines = text.split("\n")
-        self.move_cursor((len(lines) - 1, len(lines[-1])))
-
-    def _history_prev(self) -> None:
-        if self._history_index is None:
-            self._draft = self.text
-            self._history_index = len(self._history) - 1
-        elif self._history_index > 0:
-            self._history_index -= 1
-        self._set_text(self._history[self._history_index])
-
-    def _history_next(self) -> None:
-        assert self._history_index is not None
-        if self._history_index < len(self._history) - 1:
-            self._history_index += 1
-            self._set_text(self._history[self._history_index])
-        else:
-            self._history_index = None
-            self._set_text(self._draft)
-
-
-class ToolBlock(Static):
-    """可交互工具条目：支持点击切换展开/折叠完整参数与输出。"""
-
-    def __init__(
-        self,
-        node: ToolNode,
-        on_toggle: Callable[[str], None],
-        formatter: Callable[[ToolNode], str | Text],
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(formatter(node), **kwargs)
-        self.node = node
-        self._on_toggle = on_toggle
-        self._formatter = formatter
-
-    def on_click(self) -> None:
-        self._on_toggle(self.node.call_id)
-
-    def refresh_node(self) -> None:
-        self.update(self._formatter(self.node))
-
-
-class DiffBlock(Static):
-    """可折叠 diff 块（Codex PatchHistoryCell 式）：默认展开 hunks，点击折叠回摘要。
-
-    两种来源：turn_diff 事件 payload（files[]），或 /diff 的原始 unified diff 文本。
-    """
-
-    def __init__(
-        self,
-        payload: dict[str, Any] | None,
-        colors: dict[str, str],
-        *,
-        raw_text: str | None = None,
-        **kwargs: Any,
-    ) -> None:
-        self._payload = payload
-        self._colors = colors
-        self._raw_text = raw_text
-        self._expanded = True
-        if raw_text is not None:
-            super().__init__(format_diff_text(raw_text, colors), **kwargs)
-        else:
-            super().__init__(format_turn_diff(payload or {}, colors), **kwargs)
-
-    def on_click(self) -> None:
-        self._expanded = not self._expanded
-        if self._raw_text is not None:
-            if self._expanded:
-                self.update(format_diff_text(self._raw_text, self._colors))
-            else:
-                preview = "\n".join(self._raw_text.splitlines()[:20])
-                self.update(format_diff_text(preview + "\n… 点击展开", self._colors))
-            return
-        if self._expanded:
-            self.update(format_turn_diff(self._payload or {}, self._colors))
-        else:
-            self.update(format_turn_diff_summary(self._payload or {}, self._colors))
+_WELCOME_EMBLEM = WELCOME_EMBLEM
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_WAITING_FRAMES = ("●○○", "○●○", "○○●")
+_TIPS = (
+    "Ctrl+P 命令面板 · Ctrl+B 辅助抽屉 · /help 命令",
+    "Shift+Tab 切换模式 · @ 文件引用 · /compact 压缩上下文",
+    "/model 切换模型 · /diff 查看改动 · Ctrl+C 取消/退出",
+)
 
 
 class InteractiveApp(App[None]):
-    """Codex / Claude Code 式交互界面：对话区 + 审批面板 + 状态栏 + 输入框。"""
+    """AGY 风格全屏交互工作台：薄壳装配对话区、抽屉、Composer 与模态浮层。"""
 
-    CSS: ClassVar[str] = """
-    /* 底部 chrome 间距体系（LSF 网站设计 skill · B 参考创作迁移，ADR-022 修订）：
-       L1 对齐线：底部各行文字左缘统一 col 1（padding/margin 0 1）；
-       G2 组间隙 1 行：对话区↔状态组、状态组↔输入面板、输入面板↔提示组；
-       G1 组内行距 0：组内行相邻，靠规则线/底色分组，不靠空行；
-       P1 面板内边距 1：输入面板内容四周各留 1 cell，文字不贴边框。 */
-    #main-row { height: 1fr; margin-bottom: 1; }
-    #sidebar { width: 36; display: none; border: round $primary; padding: 0 1; }
-    #sidebar.show { display: block; }
-    #sidebar-title { text-style: bold; color: $accent; }
-    #sidebar-sessions { height: 1fr; }
-    .session-row { width: 1fr; }
-    .session-row:hover { background: $hover-bg; }
-    .session-row.current { color: $accent; }
-    #sidebar-model { color: $text-tertiary; }
-    #conversation { height: 1fr; padding: 0 1; }
-    #welcome-header { border: round $primary; padding: 0 1; height: auto; margin-bottom: 1; }
-    #welcome-emblem { width: auto; padding-right: 2; color: $accent; text-style: bold; }
-    #welcome-text { width: 1fr; }
-    #prompt-panel { display: none; border: round $warning; padding: 0 1; }
-    #prompt-panel.show { display: block; }
-    #prompt-scroll { max-height: 14; }
-    #prompt-buttons Button:hover { background: $hover-bg; }
-    .section-header { border-top: solid $text-tertiary; text-style: bold; }
-    #cmd-hint { display: none; height: auto; max-height: 5; background: $panel; border: round $primary; padding: 0 1; margin-bottom: 1; }
-    #cmd-hint.show { display: block; }
-    #status-top { height: 1; padding: 0 1; }
-    #status-wait { width: 1fr; color: $text-secondary; }
-    #status-tip { width: auto; color: $text-tertiary; }
-    #status-divider { height: 1; margin: 0 1; border-top: solid $text-quaternary; }
-    #input-row { min-height: 3; max-height: 10; height: auto; margin-top: 1; padding: 1 0; border-top: round $primary; border-bottom: round $primary; background: $panel; }
-    #input-row.collapsed { display: none; }
-    #input-prompt { width: 2; padding: 0 0 0 1; color: $accent; text-style: bold; }
-    #input { border: none; min-height: 1; max-height: 6; height: auto; width: 1fr; background: $panel; }
-    #status-bar { height: 1; background: $panel; padding: 0 1; }
-    #model-dialog { display: none; height: auto; border: round $primary; padding: 0 1; margin-bottom: 1; max-height: 14; }
-    #model-dialog.show { display: block; }
-    #model-filter { border: none; height: 1; margin: 0 0 1 0; background: $panel; }
-    #model-list { height: auto; max-height: 8; }
-    .model-row { width: 1fr; height: 1; border: none; }
-    .model-row.current { color: $accent; }
-    .msg-user { margin-top: 1; text-style: bold; background: $user-bg; padding: 0 1; }
-    .msg-system { color: $text-tertiary; }
-    .msg-error { color: $error; border: round $error; padding: 0 1; margin: 1 0; }
-    .msg-waiting { color: $text-secondary; border-left: solid $text-tertiary; padding-left: 1; text-style: italic; }
-    .msg-metrics { color: $text-quaternary; }
-    .msg-tool { padding-left: 1; }
-    .msg-diff { padding-left: 1; }
-    .msg-assistant { margin-bottom: 1; }
-    #input-row.streaming { border-top: round $text-tertiary; border-bottom: round $text-tertiary; }
-    #input-hint { height: 1; margin-top: 1; padding: 0 1; color: $text-tertiary; }
-    #input-hint.collapsed { display: none; }
-    #disclaimer { height: 1; padding: 0 1; color: $text-quaternary; }
-    .msg-tool:hover { background: $boost; }
-    MarkdownHeader { margin: 1 0 0 0; text-style: bold; }
-    MarkdownFence { background: $code-bg; border-left: solid $accent; margin: 1 0; }
-    MarkdownBlockQuote { color: $text-secondary; }
-    """
+    CSS_PATH: ClassVar[str] = "styles.tcss"
+    ENABLE_COMMAND_PALETTE: ClassVar[bool] = False
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("shift+tab", "cycle_mode", "切换模式"),
-        Binding("ctrl+b", "toggle_sidebar", "会话侧栏"),
+        Binding("ctrl+b", "toggle_sidebar", "辅助抽屉"),
+        Binding("ctrl+p", "open_command_palette", "命令面板", priority=True),
         Binding("ctrl+c", "cancel_run", "取消/退出"),
         Binding("ctrl+q", "quit", "退出"),
     ]
@@ -550,74 +111,227 @@ class InteractiveApp(App[None]):
         self._initial_task = initial_task
         self._view: ChatViewModel | None = None
         self._run_active = False
+        self._cancel_requested = False
         self._current_run_id: str | None = None
         self._last_run_id: str | None = None
         self._last_plan_id: str | None = None
         self._text_block: Markdown | None = None
         self._rendered_text_len = 0
-        self._tool_blocks: dict[str, Static] = {}
-        # ADR-023 /model 弹窗状态：是否打开、按钮 id → 模型名。
-        self._model_dialog_open = False
-        self._model_rows: dict[str, str] = {}
-        self._sidebar_map: dict[str, str] = {}
+        self._thinking_block: ThinkingBlock | None = None
+        self._rendered_reasoning_len = 0
+        self._tool_blocks: dict[str, ToolBlock] = {}
+        self._tool_groups: dict[str, ToolGroupWidget] = {}
+        self._active_tool_group: ToolGroupWidget | None = None
+        self._group_counter = 0
         self._scroller = ScrollThrottler()
+        self._input_queue = InputQueue()
+        self.custom_commands = CustomCommandCatalog(workspace)
+        self.rewind_history = RewindHistory(workspace)
         self._waiting_block: Static | None = None
         self._waiting_frame = 0
         self._spinner_frame = 0
         self._run_started_at: float | None = None
         self._tip_index = 0
         self._was_run_active = False
+        self._active_modal: ApprovalModal | None = None
         self._prompt_handler: Any = None
         self._confirm_futures: list[asyncio.Future[bool]] = []
+        self._commands = CommandDispatcher(self)
         self.title = "Deity"
         self.sub_title = str(workspace)
         bridge.on_prompt = lambda pending: self.call_from_thread(self._present_prompt, pending)
         bridge.on_prompt_done = lambda: self.call_from_thread(self._hide_prompt)
 
-    # -- 布局 -------------------------------------------------------------
-    def compose(self) -> ComposeResult:
-        yield Header()
-        with Horizontal(id="main-row"):
-            with Vertical(id="sidebar"):
-                yield Static("会话", id="sidebar-title")
-                yield VerticalScroll(id="sidebar-sessions")
-                yield Static("", id="sidebar-model")
-                yield Button("运行 doctor", id="btn-sidebar-doctor")
-            yield VerticalScroll(id="conversation")
-        with Vertical(id="prompt-panel"):
-            yield Static("", id="prompt-title", classes="section-header")
-            with VerticalScroll(id="prompt-scroll"):
-                yield Static("", id="prompt-text")
-                yield Static("", id="prompt-diff")
-            with Horizontal(id="prompt-buttons"):
-                yield Button("[1] 允许一次", id="btn-allow-once", variant="success")
-                yield Button("[2] 本次会话都允许", id="btn-allow-session")
-                yield Button("[4] 永久允许（保存为规则）", id="btn-allow-always")
-                yield Button("[3/Esc] 拒绝", id="btn-deny", variant="error")
-                yield Button("[y/Enter] 确认", id="btn-confirm", variant="success")
-                yield Button("[n/Esc] 取消", id="btn-cancel")
-        yield Static("", id="cmd-hint")
-        with Horizontal(id="status-top"):
-            yield Static("", id="status-wait")
-            yield Static("", id="status-tip")
-        yield Static("", id="status-divider")
-        yield Static("", id="status-bar")
-        with Vertical(id="model-dialog"):
-            yield Static(
-                "选择模型（仅本次会话）", id="model-dialog-title", classes="section-header"
+    # -- WorkbenchHost 属性与接口 -----------------------------------------
+    @property
+    def workspace(self) -> Path:
+        return self._workspace
+
+    @property
+    def config_path(self) -> Path | None:
+        return self._config_path
+
+    @property
+    def run_active(self) -> bool:
+        return self._run_active
+
+    @property
+    def last_run_id(self) -> str | None:
+        return self._last_run_id
+
+    @property
+    def last_plan_id(self) -> str | None:
+        return self._last_plan_id
+
+    @property
+    def last_view(self) -> ChatViewModel | None:
+        return self._view
+
+    def mode_label(self) -> str:
+        return self._mode_label()
+
+    def append_system(self, text: str) -> None:
+        self._append_system(text)
+
+    def append_error(self, text: str) -> None:
+        self._append_error(text)
+
+    def append_section_header(self, title: str, subtitle: str = "") -> None:
+        self._append_section_header(title, subtitle)
+
+    def mount_raw_diff(self, diff_text: str) -> None:
+        self._conversation.mount(
+            DiffBlock(None, self._palette, raw_text=diff_text, classes="msg-diff")
+        )
+        self._scroll_end()
+
+    async def append_assistant_final(self, text: str) -> None:
+        await self._append_assistant_final(text)
+
+    async def clear_conversation(self, *, mount_welcome: bool) -> None:
+        self._view = None
+        self._active_tool_group = None
+        self._tool_blocks.clear()
+        self._tool_groups.clear()
+        await self._conversation.remove_children()
+        if mount_welcome:
+            self._mount_welcome()
+
+    def refresh_status(self) -> None:
+        self._refresh_status()
+
+    def enter_plan(self) -> bool:
+        return self._enter_plan()
+
+    def enter_normal(self) -> None:
+        self._enter_normal()
+
+    def toggle_auto(self) -> None:
+        controller = self._bridge.controller
+        if controller.mode == "auto":
+            controller.exit_auto()
+            self._append_system("已退出自动接受模式，恢复 ask。")
+            self._refresh_status()
+            return
+        self.run_worker(self._auto_worker(), group="prompt", exclusive=False)
+
+    def toggle_tool_node(self, call_id: str) -> None:
+        self._toggle_tool_node(call_id)
+
+    def apply_session_switch(self, session_id: str) -> None:
+        self._apply_session_switch(session_id)
+
+    async def refresh_drawer_sessions(self) -> None:
+        try:
+            drawer = self.query_one(AuxDrawer)
+        except Exception:  # noqa: BLE001
+            return
+        if drawer.has_class("show"):
+            await drawer.refresh_sessions(
+                self.service.db_path, self.state.session_id, self.state.model_name
             )
-            yield Input(placeholder="输入过滤…", id="model-filter")
-            yield VerticalScroll(id="model-list")
-        with Horizontal(id="input-row"):
-            yield Static("❯", id="input-prompt")
-            yield ChatInput(id="input")
-        yield Static("", id="input-hint")
-        yield Static(_DISCLAIMER, id="disclaimer")
-        yield Footer()
+
+    def toggle_drawer(self) -> None:
+        self.action_toggle_sidebar()
+
+    def switch_theme(self, arg: str) -> None:
+        name = arg.strip().lower()
+        if name == "dark":
+            dark = True
+        elif name == "light":
+            dark = False
+        elif name == "":
+            dark = self.theme != "deity-dark"
+        else:
+            self._append_system("用法：/theme [dark|light]")
+            return
+        self.theme = "deity-dark" if dark else "deity-light"
+        self._palette = palette(dark=dark)
+        self._append_system(f"已切换到{'深色' if dark else '浅色'}主题。")
+        self._refresh_status()
+
+    def copy_text(self, text: str) -> None:
+        self.copy_to_clipboard(text)
+
+    def _focus_input_safe(self) -> None:
+        if not self.is_running:
+            return
+        try:
+            self.screen_stack[0].query_one("#input", ChatInput).focus()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    def open_model_picker(self) -> None:
+        known = KNOWN_MODELS.get(self.service.provider_id or "", ())
+        if not known:
+            return
+
+        def _on_pick(selected: str | None) -> None:
+            if selected is not None:
+                self.state.model_name = selected
+                self._append_system(f"已切换模型：{selected}（仅本次会话内生效，下轮任务生效）。")
+                self._refresh_status()
+            self._focus_input_safe()
+
+        self.push_screen(ModelPickerModal(known, self.state.model_name), _on_pick)
+
+    def all_slash_commands(self) -> list[tuple[str, str]]:
+        """内置命令与发现的自定义项目/用户命令合并列表（补全与命令面板共用）。"""
+        combined = list(AVAILABLE_SLASH_COMMANDS)
+        known = {cmd for cmd, _ in combined}
+        for item in self.custom_commands.list_commands():
+            if item.slash_name not in known:
+                combined.append((item.slash_name, f"[{item.source}] {item.description}"))
+        return combined
+
+    def submit_expanded_task(self, prompt: str) -> None:
+        """执行由自定义命令展开后的普通任务（若繁忙则自动入队）。"""
+        if self._run_active:
+            if self._input_queue.enqueue(prompt):
+                self._append_system(f"已加入排队（第 {self._input_queue.size} 条）：{prompt[:48]}")
+            self._refresh_status()
+            return
+        self._start_prompt_task(prompt)
+
+    def start_review(self, prompt: str) -> None:
+        self.run_worker(self._execute_task(prompt), group="run", exclusive=True)
+
+    def start_run_task(self, coro: Any) -> None:
+        async def _wrapped() -> None:
+            self._run_active = True
+            self._refresh_status()
+            try:
+                await coro
+            finally:
+                self._run_active = False
+                self._refresh_status()
+
+        self.run_worker(_wrapped(), group="run", exclusive=True)
+
+    async def authorize_dirty(
+        self, plan_id: str, allow_dirty: tuple[str, ...]
+    ) -> tuple[str, ...] | None:
+        return await self._authorize_dirty(plan_id, allow_dirty)
+
+    async def quit_app(self) -> None:
+        await self.action_quit()
+
+    # -- 布局与挂载 ---------------------------------------------------------
+    def compose(self) -> ComposeResult:
+        yield TopContextBar()
+        with Horizontal(id="workspace-body"):
+            yield VerticalScroll(id="conversation")
+            yield AuxDrawer()
+        with Vertical(id="composer-shell"):
+            yield FocusBar()
+            yield Static("", id="cmd-hint")
+            with Horizontal(id="input-row"):
+                yield Static("❯", id="input-prompt")
+                yield ChatInput(id="input")
+            yield Static("", id="composer-footer")
 
     def on_mount(self) -> None:
         self.query_one("#input", ChatInput).focus()
-        self._hide_prompt()
         self._refresh_status()
         self.set_interval(0.5, self._refresh_status)
         self.set_interval(0.05, self._scroll_tick)
@@ -626,40 +340,31 @@ class InteractiveApp(App[None]):
         if self._initial_task:
             self._submit(self._initial_task)
 
-    def _mount_welcome(self) -> None:
-        """欢迎头（ADR-022 修订）：神之眼徽记与版本/模型/工作区并排，边框块。
+    def on_unmount(self) -> None:
+        self._cancel_requested = True
+        self._input_queue.clear()
+        self._bridge.abort()
+        for future in self._confirm_futures:
+            if not future.done():
+                future.set_result(False)
+        if self._run_active and self._current_run_id is not None:
+            self.service.cancel(self._current_run_id)
 
-        取代原先单独的一行系统欢迎消息，两者合并为这一块，不重复欢迎。
-        版本号取包的 __version__（与 pyproject 同步），不硬编码。
-        """
-        greeting = greeting_for_hour(self._clock().hour)
-        text = (
-            f"{greeting}，欢迎来到 Deity v{__version__}，我是你的编程助手。\n"
-            f"模型：{self.state.model_name}\n"
-            f"工作区：{self._workspace}\n"
-            "今天想让我帮你做什么？\n"
-            "Enter 提交任务 · /help 查看命令\n"
-            "Shift+Tab 切换模式 · Ctrl+C 取消/退出 · Ctrl+Q 退出"
+    def _mount_welcome(self) -> None:
+        card = WelcomeCard(
+            hour=self._clock().hour,
+            model_name=self.state.model_name,
+            workspace=self._workspace,
         )
-        header = Horizontal(
-            Static(_WELCOME_EMBLEM, id="welcome-emblem"),
-            Static(text, id="welcome-text"),
-            id="welcome-header",
-        )
-        self._conversation.mount(header)
+        self._conversation.mount(card)
         self._scroll_end(force=True)
 
-    # -- 对话区 -----------------------------------------------------------
+    # -- 对话区呈现 ---------------------------------------------------------
     @property
     def _conversation(self) -> VerticalScroll:
         return self.query_one("#conversation", VerticalScroll)
 
     def _scroll_end(self, *, force: bool = False) -> None:
-        """滚动跟随（P1-7 节流版）：流式期合并高频请求，终态强制到底。
-
-        用户手动上滚超过一屏时不抢位置（等其滚回底部附近再恢复
-        跟随）；force 用于终态/用户刚提交等必须到底的时点。
-        """
         conversation = self._conversation
         if force:
             self._scroller.force()
@@ -671,7 +376,6 @@ class InteractiveApp(App[None]):
             conversation.scroll_end(animate=False)
 
     def _scroll_tick(self) -> None:
-        """节流尾随滚动：被合并的请求到期后补滚一次（仍尊重上滚）。"""
         if self._scroller.flush_due():
             conversation = self._conversation
             if conversation.max_scroll_y - conversation.scroll_y <= conversation.size.height:
@@ -682,7 +386,6 @@ class InteractiveApp(App[None]):
         self._scroll_end()
 
     def _append_section_header(self, title: str, subtitle: str = "") -> None:
-        """SectionHeader（Gemini 式）：仅顶线 + 粗体标题 + 灰色副标题。"""
         line = Text()
         line.append(title, style="bold")
         if subtitle:
@@ -691,12 +394,10 @@ class InteractiveApp(App[None]):
         self._scroll_end()
 
     def _append_error(self, text: str) -> None:
-        """错误块（P1-3）：error 色圆角边框独立成级，不混系统消息。"""
         self._conversation.mount(Static(text, classes="msg-error"))
         self._scroll_end(force=True)
 
     def _append_user(self, text: str) -> None:
-        """用户消息（Gemini 式）：`> ` accent 前缀 + 既有底色块。"""
         line = Text()
         line.append("> ", style=f"bold {self._palette['accent']}")
         line.append(text)
@@ -704,17 +405,10 @@ class InteractiveApp(App[None]):
         self._scroll_end(force=True)
 
     async def _append_assistant_final(self, text: str) -> None:
-        block = Markdown(text, classes="msg-assistant")
-        await self._conversation.mount(block)
+        await self._conversation.mount(Markdown(text, classes="msg-assistant"))
         self._scroll_end(force=True)
 
-    # -- 等待指示（P1-2） ---------------------------------------------------
     def _show_waiting(self) -> None:
-        """插入等待行：三点轮动 + Thinking...，首个增量到达即撤下。
-
-        注意：事件流没有真实 thinking 内容（P1-0 核查结论），这行
-        只是等待态呈现，不冒充思考原文，与 Klee 的等待态药丸对应。
-        """
         if self._waiting_block is not None:
             return
         self._waiting_frame = 0
@@ -728,41 +422,7 @@ class InteractiveApp(App[None]):
         if self._waiting_block is not None:
             self._waiting_frame = (self._waiting_frame + 1) % len(_WAITING_FRAMES)
             self._waiting_block.update(f"{_WAITING_FRAMES[self._waiting_frame]} Thinking...")
-        self._update_status_top()
-
-    def _update_status_top(self) -> None:
-        """StatusRow 上行（Gemini 式）：左等待态、右 Tip。
-
-        等待审批时显示静态 ⠏；运行中显示盲文 spinner + 生成中；
-        空闲时左侧为空。Tip 在窄屏（<100 列）或与左侧碰撞时隐藏。
-        """
-        try:
-            wait = self.query_one("#status-wait", Static)
-            tip = self.query_one("#status-tip", Static)
-        except Exception:  # noqa: BLE001 - 未挂载时刷新是空操作
-            return
-        if self._bridge.pending is not None or self._confirm_futures:
-            wait_text = "⠏ 等待审批…"
-        elif self._run_active:
-            # Codex 工作指示式：spinner + 生成中 + （耗时 · Ctrl+C 取消）。
-            elapsed = (
-                int(time.monotonic() - self._run_started_at)
-                if self._run_started_at is not None
-                else 0
-            )
-            wait_text = (
-                f"{_SPINNER_FRAMES[self._spinner_frame]} 生成中…"
-                f" ({fmt_elapsed_compact(elapsed)} · Ctrl+C 取消)"
-            )
-        else:
-            wait_text = ""
-        wait.update(wait_text)
-        width = self.size.width
-        tip_text = _TIPS[self._tip_index % len(_TIPS)]
-        if width < 100 or cell_len(wait_text) + cell_len(tip_text) + 10 > width:
-            tip.update("")
-        else:
-            tip.update(tip_text)
+        self._update_focus_bar()
 
     def _hide_waiting(self) -> None:
         if self._waiting_block is not None:
@@ -770,11 +430,6 @@ class InteractiveApp(App[None]):
             self._waiting_block = None
 
     def _append_metrics(self, view: ChatViewModel) -> None:
-        """每轮性能指标行（P1-4）：⚡ 耗时 · 输出 tokens · 工具次数。
-
-        数据取本轮 ViewModel 的状态聚合；usage 缺失时省略 tokens
-        段（降级格式，不编造），与 Klee 的两档格式对应。
-        """
         status = view.status
         parts = [f"⚡ {status.elapsed_seconds:.1f}s"]
         if status.output_tokens is not None:
@@ -783,11 +438,11 @@ class InteractiveApp(App[None]):
         self._conversation.mount(Static(" · ".join(parts), classes="msg-metrics"))
         self._scroll_end(force=True)
 
-    # -- 提交与执行 ---------------------------------------------------------
+    # -- 输入与队列执行 -----------------------------------------------------
     def on_chat_input_command_hint_updated(self, message: ChatInput.CommandHintUpdated) -> None:
         try:
             hint_box = self.query_one("#cmd-hint", Static)
-        except Exception:  # noqa: BLE001 - 未挂载时刷新是空操作
+        except Exception:  # noqa: BLE001
             return
         if not message.matches or self._run_active:
             hint_box.remove_class("show")
@@ -807,41 +462,71 @@ class InteractiveApp(App[None]):
 
     def on_chat_input_cancel_requested(self, message: ChatInput.CancelRequested) -> None:
         if message.key == "escape":
-            # Esc 只取消当前 Run，不退出（保持既有行为）。
             self._cancel_current_run()
         else:
             self.action_cancel_run()
+
+    def on_chat_input_command_palette_requested(
+        self, message: ChatInput.CommandPaletteRequested
+    ) -> None:
+        del message
+        self.action_open_command_palette()
 
     def _submit(self, raw: str) -> None:
         try:
             hint_box = self.query_one("#cmd-hint", Static)
             hint_box.remove_class("show")
             hint_box.update("")
-        except Exception:  # noqa: BLE001, S110 - 未挂载时是空操作
+        except Exception:  # noqa: BLE001, S110
             pass
         text = raw.strip()
         if not text:
             return
         if text.startswith("/"):
             self.query_one("#input", ChatInput).text = ""
-            self.run_worker(self._dispatch_command(text), group="cmd", exclusive=False)
+            self.run_worker(self._commands.dispatch(text), group="cmd", exclusive=False)
             return
         if text.startswith("!"):
             self._append_system("shell 直通（!命令）请在行式 CLI 中使用。")
             return
         if self._run_active:
-            self._append_system("当前有 Run 在运行；先等待完成，或按 Ctrl+C 取消后再提交。")
+            self.query_one("#input", ChatInput).text = ""
+            if self._input_queue.enqueue(text):
+                self._append_system(f"已加入排队（第 {self._input_queue.size} 条）：{text[:48]}")
+            else:
+                self._append_system(
+                    f"排队已满（最多 {self._input_queue.max_size} 条），请等待当前任务完成。"
+                )
+            self._refresh_status()
             return
         self.query_one("#input", ChatInput).text = ""
+        self._start_prompt_task(text)
+
+    def _start_prompt_task(self, text: str) -> None:
+        self._cancel_requested = False
         if self.state.plan_mode:
             self.run_worker(self._plan_flow(text), group="run", exclusive=True)
         else:
             self.run_worker(self._execute_task(text), group="run", exclusive=True)
 
+    def _drain_next_queued(self) -> None:
+        if self._cancel_requested or not self.is_running:
+            return
+        next_task = self._input_queue.pop_next()
+        if next_task is not None:
+            self._start_prompt_task(next_task)
+
+    async def _session_message_count(self) -> int:
+        repo = await SQLiteSessionRepository.open(self.service.db_path)
+        try:
+            return len(await repo.messages(self.state.session_id))
+        finally:
+            await repo.close()
+
     async def _execute_task(self, text: str) -> None:
-        """跑一轮任务：run_stream 事件喂 ChatViewModel 并增量建块。"""
         self._run_active = True
         self._run_started_at = time.monotonic()
+        msg_count_before = await self._session_message_count()
         self._append_user(text)
         self._show_waiting()
         view = ChatViewModel()
@@ -849,26 +534,41 @@ class InteractiveApp(App[None]):
         self._view = view
         self._text_block = None
         self._rendered_text_len = 0
+        self._thinking_block = None
+        self._rendered_reasoning_len = 0
+        self._active_tool_group = None
         self._refresh_status()
+        completed_run_id: str | None = None
         try:
             stream = self.service.run_stream(
                 text, model_name=self.state.model_name, session_id=self.state.session_id
             )
             async for event in stream:
                 self._current_run_id = event.run_id
+                completed_run_id = event.run_id
                 delta = view.apply(event)
-                if delta.text_appended or delta.tool_started is not None:
+                if (
+                    delta.reasoning_appended
+                    or delta.text_appended
+                    or delta.tool_started is not None
+                ):
                     self._hide_waiting()
+                if delta.reasoning_appended:
+                    await self._sync_thinking_block(view)
                 if delta.text_appended:
+                    self._finish_thinking_block()
+                    self._active_tool_group = None
                     await self._sync_text_block(view)
                 if delta.tool_started is not None:
+                    self._finish_thinking_block()
                     self._close_text_block(view)
-                    self._mount_tool_block(delta.tool_started)
+                    await self._mount_tool_block(delta.tool_started)
                 if delta.tool_completed is not None:
                     self._update_tool_block(delta.tool_completed)
                 if delta.diff is not None:
                     self._mount_diff_block(delta.diff)
                 if delta.terminal:
+                    self._finish_thinking_block()
                     await self._finish_text_block(view)
                     self._append_metrics(view)
                 self._refresh_status()
@@ -876,18 +576,45 @@ class InteractiveApp(App[None]):
             self._append_error(f"运行失败：{run_error_message(exc)}")
         finally:
             self._hide_waiting()
+            self._finish_thinking_block()
+            if completed_run_id is not None:
+                backups = self.service.take_turn_preimages(completed_run_id)
+                self.rewind_history.record(
+                    session_id=self.state.session_id,
+                    run_id=completed_run_id,
+                    prompt=text,
+                    message_count_before=msg_count_before,
+                    file_backups=backups,
+                )
             if self._current_run_id is not None:
                 self._last_run_id = self._current_run_id
             self._current_run_id = None
+            self._active_tool_group = None
             self._accumulate(view)
             self._run_active = False
             self._run_started_at = None
             self._refresh_status()
+            self._refresh_drawer_active_tab()
+            self._drain_next_queued()
+
+    async def _sync_thinking_block(self, view: ChatViewModel) -> None:
+        segment = view.reasoning[self._rendered_reasoning_len :]
+        if not segment:
+            return
+        if self._thinking_block is None:
+            self._thinking_block = ThinkingBlock(self._palette)
+            await self._conversation.mount(self._thinking_block)
+        self._thinking_block.set_text(segment)
+        self._scroll_end()
+
+    def _finish_thinking_block(self) -> None:
+        if self._thinking_block is not None and self._view is not None:
+            self._thinking_block.finish(auto_collapse=True)
+            self._rendered_reasoning_len = len(self._view.reasoning)
+            self._thinking_block = None
 
     def _mount_diff_block(self, payload: dict[str, Any]) -> None:
-        """每轮末 diff 块（Codex PatchHistoryCell 式）：摘要头 + hunks，可点击折叠。"""
-        block = DiffBlock(payload, self._palette, classes="msg-diff")
-        self._conversation.mount(block)
+        self._conversation.mount(DiffBlock(payload, self._palette, classes="msg-diff"))
         self._scroll_end()
 
     async def _sync_text_block(self, view: ChatViewModel) -> None:
@@ -906,7 +633,6 @@ class InteractiveApp(App[None]):
             self._text_block = None
 
     async def _finish_text_block(self, view: ChatViewModel) -> None:
-        """终态收口：流式文本缺失时用 final_text 补一块。"""
         if self._text_block is not None:
             segment = view.text[self._rendered_text_len :]
             if segment:
@@ -915,7 +641,16 @@ class InteractiveApp(App[None]):
         elif view.final_text:
             await self._append_assistant_final(view.final_text)
 
-    def _mount_tool_block(self, node: ToolNode) -> None:
+    async def _mount_tool_block(self, node: ToolNode) -> None:
+        if self._active_tool_group is None:
+            self._group_counter += 1
+            group_state = ToolGroupState(
+                group_id=f"grp-{self._group_counter}",
+                title="工具执行",
+            )
+            group_widget = ToolGroupWidget(group_state, self._palette)
+            await self._conversation.mount(group_widget)
+            self._active_tool_group = group_widget
         block = ToolBlock(
             node,
             on_toggle=self._toggle_tool_node,
@@ -923,40 +658,29 @@ class InteractiveApp(App[None]):
             classes="msg-tool",
         )
         self._tool_blocks[node.call_id] = block
-        self._conversation.mount(block)
+        self._tool_groups[node.call_id] = self._active_tool_group
+        self._active_tool_group.add_tool_block(block)
         self._scroll_end()
 
     def _update_tool_block(self, node: ToolNode) -> None:
         block = self._tool_blocks.get(node.call_id)
         if block is not None:
-            if isinstance(block, ToolBlock):
-                block.refresh_node()
-            else:
-                block.update(self._tool_line(node))
+            block.refresh_node()
+        group = self._tool_groups.get(node.call_id)
+        if group is not None:
+            group.mark_completed(node.status or "ok")
 
     def _toggle_tool_node(self, call_id: str) -> None:
         if self._view is not None and call_id in self._view.tools:
             self._view.toggle_expanded(call_id)
             block = self._tool_blocks.get(call_id)
             if block is not None:
-                if isinstance(block, ToolBlock):
-                    block.refresh_node()
-                else:
-                    block.update(self._tool_line(self._view.tools[call_id]))
+                block.refresh_node()
 
     def _tool_line(self, node: ToolNode) -> Text:
-        """工具条目（ADR-022 修订，Claude Code 式紧凑排版；P0 分级配色）。
-
-        首行一行式：⏺ 工具名(参数摘要)；完成后结果以 ⎿ 缩进次行呈现
-        （状态 + 耗时）；运行中首行尾标「运行中」。展开时（/tools）在
-        结果行后追加完整参数与 call_id。配色走 theme.palette()：
-        ⏺ 与工具名用品牌绿，⎿ 行用次级色，状态词按结果着色
-        （ok=success、error=error、denied/timeout=warning）。
-        """
         colors = self._palette
         line = Text()
         line.append("⏺ ", style=f"bold {colors['accent']}")
-        # Codex ExecCell 式动词标签（读/搜/列/$/写/改/删 + 目标），其余保持原样。
         line.append(node.display_label(), style="bold")
         if node.finished_at is None:
             line.append(" · 运行中", style=colors["tertiary"])
@@ -972,7 +696,6 @@ class InteractiveApp(App[None]):
         line.append("  ⎿ ", style=colors["tertiary"])
         line.append(status, style=status_style)
         line.append(f" · {node.elapsed(time.monotonic):.1f}s", style=colors["secondary"])
-        # ADR-023：非零退出码附 (exit N)；输出预览缩进追加（最多 3 行）。
         if node.exit_code is not None and node.exit_code != 0:
             line.append(f" (exit {node.exit_code})", style=colors["error"])
         if node.output_preview:
@@ -985,7 +708,6 @@ class InteractiveApp(App[None]):
         return line
 
     def _accumulate(self, view: ChatViewModel) -> None:
-        """把一轮的计数并入会话级状态（/cost、/status、状态栏的口径）。"""
         source, target = view.status, self.session_status
         target.turns += source.turns
         target.tool_calls += source.tool_calls
@@ -997,234 +719,141 @@ class InteractiveApp(App[None]):
             target.last_input_tokens = source.last_input_tokens
         target.elapsed_seconds += source.elapsed_seconds
 
-    # -- 审批/确认面板 ------------------------------------------------------
-    def handle_prompt_key(self, key: str) -> bool:
-        """极速单键审批处理：面板激活时直达放行/拒绝。"""
-        if self._prompt_handler is None:
-            return False
-        panel = self.query_one("#prompt-panel")
-        if "show" not in panel.classes:
-            return False
-        kind = getattr(self, "_current_pending_kind", "approval")
-        if kind == "approval":
-            mapping = {
-                "1": "btn-allow-once",
-                "2": "btn-allow-session",
-                "4": "btn-allow-always",
-                "3": "btn-deny",
-                "escape": "btn-deny",
-            }
-            if key in mapping:
-                bid = mapping[key]
-                handler = self._prompt_handler
-                self._prompt_handler = None
-                handler(bid)
-                return True
-        elif kind == "confirm":
-            mapping = {
-                "y": "btn-confirm",
-                "Y": "btn-confirm",
-                "enter": "btn-confirm",
-                "n": "btn-cancel",
-                "N": "btn-cancel",
-                "escape": "btn-cancel",
-            }
-            if key in mapping:
-                bid = mapping[key]
-                handler = self._prompt_handler
-                self._prompt_handler = None
-                handler(bid)
-                return True
-        return False
-
-    def on_key(self, event: Any) -> None:
-        # ADR-023：模型弹窗打开时 Esc 关闭弹窗（不落入审批热键）。
-        if self._model_dialog_open and event.key == "escape":
-            self._close_model_dialog()
-            event.prevent_default()
-            event.stop()
-            return
-        if self.handle_prompt_key(event.key):
-            event.prevent_default()
-            event.stop()
-
-    def _collapse_input(self, collapse: bool) -> None:
-        """审批时折叠输入区（Gemini 式）：输入框与下方提示行暂时隐藏。"""
-        for selector in ("#input-row", "#input-hint"):
-            try:
-                self.query_one(selector).set_class(collapse, "collapsed")
-            except Exception:  # noqa: BLE001, S110 - 未挂载时是空操作
-                pass
-
+    # -- 审批/确认浮层 ------------------------------------------------------
     def _present_prompt(self, pending: PendingPrompt) -> None:
-        """呈现审批卡片或确认（桥从工作线程经 call_from_thread 调入）。"""
-        self.query_one("#prompt-text", Static).update(pending.text or "（无内容）")
-        # ADR-023：审批 diff 预览（首轮 diff 块同款配色：新增行浅灰底、删除行红底）。
-        diff_widget = self.query_one("#prompt-diff", Static)
-        if pending.diff:
-            diff_widget.update(format_diff_text(pending.diff, self._palette))
-        else:
-            diff_widget.update("")
-        self._current_pending_kind = pending.kind
-        title, subtitle = (
-            ("审批", "工具调用需要你的确认") if pending.kind == "approval" else ("确认", "")
-        )
-        title_line = Text()
-        title_line.append(title, style="bold")
-        if subtitle:
-            title_line.append(f"  {subtitle}", style=self._palette["tertiary"])
-        self.query_one("#prompt-title", Static).update(title_line)
-        self._collapse_input(True)
-        if pending.kind == "approval":
-            mapping = {
-                "btn-allow-once": "1",
-                "btn-allow-session": "2",
-                "btn-allow-always": "4",
-                "btn-deny": "3",
-            }
-            visible = {"btn-allow-once", "btn-allow-session", "btn-deny"}
-            if pending.allow_permanent:
-                visible.add("btn-allow-always")
-            self.query_one("#btn-allow-once", Button).label = "[1] 允许一次"
-            session_button = self.query_one("#btn-allow-session", Button)
-            if pending.pattern:
-                session_button.label = f"[2] 本次会话允许同类命令（{pending.pattern}）"
-            else:
-                session_button.label = "[2] 本次会话都允许"
-            self.query_one("#btn-allow-always", Button).label = "[4] 永久允许（保存为规则）"
-            self.query_one("#btn-deny", Button).label = "[3/Esc] 拒绝"
-            self._set_prompt_buttons(visible)
-            self._prompt_handler = lambda bid: self._bridge.submit(mapping.get(bid, "3"))
-            focus_id = "btn-allow-once"
-        else:
-            mapping = {"btn-confirm": "yes", "btn-cancel": ""}
-            self.query_one("#btn-confirm", Button).label = "[y/Enter] 确认"
-            self.query_one("#btn-cancel", Button).label = "[n/Esc] 取消"
-            self._set_prompt_buttons({"btn-confirm", "btn-cancel"})
-            self._prompt_handler = lambda bid: self._bridge.submit(mapping.get(bid, ""))
-            focus_id = "btn-confirm"
-        panel = self.query_one("#prompt-panel")
-        panel.add_class("show")
-        self.query_one(f"#{focus_id}", Button).focus()
+        modal = ApprovalModal(pending, self._palette)
+        self._active_modal = modal
 
-    def _set_prompt_buttons(self, visible: set[str]) -> None:
-        for button in self.query("#prompt-buttons Button"):
-            assert isinstance(button, Button)
-            button.styles.display = "block" if button.id in visible else "none"
+        def _on_dismiss(choice: str | None) -> None:
+            if self._active_modal is modal:
+                self._active_modal = None
+            fallback = "3" if pending.kind == "approval" else ""
+            self._bridge.submit(fallback if choice is None else choice)
+            self._refresh_status()
+            self._focus_input_safe()
+
+        self.push_screen(modal, _on_dismiss)
+        self._refresh_status()
 
     def _hide_prompt(self) -> None:
-        self.query_one("#prompt-panel").remove_class("show")
-        self.query_one("#prompt-diff", Static).update("")
-        self._prompt_handler = None
-        self._collapse_input(False)
-        if self.is_running:
-            self.query_one("#input", ChatInput).focus()
+        self._refresh_status()
+        self._focus_input_safe()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        bid = event.button.id
-        # ADR-023：模型弹窗行按钮优先路由（点击即切换并关闭弹窗）。
-        if bid is not None and bid in self._model_rows:
-            self._select_model(self._model_rows[bid])
-            return
-        # 侧栏按钮优先于审批 handler 路由：侧栏开着时误触不能当成审批答案。
-        if bid is not None and bid in self._sidebar_map:
-            self._sidebar_click(self._sidebar_map[bid])
-            return
-        if bid == "btn-sidebar-doctor":
-            self.run_worker(self._dispatch_command("/doctor"), group="command", exclusive=False)
-            return
-        handler = self._prompt_handler
-        if handler is not None and bid is not None:
-            handler(bid)
+    async def _confirm(
+        self, text: str, *, confirm_label: str = "确认", cancel_label: str = "取消"
+    ) -> bool:
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._confirm_futures.append(future)
+        modal = ApprovalModal(
+            PendingPrompt(kind="confirm", text=text),
+            self._palette,
+            confirm_label=confirm_label,
+            cancel_label=cancel_label,
+        )
+        self._active_modal = modal
 
-    # -- 会话侧栏（P2-2 / D3：默认隐藏、Ctrl+B 呼出） ------------------------
+        def _on_dismiss(choice: str | None) -> None:
+            if self._active_modal is modal:
+                self._active_modal = None
+            if not future.done():
+                future.set_result(choice == "yes")
+
+        self.push_screen(modal, _on_dismiss)
+        try:
+            return await future
+        finally:
+            if future in self._confirm_futures:
+                self._confirm_futures.remove(future)
+            self._focus_input_safe()
+
+    # -- 辅助抽屉与面板交互 -------------------------------------------------
     def action_toggle_sidebar(self) -> None:
-        sidebar = self.query_one("#sidebar")
-        if sidebar.has_class("show"):
-            sidebar.remove_class("show")
+        drawer = self.query_one(AuxDrawer)
+        if drawer.has_class("show"):
+            drawer.remove_class("show")
             return
         if self.size.width < 100:
             self._append_system(
-                "窗口太窄（需 ≥100 列），无法打开会话侧栏；可用 /sessions 查看与切换会话。"
+                "窗口太窄（需 ≥100 列），无法打开辅助抽屉；可用 /sessions 或 /diff 查看。"
             )
             return
-        sidebar.add_class("show")
-        self.run_worker(self._fill_sidebar(), group="sidebar", exclusive=False)
+        drawer.add_class("show")
+        self._refresh_drawer_active_tab()
 
-    async def _fill_sidebar(self) -> None:
-        container = self.query_one("#sidebar-sessions", VerticalScroll)
-        await container.remove_children()
-        self._sidebar_map = {}
-        repo = await SQLiteSessionRepository.open(self.service.db_path)
+    def _refresh_drawer_active_tab(self) -> None:
         try:
-            items = await repo.sessions(include_archived=True)
-        finally:
-            await repo.close()
-        if not items:
-            container.mount(Static("（暂无已存储会话）直接输入任务即可开始新会话。"))
-        for index, item in enumerate(items):
-            current = item["id"] == self.state.session_id
-            title = f" {item['title'][:16]}" if item["title"] else ""
-            button = Button(
-                f"{'● ' if current else ''}{item['id'][:8]}{title}",
-                id=f"session-row-{index}",
-                classes="session-row current" if current else "session-row",
-            )
-            self._sidebar_map[f"session-row-{index}"] = item["id"]
-            container.mount(button)
-        self.query_one("#sidebar-model", Static).update(f"模型：{self.state.model_name}")
-
-    def _sidebar_click(self, target: str) -> None:
-        if self._run_active:
-            self._append_system("有 Run 在运行，结束后再切换会话。")
+            drawer = self.query_one(AuxDrawer)
+        except Exception:  # noqa: BLE001
             return
-        self._apply_session_switch(target)
-        self.run_worker(self._fill_sidebar(), group="sidebar", exclusive=False)
+        if not drawer.has_class("show"):
+            return
+        if drawer.active_tab == "sessions":
+            self.run_worker(
+                drawer.refresh_sessions(
+                    self.service.db_path, self.state.session_id, self.state.model_name
+                ),
+                group="sidebar",
+                exclusive=False,
+            )
+        elif drawer.active_tab == "files":
+            self.run_worker(
+                drawer.refresh_files(self._workspace, self._palette),
+                group="sidebar",
+                exclusive=False,
+            )
+        else:
+            drawer.refresh_tasks(
+                run_active=self._run_active,
+                run_id=self._current_run_id or self._last_run_id,
+                last_plan_id=self._last_plan_id,
+                tools=self._view.tools if self._view is not None else {},
+                queue_items=self._input_queue.items(),
+                shell_sessions=self.service.active_shell_sessions(),
+            )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id
+        if bid is None:
+            return
+        drawer = self.query_one(AuxDrawer)
+        if bid in {"tab-sessions", "tab-files", "tab-tasks"}:
+            tab = bid.removeprefix("tab-")
+            if tab in {"sessions", "files", "tasks"}:
+                drawer.select_tab(tab)  # type: ignore[arg-type]
+                self._refresh_drawer_active_tab()
+            return
+        if bid == "btn-sidebar-doctor":
+            self.run_worker(self._commands.dispatch("/doctor"), group="cmd", exclusive=False)
+            return
+        session_id = drawer.session_for_button(bid)
+        if session_id is not None:
+            if self._run_active:
+                self._append_system("有 Run 在运行，结束后再切换会话。")
+                return
+            self._apply_session_switch(session_id)
+            self._refresh_drawer_active_tab()
 
     def _apply_session_switch(self, target: str) -> None:
         self.state.session_id = target
         self._append_system(f"已切换会话：{target[:8]}")
         self._refresh_status()
 
-    async def _confirm(
-        self, text: str, *, confirm_label: str = "确认", cancel_label: str = "取消"
-    ) -> bool:
-        """界面内二选一确认（计划构建、脏文件授权用）；退出时按取消收口。"""
-        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        self._confirm_futures.append(future)
-        self._current_pending_kind = "confirm"
-        self.query_one("#prompt-text", Static).update(text)
-        self.query_one("#prompt-diff", Static).update("")
-        self.query_one("#prompt-title", Static).update(Text("确认", style="bold"))
-        self._collapse_input(True)
-        self.query_one("#btn-confirm", Button).label = f"[y/Enter] {confirm_label}"
-        self.query_one("#btn-cancel", Button).label = f"[n/Esc] {cancel_label}"
-        self._set_prompt_buttons({"btn-confirm", "btn-cancel"})
+    def action_open_command_palette(self) -> None:
+        def _on_select(selected: str | None) -> None:
+            if selected is not None:
+                self.run_worker(self._commands.dispatch(selected), group="cmd", exclusive=False)
+            self._focus_input_safe()
 
-        def handler(bid: str) -> None:
-            if not future.done():
-                future.set_result(bid == "btn-confirm")
-
-        self._prompt_handler = handler
-        self.query_one("#prompt-panel").add_class("show")
-        self.query_one("#btn-confirm", Button).focus()
-        try:
-            return await future
-        finally:
-            self._confirm_futures.remove(future)
-            self._hide_prompt()
+        self.push_screen(CommandPaletteModal(self.all_slash_commands()), _on_select)
 
     # -- 取消与退出 ---------------------------------------------------------
     def action_cancel_run(self) -> None:
-        """Ctrl+C：确认面板先取消、Run 进行中取消 Run、空闲时退出应用。
-
-        待决审批由 _cancel_current_run 一并拒绝（拒绝后连带取消 Run）；
-        空闲退出与 action_quit 在空闲态的清理等价（无 Run、无待决确认）。
-        """
         if self._confirm_futures:
             for future in list(self._confirm_futures):
                 if not future.done():
                     future.set_result(False)
+            if self._active_modal is not None:
+                self._active_modal.force_abort()
             return
         if self._cancel_current_run():
             return
@@ -1232,9 +861,15 @@ class InteractiveApp(App[None]):
         self.exit()
 
     def _cancel_current_run(self) -> bool:
-        """拒绝待决审批并取消当前 Run；无待决审批且无 Run 时返回 False。"""
         acted = False
+        self._cancel_requested = True
+        dropped = self._input_queue.clear()
+        if dropped > 0:
+            self._append_system(f"已清空排队任务（{dropped} 条）。")
+            acted = True
         if self._bridge.pending is not None:
+            if self._active_modal is not None:
+                self._active_modal.force_abort()
             self._bridge.submit("3")
             acted = True
         if self._run_active and self._current_run_id is not None:
@@ -1242,16 +877,18 @@ class InteractiveApp(App[None]):
             self._append_system("已请求取消当前 Run。")
             acted = True
         elif self._run_active:
-            # run_id 尚未随首个事件到达：取消消费 worker，run_stream 的
-            # finally 会连带取消底层 Run。
             self.workers.cancel_group(self, "run")
             self._append_system("已请求取消当前 Run。")
             acted = True
+        self._refresh_status()
         return acted
 
     async def action_quit(self) -> None:
-        """退出：先 abort 审批桥与未决确认，再取消活动 Run，不留挂起。"""
+        self._cancel_requested = True
+        self._input_queue.clear()
         self._bridge.abort()
+        if self._active_modal is not None:
+            self._active_modal.force_abort()
         for future in self._confirm_futures:
             if not future.done():
                 future.set_result(False)
@@ -1259,9 +896,8 @@ class InteractiveApp(App[None]):
             self.service.cancel(self._current_run_id)
         self.exit()
 
-    # -- 模式与状态栏 ---------------------------------------------------------
+    # -- 模式与状态更新 -----------------------------------------------------
     def _mode_label(self) -> str:
-        """当前模式文案（状态栏、/status、Shift+Tab 循环共用同一口径）。"""
         if self._bridge.controller.mode == "auto":
             return "自动接受"
         if self.state.plan_mode:
@@ -1269,7 +905,6 @@ class InteractiveApp(App[None]):
         return "普通"
 
     def _enter_plan(self) -> bool:
-        """进入计划模式（/plan 与 Shift+Tab 共用）：未启用时提示并保持原模式。"""
         if not self.service.coding.plan_build_enabled or not self.service.coding.git_guard_enabled:
             self._append_system(
                 "Plan/Build 未启用，请在配置中开启 plan_build_enabled 和 git_guard_enabled。"
@@ -1281,7 +916,6 @@ class InteractiveApp(App[None]):
         return True
 
     def _enter_normal(self) -> None:
-        """返回普通模式（/normal 与 Shift+Tab 共用）：退出计划与自动接受。"""
         self.state.plan_mode = False
         if self._bridge.controller.mode == "auto":
             self._bridge.controller.exit_auto()
@@ -1290,17 +924,10 @@ class InteractiveApp(App[None]):
         self._refresh_status()
 
     def on_chat_input_mode_cycle_requested(self, message: ChatInput.ModeCycleRequested) -> None:
+        del message
         self.action_cycle_mode()
 
     def action_cycle_mode(self) -> None:
-        """Shift+Tab 循环切换模式：普通 → 计划 → 自动接受 → 普通。
-
-        状态转移与 /plan、/auto、/normal 完全共用，不另起语义：
-        进入计划走同一启用检查（未启用则留在普通并提示）；进入自动
-        接受仍走审批桥的显式确认——确认通过后才离开计划模式，取消
-        确认则留在计划模式，绝不静默绕过自动接受的安全确认；有待
-        决审批/确认时不切换，避免与审批面板争用。
-        """
         if self._bridge.pending is not None or self._confirm_futures:
             self._append_system("有待决审批或确认，先处理后再切换模式。")
             return
@@ -1312,72 +939,72 @@ class InteractiveApp(App[None]):
         else:
             self._enter_plan()
 
-    def _hint_text(self) -> str:
-        """输入区状态提示（P1-5）：随待审批/运行/模式三类状态切换文案。"""
+    async def _auto_worker(self, *, came_from_plan: bool = False) -> None:
+        accepted = await asyncio.to_thread(self._bridge.request_auto)
+        if accepted:
+            if came_from_plan:
+                self.state.plan_mode = False
+            self._append_system("已进入自动接受模式。输入 /normal 退出并恢复 ask。")
+        self._refresh_status()
+
+    def _update_focus_bar(self) -> None:
+        try:
+            focus_bar = self.query_one(FocusBar)
+        except Exception:  # noqa: BLE001
+            return
         if self._bridge.pending is not None or self._confirm_futures:
-            return "有待决审批 · 请先在上方面板中处理"
-        if self._run_active:
-            return "生成中 · Ctrl+C 停止"
-        mode = self._mode_label()
-        if mode == "计划":
-            return "计划模式 · 输入任务将先生成计划"
-        if mode == "自动接受":
-            return "自动接受模式 · 工具调用将自动批准 · /normal 退出"
-        return "输入任务开始 · Enter 提交 · Shift+Tab 切换模式 · /help 查看命令"
-
-    def _status_bar_text(self, left: str) -> Text:
-        """状态栏模式行：左模型 · 模式（动态副提示）· 运行态，右上下文占用。
-
-        上下文占用按比例着色（0.75 压缩软限变黄、满额变红；无 usage
-        数据时不显示）；窄屏只显示百分比；宽度不足时舍弃右侧，
-        保证左侧不被顶出。token/工具/工作区统计仍回归 /status 详情。
-        """
-        ratio = self.session_status.context_ratio()
-        text = Text(left)
-        if ratio is None:
-            return text
-        pct = round(ratio * 100)
-        right = f"{pct}%" if self.size.width < 100 else f"上下文 {pct}%"
-        if ratio >= 1:
-            style = self._palette["error"]
-        elif ratio >= _CONTEXT_WARN_RATIO:
-            style = self._palette["warning"]
+            status_text = "⠏ 等待审批…"
+        elif self._run_active:
+            elapsed = (
+                int(time.monotonic() - self._run_started_at)
+                if self._run_started_at is not None
+                else 0
+            )
+            current_tool = self._view.current_tool if self._view is not None else None
+            tool_hint = f" · {current_tool.display_label()}" if current_tool is not None else ""
+            status_text = (
+                f"{_SPINNER_FRAMES[self._spinner_frame]} 生成中{tool_hint}"
+                f" ({fmt_elapsed_compact(elapsed)} · 可继续输入排队 · Ctrl+C 取消)"
+            )
         else:
-            style = self._palette["secondary"]
-        gap = self.size.width - 2 - cell_len(left) - cell_len(right)
-        if gap < 2:
-            return text
-        text.append(" " * gap)
-        text.append(right, style=style)
-        return text
+            status_text = _TIPS[self._tip_index % len(_TIPS)]
+        focus_bar.update_focus(status_text=status_text, queue_size=self._input_queue.size)
 
     def _refresh_status(self) -> None:
         try:
-            bar = self.query_one("#status-bar", Static)
-        except Exception:  # noqa: BLE001 - 未挂载时刷新是空操作
+            top_bar = self.query_one(TopContextBar)
+            footer = self.query_one("#composer-footer", Static)
+            input_row = self.query_one("#input-row")
+        except Exception:  # noqa: BLE001
             return
-        try:
-            self.query_one("#input-hint", Static).update(self._hint_text())
-            self.query_one("#input-row").set_class(self._run_active, "streaming")
-        except Exception:  # noqa: BLE001, S110 - 未挂载时刷新是空操作
-            pass
-        # Tip 轮换：每轮完成时推进一条（不在刷新间隔内轮换，避免闪烁）。
         if self._was_run_active and not self._run_active:
             self._tip_index += 1
         self._was_run_active = self._run_active
-        self._update_status_top()
         mode = self._mode_label()
-        if self._run_active:
-            dots = "." * (int(time.monotonic() * 2) % 4)
-            run_state = f"运行中{dots}"
+        top_bar.update_state(
+            model_name=self.state.model_name,
+            mode_label=mode,
+            branch=git_branch(self._workspace),
+            run_active=self._run_active,
+            context_ratio=self.session_status.context_ratio(),
+            tokens_text=self.session_status.token_text(),
+            colors=self._palette,
+            width=self.size.width,
+        )
+        input_row.set_class(self._run_active, "streaming")
+        self._update_focus_bar()
+        if self._bridge.pending is not None or self._confirm_futures:
+            footer_text = "审批待决 · 请在弹窗中选择或按快捷键"
+        elif self._run_active:
+            footer_text = f"{mode}模式 · 运行中（输入可排队） · Ctrl+C 取消"
         else:
-            run_state = "空闲"
-        left = f"模型 {self.state.model_name} · {mode}模式（{_MODE_SUBHINT[mode]}） · {run_state}"
-        bar.update(self._status_bar_text(left))
+            footer_text = (
+                f"{mode}模式 · Shift+Tab 切换 · Enter 发送 · Ctrl+P 命令面板 · Ctrl+B 抽屉"
+            )
+        footer.update(footer_text)
 
     # -- 计划模式 -----------------------------------------------------------
     async def _plan_flow(self, text: str) -> None:
-        """计划模式提交：建计划 → 界面确认 → 脏文件确认 → Build。"""
         self._run_active = True
         self._run_started_at = time.monotonic()
         self._append_user(text)
@@ -1408,11 +1035,11 @@ class InteractiveApp(App[None]):
             self._run_active = False
             self._run_started_at = None
             self._refresh_status()
+            self._drain_next_queued()
 
     async def _authorize_dirty(
         self, plan_id: str, allow_dirty: tuple[str, ...]
     ) -> tuple[str, ...] | None:
-        """脏文件集中确认：全部同意才返回授权集，拒绝返回 None 并保留计划。"""
         build = BuildService(
             self.service.db_path,
             self.service.workspace,
@@ -1438,518 +1065,6 @@ class InteractiveApp(App[None]):
         permitted.update(pending)
         return tuple(sorted(permitted))
 
-    # -- 斜杠命令 -------------------------------------------------------------
-    async def _dispatch_command(self, prompt: str) -> None:
-        """工作台斜杠命令子集；语义对齐 chat_commands，不相容的明确提示。"""
-        if prompt in {"/exit", "/quit"}:
-            await self.action_quit()
-            return
-        if prompt == "/help":
-            self._append_section_header("命令", "斜杠命令与工作台按键")
-            self._append_system(
-                HELP_TEXT + "\n工作台按键：Enter 提交 · Ctrl+J 换行 · Shift+Tab 切换模式"
-                " · Ctrl+C 取消/退出 · Ctrl+Q 退出"
-            )
-            return
-        if prompt == "/status":
-            await self._command_status()
-            return
-        if prompt == "/cost":
-            self._append_system(self.session_status.cost_text())
-            return
-        if prompt == "/usage":
-            self._append_system(self.session_status.usage_text())
-            return
-        if prompt == "/rename" or prompt.startswith("/rename "):
-            self.run_worker(
-                self._command_rename(prompt.removeprefix("/rename").strip()),
-                group="run",
-                exclusive=True,
-            )
-            return
-        if prompt == "/sandbox" or prompt.startswith("/sandbox "):
-            self._command_sandbox(prompt.removeprefix("/sandbox").strip())
-            return
-        if prompt == "/tools" or prompt.startswith("/tools "):
-            self._command_tools(prompt)
-            return
-        if prompt == "/clear":
-            await self._conversation.remove_children()
-            self._append_system("已清屏。")
-            return
-        if prompt == "/compact":
-            enabled = bool(self.service.limits.compaction_enabled)
-            if enabled:
-                self._append_system(
-                    "上下文压缩已开启（[run] compaction_enabled = true），"
-                    "在每轮运行时自动执行；没有独立的触发入口。"
-                )
-            else:
-                self._append_system(
-                    "上下文压缩未开启（[run] compaction_enabled = false）。"
-                    "/compact 没有独立的触发入口；开启后压缩在每轮运行时自动执行。"
-                )
-            return
-        if prompt == "/plan":
-            self._enter_plan()
-            return
-        if prompt == "/normal":
-            self._enter_normal()
-            return
-        if prompt == "/model" or prompt.startswith("/model "):
-            requested = prompt.removeprefix("/model").strip()
-            if not requested:
-                # ADR-023：无参开弹窗；无固定列表的提供方回落到文本列表。
-                await self._open_model_dialog()
-            else:
-                self.state.model_name = requested
-                self._append_system(f"已切换模型：{requested}（仅本次会话内生效，下轮任务生效）。")
-                self._refresh_status()
-            return
-        if prompt == "/auto":
-            self._command_auto()
-            return
-        if prompt == "/doctor":
-            report = run_doctor(
-                self._config_path or Path.home() / ".config/deity/config.toml", self._workspace
-            )
-            lines = [f"{check.name}: {check.status} {check.detail}" for check in report.checks]
-            self._append_system("\n".join(lines))
-            return
-        if prompt == "/sessions" or prompt.startswith("/sessions "):
-            await self._command_sessions(prompt)
-            return
-        if prompt == "/build" or prompt.startswith("/build "):
-            await self._command_build(prompt)
-            return
-        if prompt == "/resume" or prompt.startswith("/resume "):
-            await self._command_resume(prompt)
-            return
-        if prompt in {"/skills", "/skill"} or prompt.startswith(("/skills ", "/skill ")):
-            try:
-                skills = self.service.skills_list()
-                errors = self.service.skills_errors()
-                if not skills and not errors:
-                    self._append_system(
-                        "未发现配置的 Skills。可在 .deity/skills 或 ~/.config/deity/skills 中添加。"
-                    )
-                else:
-                    lines = ["[bold]已配置的 Skills:[/bold]"]
-                    for item in skills:
-                        lines.append(
-                            f"• [cyan]{item['name']}[/cyan] [{item['source']}]: {item['description']}"
-                        )
-                    for err in errors:
-                        lines.append(f"[red]错误: {err}[/red]")
-                    self._append_system("\n".join(lines))
-            except Exception as exc:  # noqa: BLE001
-                self._append_system(f"获取 Skills 失败：{exc}")
-            return
-        if prompt == "/mcp" or prompt.startswith("/mcp "):
-            try:
-                mcp_servers = getattr(self.service, "mcp_servers", {})
-                if not mcp_servers:
-                    self._append_system(
-                        "未配置 MCP 服务器。可在配置文件的 [mcp.servers.*] 段中添加。"
-                    )
-                else:
-                    lines = ["[bold]已配置的 MCP 服务器:[/bold]"]
-                    for name, srv in mcp_servers.items():
-                        cmd_str = (
-                            f"{srv.command} {' '.join(srv.args)}"
-                            if hasattr(srv, "command")
-                            else str(srv)
-                        )
-                        lines.append(f"• [cyan]{name}[/cyan]: {cmd_str}")
-                    self._append_system("\n".join(lines))
-            except Exception as exc:  # noqa: BLE001
-                self._append_system(f"获取 MCP 配置失败：{exc}")
-            return
-        if prompt == "/diff":
-            self.run_worker(self._command_diff(), group="run", exclusive=True)
-            return
-        if prompt == "/new":
-            self.run_worker(self._command_new(), group="run", exclusive=True)
-            return
-        if prompt == "/review":
-            if self._run_active:
-                self._append_system("已有任务在运行中，请等待完成后再审查。")
-                return
-            self.run_worker(self._execute_task(REVIEW_PROMPT), group="run", exclusive=True)
-            return
-        if prompt == "/export":
-            self.run_worker(self._command_export(), group="run", exclusive=True)
-            return
-        if prompt == "/copy":
-            self._command_copy()
-            return
-        if prompt == "/theme" or prompt.startswith("/theme "):
-            self._command_theme(prompt.removeprefix("/theme").strip())
-            return
-        if prompt == "/archive":
-            self.run_worker(self._command_archive(), group="run", exclusive=True)
-            return
-        if prompt.split(maxsplit=1)[0] in _CLI_ONLY_COMMANDS:
-            self._append_system("该命令请在行式 CLI 中使用（非 TTY 或 deity run 的行式界面）。")
-            return
-        if prompt.startswith("/"):
-            self._append_system("未知命令。输入 /help 查看可用命令。")
-            return
-
-    async def _command_status(self) -> None:
-        mode = self._mode_label()
-        status = self.session_status
-        lines = [
-            f"模型：{self.state.model_name}",
-            f"模式：{mode}",
-            f"会话：{self.state.session_id[:8]}",
-            f"工作区：{self._workspace}",
-        ]
-        branch = git_branch(self._workspace)
-        if branch is not None:
-            lines.append(f"分支：{branch}")
-        lines.extend(
-            [
-                f"轮次：{status.turns} · 工具调用：{status.tool_calls} 次",
-                f"Token：{status.token_text()}",
-                f"耗时：{status.elapsed_seconds:.1f}s",
-            ]
-        )
-        context_text = status.context_text()
-        if context_text is not None:
-            # 上下文占用自状态栏瘦身后回归 /status 详情（P2-5）；
-            # context_text 自带「上下文 x/y」文案，直接入列。
-            lines.append(context_text)
-        repo = await SQLiteSessionRepository.open(self.service.db_path)
-        try:
-            messages = await repo.messages(self.state.session_id)
-        finally:
-            await repo.close()
-        count = len([m for m in messages[-8:] if m.get("role") in {"user", "assistant"}])
-        lines.append(f"上下文消息数：{count}（最近 8 条口径）")
-        self._append_system("\n".join(lines))
-
-    async def _command_diff(self) -> None:
-        """工作台 /diff（Codex 式）：工作区未提交改动以可折叠 diff 块挂在对话区。"""
-        result = await workspace_diff(self._workspace)
-        diff_text = str(result.get("diff", ""))
-        untracked = result.get("untracked", [])
-        if not diff_text and not untracked:
-            self._append_system("工作区无未提交改动。")
-            return
-        if diff_text:
-            self._conversation.mount(
-                DiffBlock(None, self._palette, raw_text=diff_text, classes="msg-diff")
-            )
-            self._scroll_end()
-        if untracked:
-            self._append_system(
-                f"未追踪文件（{len(untracked)}）：\n"
-                + "\n".join(f"  + {path}" for path in untracked)
-            )
-
-    async def _command_new(self) -> None:
-        """工作台 /new（Codex 式）：换新会话 id，清屏并重新挂欢迎头。"""
-        self.state.session_id = str(uuid4())
-        self.state.plan_mode = False
-        self._view = None
-        await self._conversation.remove_children()
-        self._mount_welcome()
-        self._append_system("已开始新会话。")
-        self._refresh_status()
-
-    async def _command_archive(self) -> None:
-        """工作台 /archive（Codex 式）：归档当前会话后开始新会话。"""
-        repo = await SQLiteSessionRepository.open(self.service.db_path)
-        try:
-            await repo.archive_session(self.state.session_id, archived=True)
-        finally:
-            await repo.close()
-        self._append_system("已归档上一会话。")
-        await self._command_new()
-
-    # -- /model 弹窗（ADR-023） ------------------------------------------------
-
-    async def _open_model_dialog(self) -> None:
-        """打开模型选择弹窗：列表取 KNOWN_MODELS[provider]，支持过滤。"""
-        known = KNOWN_MODELS.get(self.service.provider_id or "", ())
-        if not known:
-            # 无固定模型列表的提供方：回落到行式文本列表。
-            self._append_system(
-                "\n".join(
-                    model_listing_lines(self.state.model_name, self.service.provider_id or "")
-                )
-            )
-            return
-        self._model_dialog_open = True
-        self.query_one("#model-dialog").add_class("show")
-        filter_input = self.query_one("#model-filter", Input)
-        filter_input.value = ""
-        await self._render_model_list("")
-        filter_input.focus()
-
-    async def _render_model_list(self, filter_text: str) -> None:
-        """按过滤文本重建模型列表行（当前模型标 ●；无匹配时提示）。"""
-        known = KNOWN_MODELS.get(self.service.provider_id or "", ())
-        needle = filter_text.strip().lower()
-        visible = [name for name in known if needle in name.lower()]
-        container = self.query_one("#model-list", VerticalScroll)
-        await container.remove_children()
-        self._model_rows.clear()
-        if not visible:
-            await container.mount(Static("无匹配模型。", classes="msg-system"))
-            return
-        for index, name in enumerate(visible):
-            label = f"● {name}（当前）" if name == self.state.model_name else name
-            bid = f"model-row-{index}"
-            self._model_rows[bid] = name
-            await container.mount(
-                Button(
-                    label,
-                    id=bid,
-                    classes="model-row current" if name == self.state.model_name else "model-row",
-                )
-            )
-
-    async def on_input_changed(self, event: Input.Changed) -> None:
-        """模型弹窗过滤框输入：即时按子串过滤列表。"""
-        if event.input.id == "model-filter" and self._model_dialog_open:
-            await self._render_model_list(event.value)
-
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        """模型弹窗过滤框回车：选中第一个可见候选。"""
-        if event.input.id == "model-filter" and self._model_dialog_open:
-            first = next(iter(self._model_rows.values()), None)
-            if first is not None:
-                self._select_model(first)
-
-    def _select_model(self, name: str) -> None:
-        self.state.model_name = name
-        self._close_model_dialog()
-        self._append_system(f"已切换模型：{name}（仅本次会话内生效，下轮任务生效）。")
-        self._refresh_status()
-
-    def _close_model_dialog(self) -> None:
-        self._model_dialog_open = False
-        self.query_one("#model-dialog").remove_class("show")
-        self.query_one("#model-filter", Input).value = ""
-        if self.is_running:
-            self.query_one("#input", ChatInput).focus()
-
-    async def _command_rename(self, title: str) -> None:
-        """工作台 /rename（ADR-023）：重命名当前会话，侧栏随即刷新新标题。"""
-        if not title:
-            self._append_system("用法：/rename <新标题>")
-            return
-        repo = await SQLiteSessionRepository.open(self.service.db_path)
-        try:
-            await repo.rename_session(
-                self.state.session_id, title, workspace_root=str(self._workspace)
-            )
-        except (KeyError, ValueError) as exc:
-            self._append_system(f"重命名失败：{exc}")
-            return
-        finally:
-            await repo.close()
-        self._append_system(f"已重命名当前会话为：{title.strip()[:80]}")
-        if self.query_one("#sidebar").has_class("show"):
-            await self._fill_sidebar()
-
-    def _command_sandbox(self, arg: str) -> None:
-        """工作台 /sandbox（ADR-023）：无参展示状态；有参切换本次会话策略。"""
-        if not arg:
-            self._append_system("\n".join(sandbox_status_lines(self.service)))
-            return
-        setter = getattr(self.service, "set_sandbox_policy", None)
-        if setter is None:
-            self._append_system("当前服务不支持沙箱策略切换。")
-            return
-        try:
-            setter(arg)
-        except ValueError as exc:
-            self._append_system(f"切换失败：{exc}")
-            return
-        self._append_system(
-            f"已切换沙箱策略为：{arg}（仅本次会话内生效；写入配置文件 [sandbox] policy 可永久生效）。"
-        )
-
-    async def _command_export(self) -> None:
-        """工作台 /export（Codex 式）：当前会话导出为 Markdown 文件。"""
-        target = await export_session_markdown(self.service, self.state.session_id, self._workspace)
-        if target is None:
-            self._append_system("当前会话暂无消息可导出。")
-            return
-        self._append_system(f"已导出：{target}")
-
-    def _command_copy(self) -> None:
-        """工作台 /copy（Codex 式）：复制上一轮回答文本到剪贴板。"""
-        text = self._view.text if self._view is not None else ""
-        if not text:
-            self._append_system("暂无可复制的回答。")
-            return
-        self.copy_to_clipboard(text)
-        self._append_system("已复制上一轮回答。")
-
-    def _command_theme(self, arg: str) -> None:
-        """工作台 /theme（Codex 式）：切换深浅主题；无参数时在两者间切换。"""
-        name = arg.strip().lower()
-        if name == "dark":
-            dark = True
-        elif name == "light":
-            dark = False
-        elif name == "":
-            dark = self.theme != "deity-dark"
-        else:
-            self._append_system("用法：/theme [dark|light]")
-            return
-        self.theme = "deity-dark" if dark else "deity-light"
-        self._palette = palette(dark=dark)
-        self._append_system(f"已切换到{'深色' if dark else '浅色'}主题。")
-        self._refresh_status()
-
-    def _command_tools(self, prompt: str) -> None:
-        view = self._view
-        if view is None or not view.tools:
-            self._append_system(
-                "上一轮没有工具调用记录。先完成一轮会用到工具的任务，再用 /tools 查看。"
-            )
-            return
-        parts = prompt.split(maxsplit=1)
-        targets = (
-            [view.tools[parts[1].strip()]]
-            if len(parts) == 2 and parts[1].strip() in view.tools
-            else list(view.tools.values())
-        )
-        if len(parts) == 2 and parts[1].strip() not in view.tools:
-            self._append_system(f"未找到工具调用：{parts[1].strip()}")
-            return
-        for node in targets:
-            self._toggle_tool_node(node.call_id)
-
-    def _command_auto(self) -> None:
-        """进入/退出自动接受模式；进入走桥的显式确认（confirm 面板）。"""
-        controller = self._bridge.controller
-        if controller.mode == "auto":
-            controller.exit_auto()
-            self._append_system("已退出自动接受模式，恢复 ask。")
-            self._refresh_status()
-            return
-        self.run_worker(self._auto_worker(), group="prompt", exclusive=False)
-
-    async def _auto_worker(self, *, came_from_plan: bool = False) -> None:
-        accepted = await asyncio.to_thread(self._bridge.request_auto)
-        if accepted:
-            if came_from_plan:
-                # Shift+Tab 自计划模式切入：显式确认通过后才离开计划
-                # 模式；取消确认时不进自动接受、仍留在计划模式。
-                self.state.plan_mode = False
-            self._append_system("已进入自动接受模式。输入 /normal 退出并恢复 ask。")
-        self._refresh_status()
-
-    async def _command_sessions(self, prompt: str) -> None:
-        parts = prompt.split(maxsplit=1)
-        repo = await SQLiteSessionRepository.open(self.service.db_path)
-        try:
-            items = await repo.sessions(include_archived=True)
-        finally:
-            await repo.close()
-        if len(parts) == 2:
-            target = parts[1].strip()
-            if self._run_active:
-                self._append_system("有 Run 在运行，结束后再切换会话。")
-                return
-            if not any(item["id"] == target for item in items):
-                self._append_system(f"未知会话：{target}")
-                return
-            self._apply_session_switch(target)
-            return
-        if not items:
-            self._append_system("（暂无已存储会话）直接在下方输入任务即可开始新会话。")
-            return
-        lines = []
-        for item in items:
-            marker = "●" if item["id"] == self.state.session_id else " "
-            archived = " [已归档]" if item["archived"] == "1" else ""
-            title = f"  {item['title']}" if item["title"] else ""
-            lines.append(f"{marker} {item['id'][:8]}  {item['workspace']}{title}{archived}")
-        lines.append("切换会话：/sessions <完整会话ID>")
-        self._append_system("\n".join(lines))
-
-    async def _command_build(self, prompt: str) -> None:
-        if self._run_active:
-            self._append_system("当前有 Run 在运行；结束后再执行 Build。")
-            return
-        tokens = shlex.split(prompt)
-        plan_id: str | None = None
-        allow_dirty: list[str] = []
-        index = 1
-        while index < len(tokens):
-            token = tokens[index]
-            if token == "--allow-dirty" and index + 1 < len(tokens):
-                allow_dirty.append(tokens[index + 1])
-                index += 2
-                continue
-            if plan_id is None:
-                plan_id = token
-            index += 1
-        plan_id = plan_id or self._last_plan_id
-        if plan_id is None:
-            self._append_system("暂无计划：先 /plan 进入计划模式并提交任务，或 /build <计划ID>。")
-            return
-
-        async def execute() -> None:
-            self._run_active = True
-            self._refresh_status()
-            try:
-                allowed = await self._authorize_dirty(plan_id, tuple(allow_dirty))
-                if allowed is None:
-                    return
-                result = await build_approved(self.service, plan_id, allowed)
-                await self._append_assistant_final(result.final_text or "无最终回答")
-            except (ModelFailure, ProtocolError, BudgetExceeded, ValueError, OSError) as exc:
-                self._append_error(f"运行失败：{run_error_message(exc)}")
-            finally:
-                self._run_active = False
-                self._refresh_status()
-
-        self.run_worker(execute(), group="run", exclusive=True)
-
-    async def _command_resume(self, prompt: str) -> None:
-        parts = prompt.split(maxsplit=1)
-        if len(parts) != 2 or not parts[1].strip():
-            hint = f"（最近一次：{self._last_run_id[:8]}）" if self._last_run_id else ""
-            self._append_system(f"用法：/resume <运行ID>{hint}")
-            return
-        if self._run_active:
-            self._append_system("当前有 Run 在运行；结束后再恢复。")
-            return
-        run_id = parts[1].strip()
-
-        async def execute() -> None:
-            self._run_active = True
-            self._current_run_id = run_id
-            self._refresh_status()
-            try:
-                result = await self.service.resume(run_id)
-                self._last_run_id = result.run_id
-                await self._append_assistant_final(result.final_text or "无最终回答")
-                self._append_system(f"恢复完成：{result.run_id[:8]} · {result.status.value}")
-            except (
-                ModelFailure,
-                ProtocolError,
-                BudgetExceeded,
-                ValueError,
-                OSError,
-                KeyError,
-            ) as exc:
-                self._append_error(f"运行失败：{run_error_message(exc)}")
-            finally:
-                self._current_run_id = None
-                self._run_active = False
-                self._refresh_status()
-
-        self.run_worker(execute(), group="run", exclusive=True)
-
 
 def run_interactive(
     service: RunService,
@@ -1973,4 +1088,14 @@ def run_interactive(
     ).run()
 
 
-__all__ = ["ChatInput", "InteractiveApp", "run_interactive"]
+__all__ = [
+    "AVAILABLE_SLASH_COMMANDS",
+    "_WELCOME_EMBLEM",
+    "ChatInput",
+    "DiffBlock",
+    "InteractiveApp",
+    "ScrollThrottler",
+    "ToolBlock",
+    "greeting_for_hour",
+    "run_interactive",
+]

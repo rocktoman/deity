@@ -269,6 +269,7 @@ class ToolResult:
 class ModelEvent:
     kind: Literal[
         "text_delta",
+        "reasoning_delta",
         "tool_call_started",
         "tool_call_arguments_delta",
         "message_completed",
